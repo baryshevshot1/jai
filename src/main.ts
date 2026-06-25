@@ -1,7 +1,8 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 // Модель по умолчанию. Выбор модели из набора — отдельный шаг (выпадающий список).
-const MODEL = "qwen3.5:9b";
+// Текущая выбранная модель (заполняется из списка установленных).
+let selectedModel = "";
 
 // Лёгкая системная подсказка — задаёт тон ассистента.
 const SYSTEM = { role: "system" as const, content: "Ты — полезный ассистент. Отвечай по-русски." };
@@ -26,6 +27,7 @@ let messagesEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
 let sendBtn: HTMLButtonElement;
 let stopBtn: HTMLButtonElement;
+let modelSelectEl: HTMLSelectElement;
 
 // Создаёт пузырь сообщения и возвращает элемент с текстом (для дозаписи).
 function addBubble(role: Role, text: string): HTMLElement {
@@ -61,7 +63,7 @@ function setStreaming(on: boolean) {
 
 async function send() {
   const text = inputEl.value.trim();
-  if (!text || streaming) return;
+  if (!text || streaming || !selectedModel) return;
 
   inputEl.value = "";
   autoGrow();
@@ -101,7 +103,7 @@ async function send() {
 
   try {
     await invoke("chat_stream", {
-      model: MODEL,
+      model: selectedModel,
       messages: [SYSTEM, ...history],
       onEvent,
     });
@@ -121,6 +123,58 @@ function stop() {
   setStreaming(false);
 }
 
+function setComposerEnabled(on: boolean) {
+  inputEl.disabled = !on;
+  sendBtn.disabled = !on;
+}
+
+// Тянет список установленных моделей из Ollama (через Rust-команду list_models)
+// и заполняет выпадающий список в шапке.
+async function loadModels() {
+  let models: string[];
+  try {
+    models = await invoke<string[]>("list_models");
+  } catch (err) {
+    showModelHint("Ollama недоступна");
+    addError(`Не удалось получить список моделей: ${err}`);
+    return;
+  }
+
+  if (models.length === 0) {
+    showModelHint("Модели не установлены");
+    addError(
+      "Модели не установлены. Установите модель командой, например: ollama pull qwen3.5:9b",
+    );
+    return;
+  }
+
+  modelSelectEl.innerHTML = "";
+  for (const name of models) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    modelSelectEl.appendChild(opt);
+  }
+  // Предпочитаем целевую базовую модель, если она установлена; иначе — первую.
+  const preferred = "qwen3.5:9b";
+  selectedModel = models.includes(preferred) ? preferred : models[0];
+  modelSelectEl.value = selectedModel;
+  modelSelectEl.disabled = false;
+  setComposerEnabled(true);
+  inputEl.focus();
+}
+
+// Показывает в списке одиночную подсказку и блокирует ввод (нет моделей / нет Ollama).
+function showModelHint(text: string) {
+  modelSelectEl.innerHTML = "";
+  const opt = document.createElement("option");
+  opt.textContent = text;
+  modelSelectEl.appendChild(opt);
+  modelSelectEl.disabled = true;
+  selectedModel = "";
+  setComposerEnabled(false);
+}
+
 // Авто-высота поля ввода под текст.
 function autoGrow() {
   inputEl.style.height = "auto";
@@ -132,7 +186,10 @@ window.addEventListener("DOMContentLoaded", () => {
   inputEl = document.querySelector("#chat-input")!;
   sendBtn = document.querySelector("#send-btn")!;
   stopBtn = document.querySelector("#stop-btn")!;
-  document.querySelector("#model-label")!.textContent = MODEL;
+  modelSelectEl = document.querySelector("#model-select")!;
+  modelSelectEl.addEventListener("change", () => {
+    selectedModel = modelSelectEl.value;
+  });
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -147,5 +204,7 @@ window.addEventListener("DOMContentLoaded", () => {
       send();
     }
   });
-  inputEl.focus();
+
+  setComposerEnabled(false); // включим, когда загрузится список моделей
+  loadModels();
 });

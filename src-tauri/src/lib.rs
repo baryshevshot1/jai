@@ -80,11 +80,39 @@ async fn chat_stream(
     Ok(())
 }
 
+/// Список установленных моделей из Ollama: GET 127.0.0.1:11434/api/tags.
+/// Возвращаем только имена (поле "name"). Запрос идёт из Rust — правило localhost.
+#[tauri::command]
+async fn list_models() -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:11434/api/tags")
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama вернул ошибку {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let models = json
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(models)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![chat_stream])
+        .invoke_handler(tauri::generate_handler![chat_stream, list_models])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
