@@ -30,6 +30,7 @@ let stopBtn: HTMLButtonElement;
 let modelSelectEl: HTMLSelectElement;
 let statusEl: HTMLElement;
 let refreshBtn: HTMLButtonElement;
+let hwBarEl: HTMLElement;
 
 // Создаёт пузырь сообщения и возвращает элемент с текстом (для дозаписи).
 function addBubble(role: Role, text: string): HTMLElement {
@@ -166,6 +167,48 @@ async function loadModels() {
   inputEl.focus();
 }
 
+// Сведения о железе (из Rust-команды detect_hardware).
+interface HardwareInfo {
+  ram_gb: number;
+  cpu_cores: number;
+  vram_gb: number | null;
+  vram_source: string;
+  tier: "green" | "yellow" | "red";
+}
+
+// «Светофор» железа: определяем ресурсы и показываем полоску под шапкой
+// с рекомендацией модели. Неблокирующая — при сбое показываем нейтральный текст.
+async function loadHardware() {
+  let hw: HardwareInfo;
+  try {
+    hw = await invoke<HardwareInfo>("detect_hardware");
+  } catch {
+    hwBarEl.textContent = "Конфигурация оборудования не определена";
+    hwBarEl.className = "chat__hw";
+    hwBarEl.hidden = false;
+    return;
+  }
+
+  const emoji = hw.tier === "green" ? "🟢" : hw.tier === "yellow" ? "🟡" : "🔴";
+  const rec =
+    hw.tier === "green"
+      ? "рекомендуемая модель: qwen3.5:9b"
+      : hw.tier === "yellow"
+        ? "рекомендуемая модель: qwen3.5:4b"
+        : "рекомендуются модели до 4B";
+
+  const parts = [`ОЗУ ${hw.ram_gb.toFixed(0)} ГБ`, `${hw.cpu_cores} ядер`];
+  if (hw.vram_gb != null) {
+    parts.push(`видеопамять ${hw.vram_gb.toFixed(0)} ГБ`);
+  } else if (hw.vram_source === "unified") {
+    parts.push("общая память");
+  }
+
+  hwBarEl.textContent = `${emoji} ${parts.join(" · ")} — ${rec}`;
+  hwBarEl.className = `chat__hw chat__hw--${hw.tier}`;
+  hwBarEl.hidden = false;
+}
+
 // Мягкая проверка движка: спрашиваем версию Ollama и показываем её в шапке.
 // Неблокирующая — при недоступности просто показываем статус, приложение работает.
 async function checkOllama() {
@@ -213,6 +256,7 @@ window.addEventListener("DOMContentLoaded", () => {
   modelSelectEl = document.querySelector("#model-select")!;
   statusEl = document.querySelector("#status")!;
   refreshBtn = document.querySelector("#refresh-btn")!;
+  hwBarEl = document.querySelector("#hw-bar")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
   });
@@ -234,5 +278,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
   checkOllama();             // неблокирующе: статус движка в шапке
+  loadHardware();            // неблокирующе: светофор железа под шапкой
   loadModels();
 });

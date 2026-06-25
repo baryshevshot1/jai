@@ -55,6 +55,15 @@ html, body { height: 100%; margin: 0; }
 }
 .chat__model:disabled { opacity: 0.6; cursor: default; }
 
+.chat__hw {
+  padding: 8px 16px;
+  font-size: 0.88em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+.chat__hw--green { background-color: #eaf7ea; }
+.chat__hw--yellow { background-color: #fff6e0; }
+.chat__hw--red { background-color: #fdecec; }
+
 .chat__messages {
   flex: 1;
   overflow-y: auto;
@@ -158,5 +167,9 @@ html, body { height: 100%; margin: 0; }
     border-color: rgba(255, 255, 255, 0.2);
   }
   .chat__status--down { color: #ff8a80; }
+  .chat__hw { border-color: rgba(255, 255, 255, 0.12); }
+  .chat__hw--green { background-color: #16301a; }
+  .chat__hw--yellow { background-color: #322b14; }
+  .chat__hw--red { background-color: #3a1d1d; }
   .msg--error { background-color: #3a1d1d; color: #ff8a80; }
 }

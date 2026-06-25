@@ -26,4 +26,11 @@ serde_json = "1"
 # ходим только на http://127.0.0.1, а отказ от TLS убирает зависимость от
 # системного OpenSSL и упрощает сборку под Linux/Windows в CI.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Системная информация (RAM, число ядер) — кроссплатформенно, без сети.
+sysinfo = "0.33"
+
+# Определение видеопамяти на Windows через DXGI (DedicatedVideoMemory).
+# Только под Windows — на Mac/Linux этот крейт не собирается.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Graphics_Dxgi", "Win32_Foundation"] }
 
