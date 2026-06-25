@@ -9,35 +9,24 @@
   </head>
 
   <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <main class="chat">
+      <header class="chat__header">
+        <span class="chat__title">jai</span>
+        <span class="chat__model" id="model-label"></span>
+      </header>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/src/assets/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
-        <a href="https://www.typescriptlang.org/docs" target="_blank">
-          <img
-            src="/src/assets/typescript.svg"
-            class="logo typescript"
-            alt="typescript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <div class="chat__messages" id="messages"></div>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
+      <form class="chat__inputbar" id="chat-form">
+        <textarea
+          id="chat-input"
+          class="chat__input"
+          rows="1"
+          placeholder="Спросите что-нибудь…  (Enter — отправить, Shift+Enter — перенос строки)"
+        ></textarea>
+        <button type="submit" id="send-btn" class="chat__send">Отправить</button>
+        <button type="button" id="stop-btn" class="chat__stop" hidden>Стоп</button>
       </form>
-      <p id="greet-msg"></p>
     </main>
   </body>
 </html>
