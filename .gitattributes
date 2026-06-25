@@ -1,0 +1,21 @@
+# Нормализация переносов строк между Windows / Linux / macOS
+* text=auto eol=lf
+
+# Явно текстовые
+*.rs       text eol=lf
+*.ts       text eol=lf
+*.js       text eol=lf
+*.json     text eol=lf
+*.toml     text eol=lf
+*.md       text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.yml      text eol=lf
+*.sh       text eol=lf
+
+# Бинарные — не трогать
+*.png      binary
+*.ico      binary
+*.icns     binary
+*.gguf     binary
+*.woff2    binary

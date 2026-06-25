@@ -1,0 +1,50 @@
+# ── Логи ───────────────────────────────────────────────
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Зависимости и сборка ───────────────────────────────
+node_modules
+dist
+dist-ssr
+build
+*.local
+src-tauri/target/
+
+# ── Модели и большие бинарники (НИКОГДА в гит) ─────────
+*.gguf
+*.bin
+*.safetensors
+models/
+bin/ollama*
+src-tauri/binaries/
+
+# ── Секреты и подпись (НИКОГДА в гит) ──────────────────
+.env
+.env.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.keystore
+# приватный ключ Tauri updater — только в GitHub Secrets
+*.tauri-key
+
+# ── Сгенерированные лицензии (по желанию можно коммитить) ─
+# THIRD-PARTY-RUST.html
+# THIRD-PARTY-JS.txt
+
+# ── ОС и редакторы ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

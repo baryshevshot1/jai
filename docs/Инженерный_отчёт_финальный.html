@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Инженерный отчёт · Офлайн ИИ-ассистент · Tauri 2 + Ollama</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy:#0A2540;--navy-2:#1a3a5c;--slate:#425466;--muted:#697586;--faint:#8792a2;
+    --line:#e6ebf1;--line-2:#eef2f6;--bg:#ffffff;--bg-soft:#f6f9fc;
+    --accent:#635bff;--accent-d:#4b45c6;--accent-soft:#f1f0ff;--accent-line:#d8d5ff;
+    --green:#0e7c5a;--green-soft:#e6f5ef;--green-line:#bfe3d3;
+    --amber:#9a6a00;--amber-soft:#fdf4e3;--amber-line:#f0dcb4;
+    --rose:#b3261e;--rose-soft:#fdecea;--rose-line:#f3c9c5;
+    --code-bg:#0a1929;--code-ink:#c9d6e3;--code-line:#16293d;
+    --c-cmd:#7ab6ff;--c-str:#7fdca0;--c-com:#5d7088;--c-flag:#e3b778;--c-punct:#9fb0c2;
+    --r:12px;--r-sm:9px;--shadow-sm:0 1px 2px rgba(10,37,64,.06);--shadow:0 2px 5px rgba(10,37,64,.06),0 8px 24px rgba(10,37,64,.05);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;color:var(--slate);background:var(--bg);line-height:1.7;font-size:16px;letter-spacing:-.003em}
+  ::selection{background:var(--accent-soft)}
+  .shell{display:grid;grid-template-columns:268px minmax(0,1fr) 296px;max-width:1480px;margin:0 auto;min-height:100vh}
+  nav.left{position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--bg);border-right:1px solid var(--line);padding:26px 18px 40px}
+  nav.left::-webkit-scrollbar{width:6px}nav.left::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  .brand{display:flex;align-items:center;gap:11px;padding:6px 10px 22px;margin-bottom:6px;border-bottom:1px solid var(--line-2)}
+  .brand .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent-d));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px;box-shadow:var(--shadow-sm)}
+  .brand .tt{font-size:13.5px;font-weight:600;color:var(--navy);line-height:1.25}
+  .brand .tt small{display:block;font-weight:450;color:var(--faint);font-size:11.5px;margin-top:1px}
+  nav.left .grp{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);padding:0 10px 6px;margin-top:20px}
+  nav.left a{display:flex;align-items:center;gap:9px;color:var(--slate);text-decoration:none;padding:6px 10px;border-radius:7px;font-size:13.5px;margin-bottom:1px;transition:.13s;font-weight:450;line-height:1.4}
+  nav.left a:hover{background:var(--bg-soft);color:var(--navy)}
+  nav.left a.active{background:var(--accent-soft);color:var(--accent-d);font-weight:600}
+  nav.left a.sub{padding-left:14px;font-size:13px}
+  nav.left a .nd{margin-left:auto;width:16px;height:16px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;border:1.5px solid var(--line);color:transparent;transition:.18s}
+  nav.left a.s-done .nd{background:var(--green);border-color:var(--green);color:#fff}
+  nav.left a.s-cur .nd{background:#fff;border-color:var(--amber);color:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+  nav.left a.s-cur .nd::after{content:"▸"}
+  nav.left a.s-wait .nd{background:#fff;border-color:var(--line)}
+  main{min-width:0;padding:44px 60px 100px;max-width:780px;margin:0 auto;width:100%}
+  aside.right{position:sticky;top:0;height:100vh;overflow-y:auto;border-left:1px solid var(--line);padding:30px 22px}
+  aside.right::-webkit-scrollbar{width:6px}aside.right::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  .rail-h{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin-bottom:14px}
+  .ring-wrap{display:flex;flex-direction:column;align-items:center;text-align:center;padding:8px 0 18px;border-bottom:1px solid var(--line-2);margin-bottom:18px}
+  .ring{position:relative;width:104px;height:104px;margin-bottom:12px}
+  .ring svg{transform:rotate(-90deg)}
+  .ring .pct{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .ring .pct b{font-size:24px;font-weight:700;color:var(--navy);line-height:1}
+  .ring .pct span{font-size:10.5px;color:var(--faint);margin-top:3px;text-transform:uppercase;letter-spacing:.05em}
+  .ring-cap{font-size:13px;color:var(--muted)}.ring-cap b{color:var(--navy);font-weight:600}
+  .rl-step{display:flex;align-items:flex-start;gap:9px;padding:6px 8px;border-radius:7px;font-size:12.5px;color:var(--slate);text-decoration:none;cursor:pointer;transition:.13s;line-height:1.4}
+  .rl-step:hover{background:var(--bg-soft)}
+  .rl-step .mk{flex-shrink:0;width:17px;height:17px;border-radius:50%;border:1.5px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:transparent;margin-top:1px}
+  .rl-step.s-done .mk{background:var(--green);border-color:var(--green);color:#fff}
+  .rl-step.s-cur .mk{border-color:var(--amber);color:var(--amber)}.rl-step.s-cur .mk::after{content:"▸"}
+  .rl-step.s-done{color:var(--muted)}.rl-step.s-cur{color:var(--navy);font-weight:600}
+  .reset{margin-top:16px;width:100%;background:var(--bg-soft);border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:8px;font-size:12px;cursor:pointer;font-family:inherit;transition:.13s}
+  .reset:hover{background:#fff;color:var(--rose);border-color:var(--rose-line)}
+  .hero{margin-bottom:14px;padding-bottom:30px;border-bottom:1px solid var(--line)}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--accent);margin-bottom:16px}
+  .eyebrow::before{content:"";width:20px;height:2px;background:var(--accent);border-radius:1px}
+  h1{font-size:38px;line-height:1.14;font-weight:700;letter-spacing:-.025em;color:var(--navy);margin-bottom:15px}
+  .hero .sub{font-size:17.5px;color:var(--slate);max-width:600px}
+  .chips{margin-top:24px;display:flex;gap:8px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg-soft);border:1px solid var(--line);padding:6px 13px;border-radius:8px;font-size:13px;color:var(--slate);font-weight:500}
+  h2{font-size:27px;font-weight:700;letter-spacing:-.022em;color:var(--navy);margin:56px 0 7px;line-height:1.2;scroll-margin-top:20px}
+  h2 .hn{color:var(--faint);font-weight:600;margin-right:9px}
+  h2+.lead{font-size:16.5px;color:var(--muted);margin-bottom:26px;max-width:600px}
+  h3{font-size:20px;font-weight:650;letter-spacing:-.015em;color:var(--navy);margin:38px 0 13px}
+  h4{font-size:16px;font-weight:600;color:var(--navy);margin:0 0 6px}
+  p{margin-bottom:14px;color:var(--slate)}p strong,li strong{font-weight:600;color:var(--navy)}
+  ul,ol{margin:0 0 17px 2px;padding-left:22px}li{margin-bottom:8px;color:var(--slate);padding-left:3px}
+  a.src{color:var(--accent);text-decoration:none;font-weight:500;border-bottom:1px solid var(--accent-line);transition:.13s}a.src:hover{border-bottom-color:var(--accent)}
+  code.inline{font-family:'JetBrains Mono',monospace;font-size:12.5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--accent-d)}
+  .compass{display:grid;grid-template-columns:1fr 1fr 1fr;gap:11px;margin:26px 0}
+  .compass .c{border-radius:var(--r-sm);padding:16px 18px;border:1px solid}
+  .compass .have{background:var(--green-soft);border-color:var(--green-line)}
+  .compass .now{background:var(--amber-soft);border-color:var(--amber-line)}
+  .compass .next{background:var(--bg-soft);border-color:var(--line)}
+  .compass .l{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+  .have .l{color:var(--green)}.now .l{color:var(--amber)}.next .l{color:var(--faint)}
+  .compass p{font-size:13.5px;margin:0;color:var(--slate);line-height:1.5}
+  @media(max-width:900px){.compass{grid-template-columns:1fr}}
+  .note{border-radius:var(--r-sm);padding:16px 18px;margin:20px 0;border:1px solid}
+  .note .t{font-weight:650;margin-bottom:4px;font-size:14.5px}.note p{margin:0;font-size:14px;color:var(--slate);line-height:1.6}
+  .note.info{background:var(--accent-soft);border-color:var(--accent-line)}.note.info .t{color:var(--accent-d)}
+  .note.warn{background:var(--amber-soft);border-color:var(--amber-line)}.note.warn .t{color:var(--amber)}
+  .note.ok{background:var(--green-soft);border-color:var(--green-line)}.note.ok .t{color:var(--green)}
+  .note.danger{background:var(--rose-soft);border-color:var(--rose-line)}.note.danger .t{color:var(--rose)}
+  .prompt{border:1px solid var(--line);border-radius:var(--r-sm);margin:20px 0;overflow:hidden;background:var(--bg-soft)}
+  .prompt .hd{display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid var(--line);background:#fff}
+  .prompt .hd .ic{width:19px;height:19px;border-radius:5px;background:linear-gradient(135deg,var(--accent),var(--accent-d));color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+  .prompt .hd .l{font-size:12px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em}
+  .prompt .bd{padding:15px 17px;font-size:14.5px;color:var(--slate);line-height:1.6}
+  .prompt .bd em{font-style:normal;color:var(--navy);background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-family:'JetBrains Mono',monospace;font-size:12.5px}
+  .code{background:var(--code-bg);border-radius:var(--r-sm);margin:16px 0;overflow:hidden;border:1px solid var(--code-line)}
+  .code .bar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px 8px 15px;border-bottom:1px solid var(--code-line)}
+  .code .bar .lb{color:#6f8094;font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:.02em}
+  .copy{background:transparent;color:#8fa6c4;border:1px solid #244a6e;border-radius:6px;padding:5px 11px;font-size:11.5px;font-weight:500;cursor:pointer;transition:.13s;font-family:'Inter',sans-serif;display:flex;align-items:center;gap:6px}
+  .copy:hover{background:#11243a;color:#cddcea;border-color:#2f567e}.copy.done{color:#7fdca0;border-color:#1f4d39}
+  .code pre{padding:15px 17px;overflow-x:auto;margin:0}.code pre::-webkit-scrollbar{height:7px}.code pre::-webkit-scrollbar-thumb{background:#24405c;border-radius:4px}
+  .code code{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--code-ink);line-height:1.7;white-space:pre;display:block}
+  .t-cmd{color:var(--c-cmd)}.t-str{color:var(--c-str)}.t-com{color:var(--c-com)}.t-flag{color:var(--c-flag)}.t-punct{color:var(--c-punct)}
+  .tw{overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:var(--r-sm)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{background:var(--bg-soft);color:var(--navy);text-align:left;padding:11px 15px;font-weight:600;font-size:12.5px;border-bottom:1px solid var(--line)}
+  td{padding:10px 15px;border-bottom:1px solid var(--line-2);vertical-align:top;color:var(--slate)}tr:last-child td{border-bottom:none}td strong{color:var(--navy)}
+  .step{display:flex;gap:16px;margin:22px 0;padding:20px 22px;border:1px solid var(--line);border-radius:var(--r);background:#fff;box-shadow:var(--shadow-sm);transition:.2s;scroll-margin-top:20px;position:relative}
+  .step.s-done{border-color:var(--green-line);background:#fcfffe}
+  .step.s-cur{border-color:var(--amber-line);box-shadow:0 0 0 3px var(--amber-soft),var(--shadow-sm)}
+  .step .marker{flex-shrink:0}
+  .step .dot{width:36px;height:36px;border-radius:10px;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;transition:.2s}
+  .step.s-done .dot{background:var(--green)}.step.s-cur .dot{background:var(--amber)}
+  .step .body{flex:1;min-width:0;padding-top:2px}
+  .step .body h4{margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .badge{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:20px;border:1px solid}
+  .badge.done{background:var(--green-soft);color:var(--green);border-color:var(--green-line)}
+  .badge.cur{background:var(--amber-soft);color:var(--amber);border-color:var(--amber-line)}
+  .ctx{font-size:13.5px;color:var(--muted);margin-bottom:11px;line-height:1.6}.ctx b{color:var(--accent-d);font-weight:600}
+  .done-btn{margin-top:14px;display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);color:var(--slate);border-radius:8px;padding:8px 15px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;transition:.14s}
+  .done-btn:hover{border-color:var(--green-line);color:var(--green);background:var(--green-soft)}
+  .done-btn .chk{width:17px;height:17px;border-radius:50%;border:1.5px solid var(--faint);display:flex;align-items:center;justify-content:center;font-size:10px;color:transparent;transition:.14s}
+  .step.s-done .done-btn{background:var(--green-soft);border-color:var(--green-line);color:var(--green)}
+  .step.s-done .done-btn .chk{background:var(--green);border-color:var(--green);color:#fff}
+  .step.s-done .done-btn .lbl-do{display:none}.done-btn .lbl-undo{display:none}.step.s-done .done-btn .lbl-undo{display:inline}
+  .weekbar{display:flex;align-items:center;gap:13px;margin:34px 0 4px;padding:13px 0 0;border-top:1px solid var(--line)}
+  .weekbar .wk{background:linear-gradient(135deg,var(--accent),var(--accent-d));color:#fff;padding:5px 13px;border-radius:8px;font-weight:600;font-size:12.5px;flex-shrink:0;box-shadow:var(--shadow-sm)}
+  .weekbar .g{color:var(--navy);font-size:14.5px;font-weight:500}
+  .check{background:var(--green-soft);border:1px solid var(--green-line);border-radius:var(--r);padding:22px 24px;margin:28px 0}
+  .check h4{color:var(--green);margin-bottom:14px;font-size:15.5px}
+  .check .it{display:flex;gap:11px;margin-bottom:10px;align-items:flex-start}
+  .check .bx{flex-shrink:0;width:19px;height:19px;border-radius:6px;background:var(--green);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:11px;margin-top:2px}
+  .check .it p{margin:0;font-size:14px;color:var(--slate)}
+  .check .cl{margin-top:15px;padding-top:13px;border-top:1px solid var(--green-line);font-size:14px;color:var(--navy);font-weight:500}
+  .sources{margin:16px 0;padding:13px 16px;background:var(--bg-soft);border:1px solid var(--line);border-radius:var(--r-sm)}
+  .sources .t{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-bottom:7px}
+  .sources ul{margin:0;padding-left:17px}.sources li{font-size:13px;margin-bottom:4px}
+  .aside-card{background:var(--bg-soft);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px;margin:20px 0}.aside-card h4{margin-bottom:9px}
+  /* slider visual demo */
+  .slider-demo{border:1px solid var(--line);border-radius:var(--r);padding:22px 24px;margin:22px 0;background:#fff;box-shadow:var(--shadow-sm)}
+  .slider-demo .track{position:relative;height:6px;background:linear-gradient(90deg,var(--green),var(--amber),var(--rose));border-radius:3px;margin:30px 0 14px}
+  .slider-demo .knob{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:22px;height:22px;border-radius:50%;background:#fff;border:3px solid var(--accent);box-shadow:var(--shadow)}
+  .slider-demo .ends{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);font-weight:500}
+  .slider-demo .ends b{color:var(--navy)}
+  .preset-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:11px;margin:16px 0 0}
+  .preset{border:1px solid var(--line);border-radius:var(--r-sm);padding:14px;text-align:center}
+  .preset .pt{font-weight:600;font-size:13.5px;color:var(--navy);margin-bottom:4px}
+  .preset .pd{font-size:12px;color:var(--muted);line-height:1.45}
+  .preset.fast{border-color:var(--green-line);background:var(--green-soft)}
+  .preset.bal{border-color:var(--accent-line);background:var(--accent-soft)}
+  .preset.qual{border-color:var(--amber-line);background:var(--amber-soft)}
+  @media(max-width:680px){.preset-grid{grid-template-columns:1fr}}
+  footer{margin-top:64px;padding-top:26px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px}footer p{margin-bottom:3px;color:var(--muted)}
+  .mobile-prog{display:none}
+  @media(max-width:1180px){.shell{grid-template-columns:240px minmax(0,1fr)}aside.right{display:none}
+    .mobile-prog{display:flex;position:sticky;top:0;z-index:50;align-items:center;gap:12px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:11px 24px;font-size:13px}
+    .mobile-prog .track{flex:1;height:6px;background:var(--line);border-radius:3px;overflow:hidden}
+    .mobile-prog .fill{height:100%;background:linear-gradient(90deg,var(--green),var(--accent));border-radius:3px;transition:width .3s}.mobile-prog b{color:var(--navy);font-weight:600}}
+  @media(max-width:780px){.shell{grid-template-columns:1fr}nav.left{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}main{padding:28px 22px 80px}h1{font-size:30px}.compass{grid-template-columns:1fr}}
+
+  /* skill pack cards */
+  .packs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:22px 0}
+  @media(max-width:680px){.packs{grid-template-columns:1fr}}
+  .pack{border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;background:#fff;box-shadow:var(--shadow-sm)}
+  .pack .ph{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .pack .pic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+  .pack .pt{font-size:15px;font-weight:650;color:var(--navy);line-height:1.2}
+  .pack .pt small{display:block;font-weight:500;color:var(--faint);font-size:11.5px;margin-top:2px}
+  .pack .pd{font-size:13px;color:var(--slate);line-height:1.5;margin:0 0 10px}
+  .pack .pm{font-size:12px;color:var(--muted);border-top:1px solid var(--line-2);padding-top:9px}
+  .pack .pm b{color:var(--navy);font-weight:600}
+  .pack .tag{display:inline-block;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:20px;margin-top:8px}
+  .pic.base{background:#eef1ff;color:#4b45c6}.tag.base{background:var(--accent-soft);color:var(--accent-d)}
+  .pic.doc{background:#e6f5ef;color:#0e7c5a}.pic.eye{background:#fdf4e3;color:#9a6a00}
+  .pic.tab{background:#e9f3fb;color:#1668b3}.pic.voice{background:#fbe9f3;color:#a3296f}
+  .pic.code{background:#eceef1;color:#425466}.pic.web{background:#e6f0ff;color:#3563c9}
+  .pic.tr{background:#f0ecfb;color:#6a3fc9}
+  /* role preset cards */
+  .role{border:1px solid var(--line);border-radius:var(--r);margin:16px 0;overflow:hidden;background:#fff;box-shadow:var(--shadow-sm)}
+  .role .rh{display:flex;align-items:center;gap:12px;padding:15px 18px;border-bottom:1px solid var(--line-2);background:var(--bg-soft)}
+  .role .ri{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-d));color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+  .role .rt{font-size:16px;font-weight:650;color:var(--navy);line-height:1.2}
+  .role .rt small{display:block;font-weight:500;color:var(--muted);font-size:12px;margin-top:2px}
+  .role .rb{padding:14px 18px}
+  .role .chips2{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+  .role .ch{font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:20px;background:var(--accent-soft);color:var(--accent-d);border:1px solid var(--accent-line)}
+  .role .ch.opt{background:var(--bg-soft);color:var(--muted);border-color:var(--line)}
+  .role .det{font-size:12.5px;color:var(--slate);line-height:1.6}
+  .role .det b{color:var(--navy);font-weight:600}
+  .role .rf{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;padding-top:11px;border-top:1px solid var(--line-2);font-size:12px;color:var(--muted)}
+  .role .rf b{color:var(--navy)}
+  .hwtag{font-size:10.5px;font-weight:700;padding:2px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em}
+  .hwtag.weak{background:var(--green-soft);color:var(--green)}
+  .hwtag.mid{background:#e9f3fb;color:#1668b3}
+  .hwtag.strong{background:var(--amber-soft);color:var(--amber)}
+  /* traffic light */
+  .traffic{display:grid;grid-template-columns:1fr 1fr 1fr;gap:11px;margin:22px 0}
+  @media(max-width:680px){.traffic{grid-template-columns:1fr}}
+  .tl{border-radius:var(--r-sm);padding:15px 16px;border:1px solid;text-align:left}
+  .tl .tld{display:flex;align-items:center;gap:9px;font-weight:650;font-size:14px;margin-bottom:6px}
+  .tl .dot{width:14px;height:14px;border-radius:50%;flex-shrink:0}
+  .tl p{font-size:12.5px;margin:0;line-height:1.5}
+  .tl.g{background:var(--green-soft);border-color:var(--green-line)}.tl.g .tld{color:var(--green)}.tl.g .dot{background:var(--green)}
+  .tl.y{background:var(--amber-soft);border-color:var(--amber-line)}.tl.y .tld{color:var(--amber)}.tl.y .dot{background:#e0a72e}
+  .tl.r{background:var(--rose-soft);border-color:var(--rose-line)}.tl.r .tld{color:var(--rose)}.tl.r .dot{background:var(--rose)}
+  /* memory bar visual */
+  .membar{margin:18px 0;border:1px solid var(--line);border-radius:var(--r-sm);padding:16px 18px;background:#fff}
+  .membar .ml{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:8px}
+  .membar .ml b{color:var(--navy);font-weight:600}.membar .ml span{color:var(--muted)}
+  .membar .track{height:26px;border-radius:7px;background:var(--line-2);overflow:hidden;display:flex}
+  .membar .seg{height:100%;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden}
+  .membar .seg.os{background:#8792a2}.membar .seg.llm{background:var(--accent)}
+  .membar .seg.vl{background:#9a6a00}.membar .seg.ocr{background:#1668b3}
+  .membar .seg.free{background:transparent;color:var(--muted);border-left:1px dashed var(--faint)}
+  .membar .leg{display:flex;flex-wrap:wrap;gap:12px;margin-top:9px;font-size:11.5px;color:var(--muted)}
+  .membar .leg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:middle}
+
+  /* ===== FINAL GUIDE ADDITIONS ===== */
+  /* OS command blocks */
+  .osblock{margin:14px 0}
+  .osblock .osbar{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+  .osbadge{font-size:10.5px;font-weight:700;padding:3px 11px;border-radius:7px;letter-spacing:.03em;text-transform:uppercase}
+  .osbadge.win{background:#e6f0ff;color:#1668b3}
+  .osbadge.mac{background:#eef1f4;color:#333}
+  .osbadge.lnx{background:#fdf0e6;color:#a85a16}
+  .osbadge.all{background:var(--accent-soft);color:var(--accent-d)}
+  .osblock .oslabel{font-size:12px;color:var(--muted)}
+  /* architecture diagram */
+  .arch{border:1px solid var(--line);border-radius:var(--r);padding:22px;margin:22px 0;background:linear-gradient(180deg,#fbfcfe,#f6f9fc)}
+  .arch .layer{margin-bottom:14px}
+  .arch .layer:last-child{margin-bottom:0}
+  .arch .ltitle{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-bottom:7px}
+  .arch .boxes{display:flex;gap:10px;flex-wrap:wrap}
+  .arch .abox{flex:1;min-width:150px;border:1px solid var(--line);border-radius:9px;padding:12px 14px;background:#fff;box-shadow:var(--shadow-sm)}
+  .arch .abox .an{font-size:13.5px;font-weight:650;color:var(--navy);margin-bottom:3px;display:flex;align-items:center;gap:7px}
+  .arch .abox .ad{font-size:11.5px;color:var(--muted);line-height:1.5}
+  .arch .abox.a-shell{border-color:var(--accent-line);background:var(--accent-soft)}
+  .arch .abox.a-engine{border-color:#bfe3d3;background:var(--green-soft)}
+  .arch .arrow{text-align:center;color:var(--faint);font-size:18px;margin:2px 0;line-height:1}
+  .arch .aico{width:24px;height:24px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+  /* event chain flow */
+  .flow{counter-reset:fl;margin:20px 0}
+  .flow .fl{position:relative;padding:0 0 18px 44px;border-left:2px solid var(--line);margin-left:14px}
+  .flow .fl:last-child{border-left-color:transparent;padding-bottom:0}
+  .flow .fl::before{counter-increment:fl;content:counter(fl);position:absolute;left:-15px;top:-2px;width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .flow .fl .flt{font-size:14px;font-weight:600;color:var(--navy);margin-bottom:2px}
+  .flow .fl .fld{font-size:13px;color:var(--slate);line-height:1.55}
+  /* scenario cards */
+  .scen{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0}
+  @media(max-width:760px){.scen{grid-template-columns:1fr}}
+  .scenc{border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;background:#fff;box-shadow:var(--shadow-sm)}
+  .scenc.primary{border-color:var(--green-line);background:var(--green-soft)}
+  .scenc .sct{font-size:15px;font-weight:650;color:var(--navy);margin-bottom:6px;display:flex;align-items:center;gap:9px}
+  .scenc .sctag{font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;background:var(--green);color:#fff;text-transform:uppercase;letter-spacing:.03em}
+  .scenc p{font-size:13px;color:var(--slate);line-height:1.55;margin:0 0 8px}
+  .scenc ul{margin:0 0 0 2px;padding-left:18px}.scenc li{font-size:12.5px;margin-bottom:4px}
+
+  /* four rules of careful install */
+  .rules{margin:16px 0}
+  .rule{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-bottom:1px solid var(--line-2)}
+  .rule:last-child{border-bottom:none}
+  .rule .rn{width:26px;height:26px;border-radius:50%;background:var(--green-soft);color:var(--green);font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .rule div:last-child{font-size:13.5px;color:var(--slate);line-height:1.55}
+  .rule b{color:var(--navy);font-weight:600}
+
+  .shell.report{grid-template-columns:280px minmax(0,1fr)}
+  @media(max-width:1180px){.shell.report{grid-template-columns:240px minmax(0,1fr)}}
+  @media(max-width:780px){.shell.report{grid-template-columns:1fr}}
+  main.rep{max-width:840px}
+  .verdict{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin:24px 0}
+  @media(max-width:760px){.verdict{grid-template-columns:1fr}}
+  .vc{border:1px solid var(--line);border-radius:12px;padding:16px 16px 15px;background:var(--bg)}
+  .vc .vh{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);margin-bottom:8px}
+  .vc .vt{font-size:15px;font-weight:600;color:var(--navy);line-height:1.35;margin-bottom:6px}
+  .vc .vd{font-size:13px;color:var(--slate);line-height:1.5}
+  .vc.go{background:var(--green-soft);border-color:var(--green-line)}
+  .vc.go .vt{color:var(--green)}
+  .tag-ok{display:inline-block;background:var(--green-soft);color:var(--green);border:1px solid var(--green-line);border-radius:6px;padding:1px 8px;font-size:11px;font-weight:600;white-space:nowrap}
+  .tag-no{display:inline-block;background:#fdecec;color:#c0392b;border:1px solid #f5c6c6;border-radius:6px;padding:1px 8px;font-size:11px;font-weight:600;white-space:nowrap}
+  .tag-l{display:inline-block;background:var(--accent-soft);color:var(--accent-d);border:1px solid var(--line);border-radius:6px;padding:1px 8px;font-size:11px;font-weight:600;white-space:nowrap}
+  .lede-meta{font-size:13px;color:var(--muted);margin-top:10px}
+  .lede-meta b{color:var(--navy)}
+</style>
+</head><body>
+<div class="shell report">
+<nav class="left">
+  <div class="brand"><div class="logo">ОТ</div><div class="tt">Инженерный отчёт<small>Финальная версия · 2026</small></div></div>
+  <div class="grp">Обзор</div>
+  <a href="#summary">Резюме</a>
+  <a href="#context">Контекст и задача</a>
+  <div class="grp">Ключевые решения</div>
+  <a href="#d-engine">1 · Движок</a>
+  <a href="#d-russian">2 · Русские модели</a>
+  <a href="#d-models">3 · Набор моделей</a>
+  <div class="grp">Инженерия</div>
+  <a href="#channel">Канал поставки моделей</a>
+  <a href="#ops">Операционный слой</a>
+  <a href="#perf">Железо и скорость</a>
+  <div class="grp">Поставка</div>
+  <a href="#fz152">Соответствие 152-ФЗ</a>
+  <a href="#licenses">Лицензии</a>
+  <a href="#roadmap">Дорожная карта</a>
+  <div class="grp">Приложения</div>
+  <a href="#caveats">Открытые вопросы</a>
+  <a href="#sources">Источники</a>
+</nav>
+<main class="rep">
+
+<header class="hero">
+  <span class="eyebrow">Инженерный отчёт · офлайн ИИ-ассистент · Tauri 2 + Ollama</span>
+  <h1>Финальные решения и набор моделей</h1>
+  <p class="sub">Сводный технический отчёт по продукту: три ключевых решения (движок, русские модели, набор моделей), операционный слой, соответствие 152-ФЗ, лицензии и дорожная карта. Все выводы проверены по официальным источникам 2026 года и согласованы с итоговым руководством по разработке.</p>
+  <p class="lede-meta"><b>Продукт:</b> боксовый офлайн-ассистент для российского бизнеса · <b>Стек:</b> Tauri 2 (Rust + TypeScript), единственный движок Ollama · <b>Процесс:</b> разработка на macOS, выпуск Linux + Windows через GitHub Actions · <b>Ориентир железа:</b> NVIDIA 6 ГБ VRAM / 64 ГБ RAM.</p>
+</header>
+
+<section>
+<h2 id="summary"><span class="hn">◆</span>Резюме</h2>
+<p class="lead">Три решения определяют архитектуру и набор моделей продукта.</p>
+<div class="verdict">
+  <div class="vc go"><div class="vh">Решение 1 · Движок</div><div class="vt">Один Ollama в MVP</div><div class="vd">Второй движок (llama.cpp) не нужен: Ollama построен поверх него и крутит те же модели. llama.cpp оправдан только для речи — Стадия 2.</div></div>
+  <div class="vc go"><div class="vh">Решение 2 · Русский</div><div class="vt">Гибрид, не обязателен</div><div class="vd">База — Qwen (хорошо справляется с русским). Русский профиль T-lite подключается опционально для ролей с интенсивным деловым текстом.</div></div>
+  <div class="vc go"><div class="vh">Решение 3 · Набор</div><div class="vt">Зафиксирован</div><div class="vd">Базовый набор — Qwen3.5-9B + bge-m3 + sqlite-vec. Зрение/код/русский — под роль. Мощное железо и речь — отдельно.</div></div>
+</div>
+<p>Подход признан рабочим и эффективным для MVP. Главное, что было исправлено относительно ранних версий: канал поставки русских моделей (они на Hugging Face, а не в реестре Ollama) и операционный слой (хранение, обновление, диагностика, безопасность), которого раньше не хватало. Эти выводы уже внедрены в руководство по разработке.</p>
+</section>
+
+<section>
+<h2 id="context"><span class="hn">◆</span>Контекст и задача</h2>
+<p class="lead">Что за продукт и какие ограничения формируют решения.</p>
+<p>Продукт — десктоп-приложение, которое после установки работает <strong>полностью офлайн</strong>: данные не покидают компьютер клиента (152-ФЗ), у клиента нет терминала. Бизнес-модель — установка под ключ. Разработка ведётся только на macOS через Claude Code; продукт выпускается под Linux и Windows, сборка установщиков — через GitHub Actions, поскольку Tauri не умеет кросс-компиляцию.</p>
+<p>Эти ограничения задают рамку для всех технических решений: минимум точек отказа на чистой машине клиента, предсказуемая офлайн-работа, простота сопровождения не-программистом, и приоритет моделей с открытой лицензией, доступных из РФ.</p>
+</section>
+
+<section>
+<h2 id="d-engine"><span class="hn">1</span>Решение 1: движок — один Ollama</h2>
+<p class="lead">Второй движок llama.cpp в MVP не добавляем. Разбор честный, без предвзятости.</p>
+<p>Ключевой факт: <strong>Ollama построен поверх llama.cpp</strong> и запускает те же GGUF-модели. Поэтому «добавить llama.cpp» не означает «получить другие или лучшие модели» — это лишь второй движок ради тонкого контроля и отдельных фич.</p>
+<div class="tw"><table>
+  <tr><th>Аспект</th><th>Что даёт llama.cpp сверх Ollama</th><th>Нужно ли нам в MVP</th></tr>
+  <tr><td>Модели</td><td>Ничего — те же GGUF</td><td><span class="tag-no">Нет</span></td></tr>
+  <tr><td>Скорость (один пользователь)</td><td>Быстрее лишь на ~3–10% на NVIDIA</td><td><span class="tag-no">Несущественно</span></td></tr>
+  <tr><td>Тонкий контроль инференса, грамматики</td><td>Больше флагов; structured output в Ollama закрывается параметром format</td><td><span class="tag-no">Избыточно</span></td></tr>
+  <tr><td>Речь (STT/TTS)</td><td>Ollama не умеет речь вообще; нужен whisper.cpp + Piper/Kokoro</td><td><span class="tag-l">Только Стадия 2</span></td></tr>
+</table></div>
+<p>Цена второго движка для боксового офлайн-продукта высока: второй процесс и порт, отдельный провижининг под три ОС, рост размера установщика и новый класс багов (особенно Windows с видеокартами AMD/Intel). Для не-программиста-заказчика и слабого железа это явный минус.</p>
+<div class="note ok"><div class="t">Вывод</div><p>В MVP — один движок Ollama с аккуратным провижинингом (обнаружить/установить, проверить версию, корректно гасить группу процессов). Второй движок (llama.cpp) подключаем только когда в объём войдёт речь — это Стадия 2.</p></div>
+</section>
+
+<section>
+<h2 id="d-russian"><span class="hn">2</span>Решение 2: русские модели — гибрид</h2>
+<p class="lead">Отдельные русские модели не обязательны, но дают измеримую пользу в нишевых ролях.</p>
+<p>Общие модели Qwen3.5/Qwen3.6 многоязычны и уверенно работают с русским деловым текстом. Специализированные русские модели T-tech дают прибавку прежде всего за счёт <strong>плотного кириллического токенизатора</strong> (меньше токенов на русский текст → быстрее инференс и больше полезного контекста) и за счёт tool-calling. По независимому русскому бенчмарку прибавка измеримая, но небольшая.</p>
+<div class="tw"><table>
+  <tr><th>Вариант</th><th>Плюсы</th><th>Минусы</th></tr>
+  <tr><td>Только Qwen</td><td>Один канал (реестр Ollama), без VPN, проще поставка</td><td>Русский «с запасом», но без узкой оптимизации</td></tr>
+  <tr><td>Только русские (T-tech)</td><td>Лучший русский, экономия контекста</td><td>Канал — Hugging Face (доступ из РФ нестабилен), сложнее поставка</td></tr>
+  <tr><td><b>Гибрид (выбрано)</b></td><td>База Qwen без проблем поставки + русский профиль T-lite под нужные роли</td><td>Нужно поддержать два источника моделей</td></tr>
+</table></div>
+<div class="note ok"><div class="t">Вывод</div><p>Базовая текстовая модель — Qwen (реестр Ollama, Apache 2.0). <strong>T-lite-it-2.1</strong> подключается опционально как «русский профиль» для ролей с интенсивным русским деловым текстом (бухгалтерия, юристы, документы). T-pro-it-2.1 — только для мощного железа. Так берём выгоду русской специализации без жёсткой зависимости всего продукта от Hugging Face.</p></div>
+</section>
+
+<section>
+<h2 id="d-models"><span class="hn">3</span>Решение 3: финальный набор моделей</h2>
+<p class="lead">Зафиксированный набор по категориям, с которым нет проблем по доступности, лицензии и железу. Ориентир «влезает в 6 ГБ VRAM» — квант Q4_K_M при умеренном контексте.</p>
+<div class="tw"><table>
+  <tr><th>Категория</th><th>Модель · тег</th><th>Источник</th><th>Q4_K_M</th><th>Лиценз.</th><th>6 ГБ VRAM</th></tr>
+  <tr><td>Текст (база)</td><td><code class="inline">qwen3.5:9b</code></td><td>реестр Ollama</td><td>~5.5 ГБ</td><td>Apache 2.0</td><td>впритык, ≤8k</td></tr>
+  <tr><td>Текст (слабое железо)</td><td><code class="inline">qwen3.5:4b</code></td><td>реестр Ollama</td><td>~2.5 ГБ</td><td>Apache 2.0</td><td>да</td></tr>
+  <tr><td>Русский (профиль)</td><td><code class="inline">hf.co/t-tech/T-lite-it-2.1-GGUF</code></td><td>Hugging Face</td><td>5.03 ГБ</td><td>Apache 2.0</td><td>впритык</td></tr>
+  <tr><td>Русский (мощное)</td><td><code class="inline">hf.co/t-tech/T-pro-it-2.1-GGUF</code></td><td>Hugging Face</td><td>19.8 ГБ</td><td>Apache 2.0</td><td>нет</td></tr>
+  <tr><td>Зрение + OCR</td><td><code class="inline">qwen3-vl:8b</code> (или <code class="inline">:4b</code>)</td><td>реестр Ollama</td><td>~6 ГБ</td><td>Apache 2.0</td><td>на грани</td></tr>
+  <tr><td>Документы (RAG)</td><td><code class="inline">bge-m3</code> + sqlite-vec</td><td>реестр Ollama</td><td>~1.2 ГБ</td><td>MIT</td><td>да</td></tr>
+  <tr><td>Код</td><td><code class="inline">qwen3-coder</code></td><td>реестр Ollama</td><td>под железо</td><td>Apache 2.0</td><td>младший</td></tr>
+</table></div>
+<div class="scen">
+  <div class="scenc"><div class="sct">Базовый набор <span class="sctag">ставится сразу</span></div><p>qwen3.5:9b (или 4b на слабом железе) + bge-m3 + sqlite-vec.</p></div>
+  <div class="scenc"><div class="sct">Под роль <span class="sctag">опционально</span></div><p>qwen3-vl (зрение/OCR), qwen3-coder (код), T-lite (русский профиль).</p></div>
+  <div class="scenc"><div class="sct">Мощное железо <span class="sctag">≥24–32 ГБ RAM</span></div><p>qwen3.6 / T-pro-it-2.1.</p></div>
+  <div class="scenc"><div class="sct">Стадия 2 <span class="sctag">позже</span></div><p>Речь: whisper.cpp (STT) + Piper/Kokoro (TTS) — там же второй движок.</p></div>
+</div>
+<div class="note info"><div class="t">Зрение и OCR — одной моделью</div><p><code class="inline">qwen3-vl</code> закрывает и анализ изображений, и распознавание текста/таблиц (в т.ч. русский). Отдельный OCR-движок в MVP не нужен; топовый разбор очень сложных табличных сканов — Стадия 2 при недостаточном качестве.</p></div>
+</section>
+
+<section>
+<h2 id="channel"><span class="hn">◆</span>Канал поставки моделей</h2>
+<p class="lead">Главная корректировка относительно ранних версий: два источника, разведённые явно.</p>
+<p>Общие модели берутся из <strong>реестра Ollama</strong> — он доступен из РФ без VPN. Русские модели T-tech <strong>в реестре Ollama отсутствуют</strong> — они опубликованы на Hugging Face и ставятся через синтаксис <code class="inline">hf.co/...</code>. Команда вида <code class="inline">ollama pull t-tech/...</code> не работает.</p>
+<div class="code"><div class="bar"><span class="lb">Установка моделей</span></div><pre><code><span class="t-com"># общие — из реестра Ollama</span>
+<span class="t-cmd">ollama</span> pull qwen3.5:9b
+<span class="t-com"># русские — с Hugging Face (НЕ ollama pull t-tech/...)</span>
+<span class="t-cmd">ollama</span> run hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M
+<span class="t-com"># постоянная модель через Modelfile</span>
+FROM hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M
+<span class="t-cmd">ollama</span> create t-lite-ru <span class="t-flag">-f</span> Modelfile
+<span class="t-com"># офлайн-резерв с диска (сверить sha256)</span>
+FROM ./T-lite-it-2.1-Q4_K_M.gguf</code></pre></div>
+<div class="note warn"><div class="t">Доступ к Hugging Face из РФ</div><p>Доступ нестабилен (в т.ч. из-за Xet-бэкенда). Поскольку русские модели — ядро ценности для РФ-бизнеса, для них предусмотрен резервный сценарий: офлайн-диск с заранее скачанными <code class="inline">.gguf</code> и установкой через <code class="inline">FROM ./file.gguf</code> со сверкой sha256.</p></div>
+</section>
+
+<section>
+<h2 id="ops"><span class="hn">◆</span>Операционный слой</h2>
+<p class="lead">То, что делает продукт пригодным к эксплуатации у клиента. Этого слоя не хватало в ранних версиях — теперь он добавлен.</p>
+<div class="tw"><table>
+  <tr><th>Область</th><th>Решение</th></tr>
+  <tr><td><b>Хранение</b></td><td>Модели Ollama — предсказуемый каталог через <code class="inline">OLLAMA_MODELS</code>; данные приложения (история, индекс sqlite-vec, настройки) — через Tauri path API (appDataDir/appConfigDir/appLogDir). Модели и данные переживают обновление; на диск заложить ~2–4 ГБ под движок + размер моделей.</td></tr>
+  <tr><td><b>Обновление</b></td><td>Tauri updater подписывает апдейты своим ключом (отдельно от подписи кода ОС), endpoint собственный, проверка неблокирующая (без сети приложение работает). Модели — через <code class="inline">/api/tags</code> (не качать повторно), <code class="inline">/api/pull</code> (докачка слоёв), <code class="inline">/api/delete</code> (чистка).</td></tr>
+  <tr><td><b>Диагностика</b></td><td>Логи через <code class="inline">tauri-plugin-log</code> в appLogDir; встроенный экран «Проверка системы» (версия движка, модели, место, порт, RAM/VRAM, тест генерации, сбор логов). Понятные сообщения вместо «зависания».</td></tr>
+  <tr><td><b>Безопасность</b></td><td>Ollama только на <code class="inline">127.0.0.1:11434</code> (никогда 0.0.0.0), сужённый <code class="inline">OLLAMA_ORIGINS</code>, без облака и телеметрии; обработка занятого порта; гасить только свою группу процессов; держать движок пропатченным.</td></tr>
+</table></div>
+<div class="note info"><div class="t">Минимальная версия движка</div><p>В провижининге проверяется <code class="inline">/api/version</code>. Эффективный минимум — наибольшее из требований: зрение qwen3-vl требует ≥0.12.7, патчи безопасности — ≥0.17.1; практический ориентир — стабильная ветка 0.30.x. Если версия ниже — экран «обновите движок», без молчаливого обновления.</p></div>
+</section>
+
+<section>
+<h2 id="perf"><span class="hn">◆</span>Железо и скорость</h2>
+<p class="lead">Честные ожидания, чтобы продукт не казался «зависшим», и пороги для светофора.</p>
+<div class="traffic">
+  <div class="tl g"><div class="tld"><span class="dot"></span>Зелёный</div><p>8–9B при ≥6 ГБ VRAM или ≥16 ГБ RAM. На ровно 6 ГБ — впритык: контекст ≤8k.</p></div>
+  <div class="tl y"><div class="tld"><span class="dot"></span>Жёлтый</div><p>3–4B при 4 ГБ VRAM или 8 ГБ RAM. Часть на процессоре — медленнее.</p></div>
+  <div class="tl r"><div class="tld"><span class="dot"></span>Красный</div><p>&lt;4 ГБ или модель не влезает — своп, зависание. Заблокировано.</p></div>
+</div>
+<p>Ориентир скорости для модели 8B в Q4_K_M: около <strong>40 токенов/сек на видеокарте RTX 3060</strong>, быстрее на старших картах. На процессоре без GPU — кратно медленнее (единицы токенов/сек). Формула оценки памяти: <code class="inline">(размер файла × 1.15) + KV-кэш + ~0.5 ГБ</code>; резерв ОС <code class="inline">max(3 ГБ, 20% RAM)</code>. При отсутствии интернета на первом запуске продукт честно сообщает «модели не загружены» и предлагает подключить сеть или вставить офлайн-диск.</p>
+</section>
+
+<section>
+<h2 id="fz152"><span class="hn">◆</span>Соответствие 152-ФЗ</h2>
+<p class="lead">Инженерная проверка локальной обработки персональных данных (не юридическая гарантия).</p>
+<p>Продукт обеспечивает техническую локальность: все вычисления и хранение — на ПК клиента, после установки нет исходящего трафика с ПДн, требование локализации (хранение в БД на территории РФ) выполняется автоматически.</p>
+<div class="check">
+  <h4>Инженерный чек-лист</h4>
+  <div class="it"><span class="bx">✓</span><p>Нет исходящего трафика с ПДн — проверить сетевым монитором после установки, зафиксировать в протоколе.</p></div>
+  <div class="it"><span class="bx">✓</span><p>Локальное хранение — история, индекс, файлы только на ПК (appDataDir).</p></div>
+  <div class="it"><span class="bx">✓</span><p>Телеметрия выключена — нет облачных вызовов и аналитики с содержимым.</p></div>
+  <div class="it"><span class="bx">✓</span><p>Обновления без ПДн — updater передаёт только версию/таргет.</p></div>
+  <div class="it"><span class="bx">✓</span><p>Удаление истории — пользователь может стереть данные.</p></div>
+</div>
+<div class="note warn"><div class="t">Граница ответственности</div><p>Продукт даёт техническую локальность. Зона клиента-оператора (организационные меры): согласия субъектов, политика обработки ПДн, уведомление РКН, модель угроз. Это инженерный чек-лист со ссылкой на первоисточник (ФЗ-152), а не юридическая гарантия.</p></div>
+</section>
+
+<section>
+<h2 id="licenses"><span class="hn">◆</span>Лицензии и коммерческое распространение</h2>
+<p class="lead">Все модели финального набора пригодны для коммерции; нужна атрибуция.</p>
+<p>Ollama — MIT. Модели набора: Qwen3.5/3.6, qwen3-vl, qwen3-coder, T-lite/T-pro 2.1 — <strong>Apache 2.0</strong>; bge-m3 — <strong>MIT</strong>; sqlite-vec — Apache-2.0/MIT. Каждую загружаемую модель сверять отдельно (в семействе Qwen встречаются и некоммерческие исследовательские лицензии у отдельных моделей).</p>
+<div class="note info"><div class="t">Что приложить к дистрибутиву</div><p>Агрегированный THIRD-PARTY-LICENSES (Rust — <code class="inline">cargo about</code>, npm — <code class="inline">license-checker</code>) + тексты лицензий моделей (Apache 2.0 / MIT) и Ollama (MIT). В разделе «О программе» — список компонентов с версиями и лицензиями. Требования: MIT — копия лицензии и копирайт; Apache 2.0 — NOTICE (если есть), копирайты, текст лицензии, отметка изменений.</p></div>
+</section>
+
+<section>
+<h2 id="roadmap"><span class="hn">◆</span>Дорожная карта</h2>
+<p class="lead">Что входит в MVP и что включается на Стадии 2 — с явными порогами.</p>
+<div class="tw"><table>
+  <tr><th>Этап</th><th>Состав</th></tr>
+  <tr><td><b>MVP</b></td><td>Один движок Ollama (≥0.17.1, для зрения ≥0.12.7); базовый набор Qwen3.5-9B + bge-m3; русский профиль T-lite, зрение qwen3-vl, код qwen3-coder — под роль; операционный слой (хранение, безопасность, диагностика, обновления); 152-ФЗ-чек-лист; лицензии; CLAUDE.md; выпуск под Linux и Windows через GitHub Actions.</td></tr>
+  <tr><td><b>Стадия 2</b></td><td>Речь (whisper.cpp STT + Piper/Kokoro TTS) — там появляется второй движок; SOTA-OCR табличных сканов; подпись кода (EV для Windows, нотаризация Apple для macOS); поддержка мощного железа (qwen3.6 / T-pro); офлайн-поставка с диска как основной сценарий; macOS-продукт.</td></tr>
+</table></div>
+<div class="tw"><table>
+  <tr><th>Порог включения Стадии 2</th><th>Триггер</th></tr>
+  <tr><td>Второй движок (llama.cpp)</td><td>В ТЗ появилась работа с речью</td></tr>
+  <tr><td>Специализированный OCR</td><td>qwen3-vl даёт &lt;90% на документах клиента</td></tr>
+  <tr><td>Подпись кода</td><td>Переход к рассылке установщиков / выпуск macOS</td></tr>
+  <tr><td>Мощные модели</td><td>У клиентов ≥24–32 ГБ RAM</td></tr>
+</table></div>
+</section>
+
+<section>
+<h2 id="caveats"><span class="hn">◆</span>Открытые вопросы</h2>
+<p class="lead">Честно о том, что нужно проверить на практике.</p>
+<div class="check">
+  <div class="it"><span class="bx">!</span><p>Точные минимальные версии Ollama для Qwen3.5/3.6 реестр прямо не указывает — проверить на стенде (ветка 0.30.x безопасна).</p></div>
+  <div class="it"><span class="bx">!</span><p>Имена телеметрийных переменных Ollama 2026 однозначно не зафиксированы — верифицировать сетевым монитором (отсутствие исходящих после установки).</p></div>
+  <div class="it"><span class="bx">!</span><p>Наличие T-моделей на зеркале ModelScope не подтверждено — проверить перед релизом; иначе резерв — офлайн-диск.</p></div>
+  <div class="it"><span class="bx">!</span><p>Качество русского OCR qwen3-vl на табличных сканах — проверять на реальных документах клиента.</p></div>
+  <div class="it"><span class="bx">!</span><p>Лицензию конкретного тега qwen3-coder сверять на странице модели (семейство Qwen смешанное).</p></div>
+  <div class="it"><span class="bx">!</span><p>Реальная скорость на конкретной 6 ГБ карте варьируется — мерить на целевом стенде.</p></div>
+</div>
+</section>
+
+<section>
+<h2 id="sources"><span class="hn">·</span>Источники</h2>
+<p class="lead">Ключевые официальные источники (2026).</p>
+<div class="tw"><table>
+  <tr><th>Тема</th><th>Ссылка</th></tr>
+  <tr><td>Tauri — дистрибуция, sidecar, WebView2, updater</td><td><a class="src" href="https://v2.tauri.app/distribute/" target="_blank">v2.tauri.app</a></td></tr>
+  <tr><td>Ollama — API, установка, импорт</td><td><a class="src" href="https://docs.ollama.com" target="_blank">docs.ollama.com</a></td></tr>
+  <tr><td>Ollama + GGUF с Hugging Face</td><td><a class="src" href="https://huggingface.co/docs/hub/ollama" target="_blank">huggingface.co/docs/hub/ollama</a></td></tr>
+  <tr><td>Русские модели T-lite / T-pro 2.1</td><td><a class="src" href="https://huggingface.co/t-tech" target="_blank">huggingface.co/t-tech</a></td></tr>
+  <tr><td>Модели (qwen3.5/3.6, qwen3-vl)</td><td><a class="src" href="https://ollama.com/library" target="_blank">ollama.com/library</a></td></tr>
+  <tr><td>sqlite-vec (RAG)</td><td><a class="src" href="https://github.com/asg017/sqlite-vec" target="_blank">github.com/asg017/sqlite-vec</a></td></tr>
+  <tr><td>152-ФЗ «О персональных данных»</td><td><a class="src" href="http://www.consultant.ru/document/cons_doc_LAW_61801/" target="_blank">ФЗ-152 (КонсультантПлюс)</a></td></tr>
+</table></div>
+</section>
+
+<footer>
+  <p>Инженерный отчёт · финальная версия · согласован с руководством по разработке (11 фаз, 42 шага).</p>
+  <p>Все ключевые факты проверены по официальным источникам 2026 года. Москва, 2026.</p>
+</footer>
+
+</main>
+</div>
+<script>
+document.addEventListener('click',function(e){var a=e.target.closest('a[href^="#"]');if(!a)return;var id=a.getAttribute('href').slice(1);if(!id)return;var el=document.getElementById(id);if(el){e.preventDefault();el.scrollIntoView({behavior:'smooth',block:'start'});setTimeout(function(){window.scrollBy(0,-8);},360);}});
+var navLinks=Array.prototype.slice.call(document.querySelectorAll('nav.left a[href^="#"]'));
+function onScroll(){var curId=null;document.querySelectorAll('h2[id]').forEach(function(el){if(el.getBoundingClientRect().top<140)curId=el.id;});navLinks.forEach(function(l){if(l.getAttribute('href')==='#'+curId)l.classList.add('active');else l.classList.remove('active');});}
+window.addEventListener('scroll',onScroll,{passive:true});onScroll();
+</script>
+</body></html>
