@@ -74,7 +74,7 @@ let refreshBtn: HTMLButtonElement;
 let hwBarEl: HTMLElement;
 let convListEl: HTMLElement;
 let newChatBtn: HTMLButtonElement;
-let thinkToggleEl: HTMLInputElement;
+let thinkToggleEl: HTMLButtonElement;
 let themeBtn: HTMLButtonElement;
 let convSearchEl: HTMLInputElement;
 let checkBtn: HTMLButtonElement;
@@ -568,9 +568,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Восстанавливаем тумблер «Размышления» (по умолчанию включён).
   const savedThink = localStorage.getItem("jai.think");
   thinkEnabled = savedThink === null ? true : savedThink === "true";
-  thinkToggleEl.checked = thinkEnabled;
-  thinkToggleEl.addEventListener("change", () => {
-    thinkEnabled = thinkToggleEl.checked;
+  thinkToggleEl.classList.toggle("on", thinkEnabled);
+  thinkToggleEl.addEventListener("click", () => {
+    thinkEnabled = !thinkEnabled;
+    thinkToggleEl.classList.toggle("on", thinkEnabled);
     localStorage.setItem("jai.think", String(thinkEnabled));
   });
 

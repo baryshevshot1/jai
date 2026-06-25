@@ -266,17 +266,6 @@ body {
 .iconbtn svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 2; }
 .divider-v { width: 1px; height: 22px; background: var(--border); }
 
-.chat__think {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--t-sm);
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-}
-.chat__think input { cursor: pointer; }
-
 /* ===================== ЛЕНТА СООБЩЕНИЙ ===================== */
 .feed { flex: 1; overflow-y: auto; }
 .thread {
@@ -379,45 +368,108 @@ body {
   text-align: center;
 }
 
-/* ===================== ПОЛЕ ВВОДА ===================== */
-.chat__inputbar {
+/* ===================== ПОЛЕ ВВОДА (composer) ===================== */
+.composer-wrap { flex-shrink: 0; padding: var(--s4) var(--s6) var(--s5); }
+.composer {
+  max-width: var(--read-w);
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  padding: var(--s3) var(--s3) 10px;
   display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.chat__input {
-  flex: 1;
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow);
+}
+.composer textarea {
+  border: none;
+  background: transparent;
   resize: none;
+  outline: none;
   font-family: inherit;
-  font-size: 1em;
-  line-height: 1.4;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background-color: var(--surface);
+  font-size: var(--t-lg);
+  line-height: 1.5;
   color: var(--text);
-  max-height: 200px;
+  padding: 6px 8px 0;
+  max-height: 160px;
 }
-.chat__input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
-.chat__input:disabled { opacity: 0.6; }
+.composer textarea::placeholder { color: var(--faint); }
+.composer textarea:disabled { opacity: 0.6; }
 
-.chat__send, .chat__stop {
-  align-self: flex-end;
-  padding: 10px 18px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
+.composer-bar { display: flex; align-items: center; gap: var(--s2); }
+.tool {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
   cursor: pointer;
-  color: #fff;
+  transition: 0.12s;
 }
-.chat__send { background-color: var(--accent); }
-.chat__send:hover { background-color: var(--accent-hover); }
-.chat__send:disabled { opacity: 0.5; cursor: default; }
-.chat__stop { background-color: var(--danger); }
-.chat__stop:hover { filter: brightness(0.92); }
+.tool:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+.tool:disabled { opacity: 0.45; cursor: default; }
+.tool svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+.think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--t-base);
+  font-weight: 500;
+  cursor: pointer;
+  transition: 0.15s;
+  user-select: none;
+}
+.think-toggle:hover { border-color: var(--border-strong); color: var(--text); }
+.think-toggle svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+.think-toggle.on {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+:root[data-theme="dark"] .think-toggle.on { color: #fff; }
+
+.send {
+  margin-left: auto;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: 0.12s;
+}
+.send:hover { background: var(--accent-hover); }
+.send:disabled { opacity: 0.5; cursor: default; }
+.send svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2.2; }
+.send--stop { background: var(--danger); }
+.send--stop:hover { background: var(--danger); filter: brightness(0.92); }
+
+.hint {
+  max-width: var(--read-w);
+  margin: var(--s2) auto 0;
+  text-align: center;
+  font-size: var(--t-xs);
+  color: var(--faint);
+}
 
 /* ===================== СКРОЛЛБАРЫ ===================== */
 ::-webkit-scrollbar { width: 11px; height: 11px; }
