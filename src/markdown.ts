@@ -20,21 +20,31 @@ const md = new MarkdownIt({
   html: false,
   linkify: true,
   breaks: true,
-  highlight(str: string, lang: string): string {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return (
-          '<pre class="hljs"><code>' +
-          hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
-          "</code></pre>"
-        );
-      } catch {
-        /* падать на подсветке нельзя — ниже отдадим экранированный текст */
-      }
-    }
-    return '<pre class="hljs"><code>' + escapeHtml(str) + "</code></pre>";
-  },
 });
+
+// Код-блок: обёртка .code с шапкой (язык + «Копировать») и подсветкой.
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  const lang = (token.info || "").trim().split(/\s+/)[0] || "text";
+  let body: string;
+  if (lang !== "text" && hljs.getLanguage(lang)) {
+    try {
+      body = hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value;
+    } catch {
+      body = escapeHtml(token.content);
+    }
+  } else {
+    body = escapeHtml(token.content);
+  }
+  return (
+    '<div class="code"><div class="code-head"><span>' +
+    escapeHtml(lang) +
+    '</span><button class="copy" type="button">Копировать</button></div>' +
+    '<pre class="hljs"><code>' +
+    body +
+    "</code></pre></div>"
+  );
+};
 
 // Формулы $…$ и $$…$$ через KaTeX. throwOnError: false — кривую формулу
 // показываем как есть, без падения рендера.

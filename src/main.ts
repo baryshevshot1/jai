@@ -64,6 +64,7 @@ let streaming = false;
 let thinkEnabled = true;
 
 let messagesEl: HTMLElement;
+let feedEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
 let sendBtn: HTMLButtonElement;
 let stopBtn: HTMLButtonElement;
@@ -79,39 +80,39 @@ let convSearchEl: HTMLInputElement;
 let checkBtn: HTMLButtonElement;
 let settingsBtn: HTMLButtonElement;
 
-// Заполняет пузырь: ответ ассистента — как Markdown/формулы, реплику
-// пользователя — простым текстом (безопаснее, без неожиданной разметки).
-function setBubble(body: HTMLElement, role: Role, text: string) {
-  if (role === "assistant") {
-    body.innerHTML = renderMarkdown(text);
-  } else {
-    body.textContent = text;
-  }
-}
-
-// Создаёт пузырь сообщения и возвращает элемент с текстом (для дозаписи).
+// Создаёт «обмен» (turn) и возвращает контейнер для текста (для дозаписи):
+// пользователь — справа в градиент-пузыре; ассистент — слева с аватаром «j».
 function addBubble(role: Role, text: string): HTMLElement {
-  const row = document.createElement("div");
-  row.className = `msg msg--${role}`;
-  const body = document.createElement("div");
-  body.className = "msg__body";
-  setBubble(body, role, text);
-  row.appendChild(body);
-  messagesEl.appendChild(row);
+  const turn = document.createElement("div");
+  let body: HTMLElement;
+  if (role === "user") {
+    turn.className = "turn me";
+    body = document.createElement("div");
+    body.className = "user-msg";
+    body.textContent = text; // реплику пользователя — простым текстом
+    turn.appendChild(body);
+  } else {
+    turn.className = "turn ai";
+    body = document.createElement("div");
+    body.className = "msg";
+    body.innerHTML = renderMarkdown(text); // ответ — как Markdown/формулы, без аватара/подписи
+    turn.appendChild(body);
+  }
+  messagesEl.appendChild(turn);
   scrollToBottom();
   return body;
 }
 
 function addError(text: string) {
   const row = document.createElement("div");
-  row.className = "msg msg--error";
+  row.className = "err";
   row.textContent = text;
   messagesEl.appendChild(row);
   scrollToBottom();
 }
 
 function scrollToBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  feedEl.scrollTop = feedEl.scrollHeight;
 }
 
 function setStreaming(on: boolean) {
@@ -519,6 +520,7 @@ function autoGrow() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   messagesEl = document.querySelector("#messages")!;
+  feedEl = document.querySelector("#feed")!;
   inputEl = document.querySelector("#chat-input")!;
   sendBtn = document.querySelector("#send-btn")!;
   stopBtn = document.querySelector("#stop-btn")!;
@@ -547,6 +549,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     convFilter = convSearchEl.value;
     renderConvList();
   });
+
+  // Кнопка «Копировать» в код-блоках (через делегирование).
+  messagesEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest(".copy") as HTMLButtonElement | null;
+    if (!btn) return;
+    const pre = btn.closest(".code")?.querySelector("pre");
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent || "");
+    btn.textContent = "✓ Скопировано";
+    setTimeout(() => {
+      btn.textContent = "Копировать";
+    }, 1500);
+  });
+
   initTheme(); // применяем сохранённую/системную тему как можно раньше
 
   // Восстанавливаем тумблер «Размышления» (по умолчанию включён).
