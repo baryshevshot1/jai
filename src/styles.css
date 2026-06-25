@@ -42,6 +42,7 @@
   -moz-osx-font-smoothing: grayscale;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; } /* атрибут hidden должен скрывать всегда, даже при display:grid/flex */
 html, body { height: 100%; margin: 0; }
 body {
   font-family: var(--font-ui);
