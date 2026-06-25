@@ -231,10 +231,16 @@ body {
   line-height: 1;
 }
 .model-pick {
-  padding: 7px 13px;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 7px 32px 7px 13px; /* место справа под свою стрелку */
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
-  background: var(--surface);
+  background-color: var(--surface);
+  /* своя стрелка-шеврон (нативную убрали через appearance:none) */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
   color: var(--text);
   font-family: inherit;
   font-size: var(--t-base);
@@ -524,6 +530,41 @@ body {
   font-size: var(--t-xs);
   color: var(--faint);
 }
+
+/* ===================== МОДАЛЬНОЕ ОКНО ===================== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+}
+.modal {
+  max-width: 360px;
+  width: calc(100% - 48px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  padding: var(--s5);
+}
+.modal__text { font-size: var(--t-lg); color: var(--text); line-height: 1.5; }
+.modal__actions { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: var(--s5); }
+.modal__btn {
+  padding: 8px 16px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--t-base);
+  font-weight: 500;
+  cursor: pointer;
+}
+.modal__btn:hover { border-color: var(--accent); }
+.modal__btn--danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.modal__btn--danger:hover { filter: brightness(0.92); border-color: var(--danger); }
 
 /* ===================== СКРОЛЛБАРЫ ===================== */
 ::-webkit-scrollbar { width: 11px; height: 11px; }

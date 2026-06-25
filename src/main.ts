@@ -91,7 +91,7 @@ let thinkToggleEl: HTMLButtonElement;
 let themeBtn: HTMLButtonElement;
 let convSearchEl: HTMLInputElement;
 let checkBtn: HTMLButtonElement;
-let settingsBtn: HTMLButtonElement;
+let clearBtn: HTMLButtonElement;
 
 // Создаёт «обмен» (turn) и возвращает контейнер для текста (для дозаписи):
 // пользователь — справа в градиент-пузыре; ассистент — слева с аватаром «j».
@@ -173,6 +173,7 @@ function setStreaming(on: boolean) {
   sendBtn.hidden = on;
   stopBtn.hidden = !on;
   inputEl.disabled = on;
+  if (!on && selectedModel) inputEl.focus(); // вернуть фокус в поле после ответа
 }
 
 async function send() {
@@ -303,6 +304,7 @@ async function send() {
 function stop() {
   if (!streaming) return;
   generation++; // «отвязываем» текущий запрос — поздние кусочки игнорируются
+  invoke("cancel_stream").catch(() => {}); // и реально останавливаем генерацию в Ollama
   setStreaming(false);
 }
 
@@ -439,9 +441,45 @@ function newDialog() {
   inputEl.focus();
 }
 
+// Своё модальное подтверждение (нативный confirm() в Tauri-окне не работает).
+function confirmModal(message: string, okLabel = "Удалить"): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal__text"></div>
+        <div class="modal__actions">
+          <button class="modal__btn" data-act="cancel">Отмена</button>
+          <button class="modal__btn modal__btn--danger" data-act="ok"></button>
+        </div>
+      </div>`;
+    overlay.querySelector(".modal__text")!.textContent = message;
+    overlay.querySelector('[data-act="ok"]')!.textContent = okLabel;
+    document.body.appendChild(overlay);
+
+    const close = (result: boolean) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close(false);
+      else if (e.key === "Enter") close(true);
+    };
+    overlay.addEventListener("click", (e) => {
+      const t = e.target as HTMLElement;
+      if (t === overlay || t.dataset.act === "cancel") close(false);
+      else if (t.dataset.act === "ok") close(true);
+    });
+    document.addEventListener("keydown", onKey);
+    (overlay.querySelector('[data-act="ok"]') as HTMLButtonElement).focus();
+  });
+}
+
 // Удаление диалога (с подтверждением — потеря данных необратима).
 async function deleteConversation(id: string) {
-  if (!confirm("Удалить этот диалог? Действие необратимо.")) return;
+  if (!(await confirmModal("Удалить этот диалог? Действие необратимо."))) return;
   try {
     await invoke("delete_conversation", { id });
   } catch (e) {
@@ -455,6 +493,24 @@ async function deleteConversation(id: string) {
   }
 }
 
+// Очистка всех диалогов (вся история стирается с диска).
+async function clearAllConversations() {
+  if (
+    !(await confirmModal(
+      "Удалить ВСЕ диалоги? Вся история будет стёрта безвозвратно.",
+      "Удалить всё",
+    ))
+  )
+    return;
+  try {
+    await invoke("clear_conversations");
+  } catch (e) {
+    addError(`Не удалось очистить диалоги: ${e}`);
+    return;
+  }
+  newDialog(); // начинаем с чистого листа
+}
+
 // При старте: открыть самый свежий диалог или начать пустой.
 async function initConversations() {
   let metas: ConversationMeta[] = [];
@@ -465,8 +521,11 @@ async function initConversations() {
   }
   if (metas.length > 0) {
     await openConversation(metas[0].id); // свежий сверху
-  } else {
-    currentId = crypto.randomUUID(); // пустой новый диалог
+  }
+  // Нет диалогов ИЛИ не удалось открыть (currentId не выставился) — начинаем новый,
+  // иначе следующие сообщения молча не сохранятся (persist требует currentId).
+  if (!currentId) {
+    currentId = crypto.randomUUID();
     await refreshConversationList();
   }
 }
@@ -502,8 +561,11 @@ async function loadModels() {
   }
   // Предпочитаем целевую базовую модель, если она установлена; иначе — первую.
   const names = models.map((m) => m.name);
-  const preferred = "qwen3.5:9b";
-  selectedModel = names.includes(preferred) ? preferred : names[0];
+  // Сохраняем текущий выбор пользователя при «Обновить»; иначе целевая, иначе первая.
+  if (!selectedModel || !names.includes(selectedModel)) {
+    const preferred = "qwen3.5:9b";
+    selectedModel = names.includes(preferred) ? preferred : names[0];
+  }
   modelSelectEl.value = selectedModel;
   modelSelectEl.disabled = false;
   setComposerEnabled(true);
@@ -581,17 +643,23 @@ async function checkOllama() {
 // чтобы подхватить только что скачанные модели без перезапуска приложения.
 async function refreshAll() {
   refreshBtn.disabled = true;
-  await checkOllama();
-  await loadModels();
-  refreshBtn.disabled = false;
+  try {
+    await checkOllama();
+    await loadModels();
+  } finally {
+    refreshBtn.disabled = false;
+  }
 }
 
 // «Проверка»: полная перепроверка движка, железа и списка моделей.
 async function recheck() {
   checkBtn.disabled = true;
-  await checkOllama();
-  await Promise.all([loadHardware(), loadModels()]);
-  checkBtn.disabled = false;
+  try {
+    await checkOllama();
+    await Promise.all([loadHardware(), loadModels()]);
+  } finally {
+    checkBtn.disabled = false;
+  }
 }
 
 // Показывает в списке одиночную подсказку и блокирует ввод (нет моделей / нет Ollama).
@@ -663,7 +731,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   themeBtn = document.querySelector("#theme-btn")!;
   convSearchEl = document.querySelector("#conv-search")!;
   checkBtn = document.querySelector("#check-btn")!;
-  settingsBtn = document.querySelector("#settings-btn")!;
+  clearBtn = document.querySelector("#clear-btn")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности
@@ -672,9 +740,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   newChatBtn.addEventListener("click", newDialog);
   themeBtn.addEventListener("click", toggleTheme);
   checkBtn.addEventListener("click", recheck);
-  settingsBtn.addEventListener("click", () => {
-    alert("Раздел «Настройки» появится в следующем этапе.");
-  });
+  clearBtn.addEventListener("click", clearAllConversations);
   convSearchEl.addEventListener("input", () => {
     convFilter = convSearchEl.value;
     renderConvList();
@@ -686,11 +752,17 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (!btn) return;
     const pre = btn.closest(".code")?.querySelector("pre");
     if (!pre) return;
-    navigator.clipboard.writeText(pre.textContent || "");
-    btn.textContent = "✓ Скопировано";
-    setTimeout(() => {
-      btn.textContent = "Копировать";
-    }, 1500);
+    const restore = () => setTimeout(() => (btn.textContent = "Копировать"), 1500);
+    navigator.clipboard
+      .writeText(pre.textContent || "")
+      .then(() => {
+        btn.textContent = "✓ Скопировано";
+        restore();
+      })
+      .catch(() => {
+        btn.textContent = "Не удалось";
+        restore();
+      });
   });
 
   // Авто-следование за ответом включаем/выключаем по позиции прокрутки.

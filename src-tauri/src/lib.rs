@@ -1,7 +1,11 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 use tauri::Manager;
+
+/// Флаг отмены текущего стрима (нажата «Стоп»). Управляется через состояние Tauri.
+struct CancelFlag(AtomicBool);
 
 /// Одно сообщение в диалоге (роль + текст). Приходит с фронтенда.
 #[derive(Clone, Serialize, Deserialize)]
@@ -29,7 +33,9 @@ async fn chat_stream(
     messages: Vec<ChatMessage>,
     think: bool,
     on_event: Channel<ChatEvent>,
+    cancel: tauri::State<'_, CancelFlag>,
 ) -> Result<String, String> {
+    cancel.0.store(false, Ordering::Relaxed); // новый запрос — сбрасываем «Стоп»
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
@@ -95,6 +101,9 @@ async fn chat_stream(
     // разбираем только целые строки; остаток без \n дочитываем после конца потока.
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if cancel.0.load(Ordering::Relaxed) {
+            break; // нажали «Стоп» — перестаём читать, соединение закроется и Ollama остановит генерацию
+        }
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
@@ -114,6 +123,13 @@ async fn chat_stream(
         }
     }
     Ok(full)
+}
+
+/// «Стоп»: помечаем текущий стрим на отмену. chat_stream увидит флаг и прервёт
+/// чтение — соединение с Ollama закроется, генерация остановится (не жжём GPU).
+#[tauri::command]
+fn cancel_stream(cancel: tauri::State<'_, CancelFlag>) {
+    cancel.0.store(true, Ordering::Relaxed);
 }
 
 /// Модель + флаг поддержки рассуждений (capability "thinking").
@@ -351,6 +367,14 @@ fn conversations_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
     Ok(dir)
 }
 
+/// Атомарная запись: пишем во временный файл и переименовываем. При падении в
+/// момент записи исходный файл не повреждается (важно для истории и настроек).
+fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("Не удалось записать файл: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Не удалось сохранить файл: {e}"))
+}
+
 /// Защита от обхода путей: id формируем сами (UUID), но всё равно проверяем.
 fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -401,7 +425,7 @@ fn save_conversation(app: tauri::AppHandle, conversation: Conversation) -> Resul
     validate_id(&conversation.id)?;
     let path = conversations_dir(&app)?.join(format!("{}.json", conversation.id));
     let text = serde_json::to_string_pretty(&conversation).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("Не удалось сохранить диалог: {e}"))
+    write_atomic(&path, &text)
 }
 
 #[tauri::command]
@@ -410,6 +434,21 @@ fn delete_conversation(app: tauri::AppHandle, id: String) -> Result<(), String> 
     let path = conversations_dir(&app)?.join(format!("{id}.json"));
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Не удалось удалить диалог: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Очистка всех диалогов: удаляем все *.json в каталоге conversations.
+#[tauri::command]
+fn clear_conversations(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = conversations_dir(&app)?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
     Ok(())
 }
@@ -449,15 +488,17 @@ fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), 
     let path = settings_path(&app)?;
     let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))
         .map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("Не удалось сохранить настройку: {e}"))
+    write_atomic(&path, &text)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(CancelFlag(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             chat_stream,
+            cancel_stream,
             list_models,
             ollama_version,
             detect_hardware,
@@ -465,6 +506,7 @@ pub fn run() {
             load_conversation,
             save_conversation,
             delete_conversation,
+            clear_conversations,
             get_setting,
             set_setting
         ])
