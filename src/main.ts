@@ -39,6 +39,10 @@ const history: Message[] = [];
 // id текущего диалога (файл appDataDir/conversations/<id>.json).
 let currentId = "";
 
+// Кэш списка диалогов и текущий фильтр поиска (для отрисовки боковой панели).
+let convMetas: ConversationMeta[] = [];
+let convFilter = "";
+
 // Карточка диалога для боковой панели и полный диалог из файла.
 interface ConversationMeta {
   id: string;
@@ -71,6 +75,9 @@ let convListEl: HTMLElement;
 let newChatBtn: HTMLButtonElement;
 let thinkToggleEl: HTMLInputElement;
 let themeBtn: HTMLButtonElement;
+let convSearchEl: HTMLInputElement;
+let checkBtn: HTMLButtonElement;
+let settingsBtn: HTMLButtonElement;
 
 // Заполняет пузырь: ответ ассистента — как Markdown/формулы, реплику
 // пользователя — простым текстом (безопаснее, без неожиданной разметки).
@@ -222,27 +229,59 @@ function renderHistory() {
   for (const m of history) addBubble(m.role, m.content);
 }
 
-// Обновляет список диалогов в боковой панели.
+// Перечитывает список диалогов из файлов и перерисовывает боковую панель.
 async function refreshConversationList() {
-  let metas: ConversationMeta[];
   try {
-    metas = await invoke<ConversationMeta[]>("list_conversations");
+    convMetas = await invoke<ConversationMeta[]>("list_conversations");
   } catch {
     return;
   }
-  convListEl.innerHTML = "";
-  for (const m of metas) {
-    const item = document.createElement("div");
-    item.className =
-      "sidebar__item" + (m.id === currentId ? " sidebar__item--active" : "");
+  renderConvList();
+}
 
-    const title = document.createElement("span");
-    title.className = "sidebar__title";
-    title.textContent = m.title || "Без названия";
-    item.appendChild(title);
+// Группа по дате последнего изменения.
+function dateGroup(ts: number): string {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const t0 = today.getTime();
+  if (ts >= t0) return "Сегодня";
+  if (ts >= t0 - 86_400_000) return "Вчера";
+  return "Ранее";
+}
+
+const ICON_CHAT =
+  '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>';
+
+// Рисует список диалогов с учётом поиска и групп по датам.
+function renderConvList() {
+  convListEl.innerHTML = "";
+  const f = convFilter.trim().toLowerCase();
+  const items = f
+    ? convMetas.filter((m) => (m.title || "").toLowerCase().includes(f))
+    : convMetas;
+
+  let lastGroup = "";
+  for (const m of items) {
+    const group = dateGroup(m.updated_at);
+    if (group !== lastGroup) {
+      const lbl = document.createElement("div");
+      lbl.className = "conv-label";
+      lbl.textContent = group;
+      convListEl.appendChild(lbl);
+      lastGroup = group;
+    }
+
+    const item = document.createElement("div");
+    item.className = "conv" + (m.id === currentId ? " active" : "");
+    item.innerHTML = `<svg viewBox="0 0 24 24">${ICON_CHAT}</svg>`;
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = m.title || "Без названия";
+    item.appendChild(name);
 
     const del = document.createElement("button");
-    del.className = "sidebar__del";
+    del.className = "conv-del";
     del.textContent = "×";
     del.title = "Удалить диалог";
     del.addEventListener("click", (e) => {
@@ -364,46 +403,47 @@ interface HardwareInfo {
 // «Светофор» железа: определяем ресурсы и показываем полоску под шапкой
 // с рекомендацией модели. Неблокирующая — при сбое показываем нейтральный текст.
 async function loadHardware() {
+  const textEl = document.querySelector("#hw-text")!;
   let hw: HardwareInfo;
   try {
     hw = await invoke<HardwareInfo>("detect_hardware");
   } catch {
-    hwBarEl.textContent = "Конфигурация оборудования не определена";
-    hwBarEl.className = "chat__hw";
+    textEl.textContent = "Железо: не определено";
+    hwBarEl.className = "hwchip hwchip--unknown";
+    hwBarEl.removeAttribute("title");
     hwBarEl.hidden = false;
     return;
   }
 
-  const emoji = hw.tier === "green" ? "🟢" : hw.tier === "yellow" ? "🟡" : "🔴";
+  const tierWord =
+    hw.tier === "green" ? "зелёный" : hw.tier === "yellow" ? "жёлтый" : "красный";
   const rec =
     hw.tier === "green"
-      ? "рекомендуемая модель: qwen3.5:9b"
+      ? "Рекомендуемая модель: qwen3.5:9b"
       : hw.tier === "yellow"
-        ? "рекомендуемая модель: qwen3.5:4b"
-        : "рекомендуются модели до 4B";
+        ? "Рекомендуемая модель: qwen3.5:4b"
+        : "Рекомендуются модели до 4B";
 
-  const parts = [`ОЗУ ${hw.ram_gb.toFixed(0)} ГБ`, `${hw.cpu_cores} ядер`];
-  if (hw.vram_gb != null) {
-    parts.push(`видеопамять ${hw.vram_gb.toFixed(0)} ГБ`);
-  } else if (hw.vram_source === "unified") {
-    parts.push("общая память");
-  }
+  const parts = [`${hw.ram_gb.toFixed(0)} ГБ`, `${hw.cpu_cores} ядер`];
+  if (hw.vram_gb != null) parts.push(`${hw.vram_gb.toFixed(0)} ГБ VRAM`);
 
-  hwBarEl.textContent = `${emoji} ${parts.join(" · ")} — ${rec}`;
-  hwBarEl.className = `chat__hw chat__hw--${hw.tier}`;
+  textEl.innerHTML = `Железо: <b>${tierWord}</b> · ${parts.join(" · ")}`;
+  hwBarEl.className = `hwchip hwchip--${hw.tier}`;
+  hwBarEl.title = rec;
   hwBarEl.hidden = false;
 }
 
 // Мягкая проверка движка: спрашиваем версию Ollama и показываем её в шапке.
 // Неблокирующая — при недоступности просто показываем статус, приложение работает.
 async function checkOllama() {
+  const engine = document.querySelector("#engine")!;
   try {
     const version = await invoke<string>("ollama_version");
     statusEl.textContent = `Ollama ${version}`;
-    statusEl.classList.remove("chat__status--down");
+    engine.classList.remove("engine--down");
   } catch {
-    statusEl.textContent = "Ollama недоступна — запустите движок";
-    statusEl.classList.add("chat__status--down");
+    statusEl.textContent = "Ollama недоступна";
+    engine.classList.add("engine--down");
   }
 }
 
@@ -414,6 +454,14 @@ async function refreshAll() {
   await checkOllama();
   await loadModels();
   refreshBtn.disabled = false;
+}
+
+// «Проверка»: полная перепроверка движка, железа и списка моделей.
+async function recheck() {
+  checkBtn.disabled = true;
+  await checkOllama();
+  await Promise.all([loadHardware(), loadModels()]);
+  checkBtn.disabled = false;
 }
 
 // Показывает в списке одиночную подсказку и блокирует ввод (нет моделей / нет Ollama).
@@ -482,12 +530,23 @@ window.addEventListener("DOMContentLoaded", async () => {
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
   themeBtn = document.querySelector("#theme-btn")!;
+  convSearchEl = document.querySelector("#conv-search")!;
+  checkBtn = document.querySelector("#check-btn")!;
+  settingsBtn = document.querySelector("#settings-btn")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
   });
   refreshBtn.addEventListener("click", refreshAll);
   newChatBtn.addEventListener("click", newDialog);
   themeBtn.addEventListener("click", toggleTheme);
+  checkBtn.addEventListener("click", recheck);
+  settingsBtn.addEventListener("click", () => {
+    alert("Раздел «Настройки» появится в следующем этапе.");
+  });
+  convSearchEl.addEventListener("input", () => {
+    convFilter = convSearchEl.value;
+    renderConvList();
+  });
   initTheme(); // применяем сохранённую/системную тему как можно раньше
 
   // Восстанавливаем тумблер «Размышления» (по умолчанию включён).
