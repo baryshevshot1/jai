@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "jai",
+  "productName": "Jarvis AI",
   "version": "0.1.0",
   "identifier": "ru.baryshevshot.jai",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "jai — ИИ-ассистент",
+        "title": "Jarvis AI — ИИ-ассистент",
         "width": 1024,
         "height": 720,
         "minWidth": 800,
