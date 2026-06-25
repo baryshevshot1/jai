@@ -16,6 +16,7 @@ struct ChatMessage {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ChatEvent {
     Chunk { content: String },
+    Thinking { content: String },
     Done,
 }
 
@@ -28,7 +29,7 @@ async fn chat_stream(
     messages: Vec<ChatMessage>,
     think: bool,
     on_event: Channel<ChatEvent>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
@@ -36,6 +37,12 @@ async fn chat_stream(
         "stream": true,
         // Режим рассуждений (тумблер в интерфейсе). На обычных моделях игнорируется.
         "think": think,
+        "options": {
+            // Контекст по умолчанию у Ollama всего ~4096 — длинная история плюс
+            // большое рассуждение его переполняют, и ответ обрывается. 8192 —
+            // потолок из CLAUDE.md для целевых 6 ГБ VRAM.
+            "num_ctx": 8192
+        },
     });
 
     let mut resp = client
@@ -52,42 +59,74 @@ async fn chat_stream(
     }
 
     // Ollama отдаёт поток NDJSON — по одному JSON-объекту на строку.
-    // Копим байты в буфер и разбираем по мере появления переводов строки.
-    let mut buffer = String::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(pos) = buffer.find('\n') {
-            let line: String = buffer.drain(..=pos).collect();
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+    // full — полный текст ответа (авторитетный результат, без гонок на фронте).
+    let mut full = String::new();
+
+    // Разбор одной NDJSON-строки: thinking / content / done.
+    let handle = |line: &str, full: &mut String| {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            // Рассуждения «думающих» моделей приходят отдельным полем thinking.
+            if let Some(t) = json
+                .get("message")
+                .and_then(|m| m.get("thinking"))
+                .and_then(|t| t.as_str())
+            {
+                if !t.is_empty() {
+                    let _ = on_event.send(ChatEvent::Thinking { content: t.to_string() });
+                }
             }
-            // Битую/неполную строку просто пропускаем — придёт в следующем чанке.
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(content) = json
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                {
-                    if !content.is_empty() {
-                        let _ = on_event.send(ChatEvent::Chunk {
-                            content: content.to_string(),
-                        });
-                    }
+            if let Some(c) = json
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                if !c.is_empty() {
+                    full.push_str(c);
+                    let _ = on_event.send(ChatEvent::Chunk { content: c.to_string() });
                 }
-                if json.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
-                    let _ = on_event.send(ChatEvent::Done);
-                }
+            }
+            if json.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                let _ = on_event.send(ChatEvent::Done);
+            }
+        }
+    };
+
+    // Ollama шлёт NDJSON. Копим БАЙТЫ (чтобы не резать UTF-8 на границе чанка) и
+    // разбираем только целые строки; остаток без \n дочитываем после конца потока.
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        buf.extend_from_slice(&chunk);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            if !line.is_empty() {
+                handle(line, &mut full);
             }
         }
     }
-    Ok(())
+    // Хвост без завершающего перевода строки — здесь финальные токены ответа.
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim();
+        if !line.is_empty() {
+            handle(line, &mut full);
+        }
+    }
+    Ok(full)
+}
+
+/// Модель + флаг поддержки рассуждений (capability "thinking").
+#[derive(Serialize)]
+struct ModelInfo {
+    name: String,
+    thinking: bool,
 }
 
 /// Список установленных моделей из Ollama: GET 127.0.0.1:11434/api/tags.
-/// Возвращаем только имена (поле "name"). Запрос идёт из Rust — правило localhost.
+/// Возвращаем имя и поддержку рассуждений (по полю capabilities). Только localhost.
 #[tauri::command]
-async fn list_models() -> Result<Vec<String>, String> {
+async fn list_models() -> Result<Vec<ModelInfo>, String> {
     let client = reqwest::Client::new();
     let resp = client
         .get("http://127.0.0.1:11434/api/tags")
@@ -105,7 +144,15 @@ async fn list_models() -> Result<Vec<String>, String> {
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .filter_map(|m| {
+                    let name = m.get("name").and_then(|n| n.as_str())?.to_string();
+                    let thinking = m
+                        .get("capabilities")
+                        .and_then(|c| c.as_array())
+                        .map(|caps| caps.iter().any(|c| c.as_str() == Some("thinking")))
+                        .unwrap_or(false);
+                    Some(ModelInfo { name, thinking })
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

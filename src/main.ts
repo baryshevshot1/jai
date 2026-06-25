@@ -25,13 +25,24 @@ const SYSTEM = {
 };
 
 // События из Rust (см. ChatEvent в lib.rs).
-type ChatEvent = { type: "chunk"; content: string } | { type: "done" };
+type ChatEvent =
+  | { type: "chunk"; content: string }
+  | { type: "thinking"; content: string }
+  | { type: "done" };
 
 type Role = "user" | "assistant";
 interface Message {
   role: Role;
   content: string;
 }
+
+// Модель + поддержка рассуждений (из list_models).
+interface ModelInfo {
+  name: string;
+  thinking: boolean;
+}
+// Какие модели поддерживают «Размышления» (имя → bool).
+const thinkingByModel = new Map<string, boolean>();
 
 // История ОТКРЫТОГО диалога (без системного сообщения — его добавляем при отправке).
 const history: Message[] = [];
@@ -59,6 +70,8 @@ interface Conversation {
 // Счётчик «поколений»: позволяет кнопке «Стоп» игнорировать поздние кусочки.
 let generation = 0;
 let streaming = false;
+// Следовать за ответом только если пользователь у низа ленты (иначе не мешаем читать).
+let autoScroll = true;
 
 // Режим рассуждений (тумблер). По умолчанию включён; выбор хранится в localStorage.
 let thinkEnabled = true;
@@ -103,6 +116,45 @@ function addBubble(role: Role, text: string): HTMLElement {
   return body;
 }
 
+// Строит ответ ассистента: индикатор «думаю» (точки), переливающееся
+// «Рассуждение» с текстом (без рамки/коллапса) и контейнер ответа.
+function addAssistantTurn() {
+  const turn = document.createElement("div");
+  turn.className = "turn ai";
+
+  const thinking = document.createElement("div");
+  thinking.className = "thinking";
+  thinking.innerHTML =
+    '<span class="dots"><i></i><i></i><i></i></span><span>Думаю над ответом</span>';
+  turn.appendChild(thinking);
+
+  const reason = document.createElement("div");
+  reason.className = "reason";
+  reason.hidden = true;
+  const reasonWord = document.createElement("div");
+  reasonWord.className = "reason-word shimmer";
+  reasonWord.textContent = "Рассуждение";
+  reason.appendChild(reasonWord);
+  const rbody = document.createElement("div");
+  rbody.className = "rbody clamp"; // по умолчанию обрезано до 3 строк
+  reason.appendChild(rbody);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "reason-toggle";
+  toggle.hidden = true;
+  toggle.textContent = "Показать больше";
+  reason.appendChild(toggle);
+  turn.appendChild(reason);
+
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  turn.appendChild(msg);
+
+  messagesEl.appendChild(turn);
+  scrollToBottom();
+  return { turn, thinking, reason, reasonWord, rbody, toggle, msg };
+}
+
 function addError(text: string) {
   const row = document.createElement("div");
   row.className = "err";
@@ -112,6 +164,7 @@ function addError(text: string) {
 }
 
 function scrollToBottom() {
+  if (!autoScroll) return; // прокрутил вверх — не тянем обратно вниз
   feedEl.scrollTop = feedEl.scrollHeight;
 }
 
@@ -131,56 +184,117 @@ async function send() {
   history.push({ role: "user", content: text });
   addBubble("user", text);
   persist(); // вопрос сохраняется сразу
+  autoScroll = true; // при отправке снова следуем за ответом
 
   const myGen = ++generation;
   setStreaming(true);
 
-  // Пузырь ассистента, в который будем дописывать ответ.
-  const answerEl = addBubble("assistant", "");
-  answerEl.textContent = "Думает…"; // пока нет текста ответа (особенно в режиме рассуждений)
-  answerEl.classList.add("msg__pending");
+  // Ответ ассистента: индикатор «думаю», переливающееся рассуждение, текст.
+  const ui = addAssistantTurn();
   let answer = "";
-  let settled = false;
+  let reasoning = "";
+  let reasonExpanded = false;
+  const startTs = Date.now();
 
-  const finish = () => {
-    if (settled || myGen !== generation) return;
-    settled = true;
-    if (answer.trim()) {
-      history.push({ role: "assistant", content: answer });
-      persist(); // сохраняем готовый ответ
+  // Кнопка «Показать больше/меньше»: видна, только если рассуждение длиннее 3 строк.
+  const syncToggle = () => {
+    if (reasonExpanded) {
+      ui.toggle.hidden = false;
+      ui.toggle.textContent = "Показать меньше";
     } else {
-      answerEl.parentElement?.remove(); // пустой ответ — убираем пузырь
+      const overflows = ui.rbody.scrollHeight > ui.rbody.clientHeight + 1;
+      ui.toggle.hidden = !overflows;
+      ui.toggle.textContent = "Показать больше";
     }
-    setStreaming(false);
+  };
+  ui.toggle.addEventListener("click", () => {
+    reasonExpanded = !reasonExpanded;
+    ui.rbody.classList.toggle("clamp", !reasonExpanded);
+    syncToggle();
+  });
+
+  // Когда пошёл ответ — замораживаем «Рассуждение» в статичную кликабельную
+  // подпись «Рассуждение · N сек» и СВОРАЧИВАЕМ текст рассуждения (ответ — главный).
+  const freezeReason = (withTime: boolean) => {
+    if (!reasoning || !ui.reasonWord.classList.contains("shimmer")) return;
+    ui.reasonWord.classList.remove("shimmer");
+    ui.reasonWord.classList.add("reason-done"); // кликабельно: раскрыть/скрыть
+    const sec = Math.max(1, Math.round((Date.now() - startTs) / 1000));
+    ui.reasonWord.textContent = withTime ? `Рассуждение · ${sec} сек` : "Рассуждение";
+    ui.rbody.hidden = true;
+    ui.toggle.hidden = true;
+    reasonExpanded = false;
+    ui.rbody.classList.add("clamp");
+  };
+
+  // Клик по застывшей подписи — показать/скрыть текст рассуждения.
+  ui.reasonWord.addEventListener("click", () => {
+    if (ui.reasonWord.classList.contains("shimmer")) return; // ещё думает — не трогаем
+    const show = ui.rbody.hidden;
+    ui.rbody.hidden = !show;
+    if (show) syncToggle();
+    else ui.toggle.hidden = true;
+  });
+
+  // Безопасная отрисовка ответа: пробуем Markdown, при ошибке — полный текст.
+  const renderAnswer = (text: string) => {
+    try {
+      ui.msg.innerHTML = renderMarkdown(text);
+    } catch {
+      ui.msg.textContent = text; // форматирование упало — показываем хотя бы весь текст
+    }
   };
 
   const onEvent = new Channel<ChatEvent>();
   onEvent.onmessage = (msg) => {
     if (myGen !== generation) return; // нажали «Стоп» — игнорируем хвост
-    if (msg.type === "chunk") {
+    if (msg.type === "thinking") {
+      reasoning += msg.content;
+      ui.thinking.remove(); // индикатор теперь — переливающееся «Рассуждение»
+      ui.reason.hidden = false;
+      ui.rbody.textContent = reasoning;
+      scrollToBottom();
+    } else if (msg.type === "chunk") {
       answer += msg.content;
       if (answer) {
-        answerEl.classList.remove("msg__pending");
-        answerEl.innerHTML = renderMarkdown(answer);
+        ui.thinking.remove(); // пошёл ответ — убираем «Думаю…»
+        freezeReason(true);
+        ui.msg.textContent = answer; // живая печать ПРОСТЫМ текстом — дёшево, ничего не виснет
       }
       scrollToBottom();
-    } else if (msg.type === "done") {
-      finish();
     }
+    // финал — по результату команды ниже (авторитетный полный ответ)
   };
 
   try {
-    await invoke("chat_stream", {
+    // Возвращённое значение — ПОЛНЫЙ текст ответа (без гонок с доставкой канала).
+    const full = await invoke<string>("chat_stream", {
       model: selectedModel,
       messages: [SYSTEM, ...history],
-      think: thinkEnabled,
+      // think:true шлём ТОЛЬКО моделям, которые это поддерживают (иначе Ollama
+      // вернёт ошибку «не умеет размышлять»).
+      think: thinkEnabled && (thinkingByModel.get(selectedModel) ?? false),
       onEvent,
     });
-    finish(); // если поток закончился без явного "done"
+    if (myGen === generation) {
+      ui.thinking.remove();
+      freezeReason(true);
+      if (reasoning) ui.rbody.textContent = reasoning; // готов, раскрывается по клику
+      answer = full; // авторитетный полный ответ
+      if (answer.trim()) {
+        renderAnswer(answer); // финальное форматирование один раз
+        history.push({ role: "assistant", content: answer });
+        persist();
+      } else if (!reasoning.trim()) {
+        ui.turn.remove(); // совсем пусто — убираем
+      }
+      scrollToBottom();
+      setStreaming(false);
+    }
   } catch (err) {
-    if (settled || myGen !== generation) return;
-    settled = true;
-    if (!answer) answerEl.parentElement?.remove();
+    if (myGen !== generation) return;
+    ui.thinking.remove();
+    if (!answer && !reasoning) ui.turn.remove();
     addError(String(err));
     setStreaming(false);
   }
@@ -227,6 +341,7 @@ async function persist() {
 // Перерисовывает ленту по текущему массиву history.
 function renderHistory() {
   messagesEl.innerHTML = "";
+  autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
   for (const m of history) addBubble(m.role, m.content);
 }
 
@@ -359,9 +474,9 @@ async function initConversations() {
 // Тянет список установленных моделей из Ollama (через Rust-команду list_models)
 // и заполняет выпадающий список в шапке.
 async function loadModels() {
-  let models: string[];
+  let models: ModelInfo[];
   try {
-    models = await invoke<string[]>("list_models");
+    models = await invoke<ModelInfo[]>("list_models");
   } catch (err) {
     showModelHint("Ollama недоступна");
     addError(`Не удалось получить список моделей: ${err}`);
@@ -376,20 +491,34 @@ async function loadModels() {
     return;
   }
 
+  thinkingByModel.clear();
   modelSelectEl.innerHTML = "";
-  for (const name of models) {
+  for (const m of models) {
+    thinkingByModel.set(m.name, m.thinking);
     const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
+    opt.value = m.name;
+    opt.textContent = m.name;
     modelSelectEl.appendChild(opt);
   }
   // Предпочитаем целевую базовую модель, если она установлена; иначе — первую.
+  const names = models.map((m) => m.name);
   const preferred = "qwen3.5:9b";
-  selectedModel = models.includes(preferred) ? preferred : models[0];
+  selectedModel = names.includes(preferred) ? preferred : names[0];
   modelSelectEl.value = selectedModel;
   modelSelectEl.disabled = false;
   setComposerEnabled(true);
+  updateThinkAvailability();
   inputEl.focus();
+}
+
+// Включает/выключает тумблер «Размышления» по возможностям выбранной модели.
+function updateThinkAvailability() {
+  const supports = thinkingByModel.get(selectedModel) ?? false;
+  thinkToggleEl.disabled = !supports;
+  thinkToggleEl.title = supports
+    ? "Режим рассуждений модели (медленнее, но точнее)"
+    : "Эта модель не поддерживает режим рассуждений";
+  thinkToggleEl.classList.toggle("on", supports && thinkEnabled);
 }
 
 // Сведения о железе (из Rust-команды detect_hardware).
@@ -537,6 +666,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   settingsBtn = document.querySelector("#settings-btn")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
+    updateThinkAvailability(); // у новой модели могут быть другие возможности
   });
   refreshBtn.addEventListener("click", refreshAll);
   newChatBtn.addEventListener("click", newDialog);
@@ -563,11 +693,17 @@ window.addEventListener("DOMContentLoaded", async () => {
     }, 1500);
   });
 
+  // Авто-следование за ответом включаем/выключаем по позиции прокрутки.
+  feedEl.addEventListener("scroll", () => {
+    autoScroll = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 80;
+  });
+
   initTheme(); // применяем сохранённую/системную тему как можно раньше
 
-  // Восстанавливаем тумблер «Размышления» (по умолчанию включён).
+  // Восстанавливаем тумблер «Размышления» (по умолчанию ВЫКЛ: с reasoning-моделью
+  // даже простые вопросы думаются по ~20 секунд — для ассистента это непрактично).
   const savedThink = localStorage.getItem("jai.think");
-  thinkEnabled = savedThink === null ? true : savedThink === "true";
+  thinkEnabled = savedThink === null ? false : savedThink === "true";
   thinkToggleEl.classList.toggle("on", thinkEnabled);
   thinkToggleEl.addEventListener("click", () => {
     thinkEnabled = !thinkEnabled;

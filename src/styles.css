@@ -297,7 +297,59 @@ body {
 /* ассистент — слева, просто текст без аватара/подписи */
 .turn.ai { align-items: flex-start; }
 .msg { font-size: var(--t-lg); line-height: var(--lh-relaxed); color: var(--text); max-width: 100%; }
-.msg.msg__pending { color: var(--muted); font-style: italic; }
+
+/* индикатор «думаю» — три пульсирующие точки */
+.thinking { display: flex; align-items: center; gap: var(--s2); color: var(--muted); font-size: var(--t-md); }
+.dots { display: inline-flex; gap: 5px; }
+.dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: blink 1.4s infinite both; }
+.dots i:nth-child(2) { animation-delay: 0.2s; }
+.dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+/* рассуждение — переливающийся текст, без рамки и коллапса */
+.reason { margin-bottom: var(--s2); }
+.reason-word { font-size: var(--t-md); font-weight: 500; color: var(--muted); }
+.reason-word.reason-done { cursor: pointer; }
+.reason-word.reason-done:hover { color: var(--text); }
+.reason .rbody {
+  margin-top: 6px;
+  font-size: var(--t-base);
+  color: var(--muted);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.reason .rbody.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.reason-toggle {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  color: var(--accent);
+  cursor: pointer;
+}
+.reason-toggle:hover { text-decoration: underline; }
+.shimmer {
+  background: linear-gradient(90deg, var(--faint) 25%, var(--text) 50%, var(--faint) 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 .msg > :first-child { margin-top: 0; }
 .msg > :last-child { margin-bottom: 0; }
 .msg p { margin: 0 0 var(--s3); }
@@ -436,7 +488,8 @@ body {
   transition: 0.15s;
   user-select: none;
 }
-.think-toggle:hover { border-color: var(--border-strong); color: var(--text); }
+.think-toggle:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
+.think-toggle:disabled { opacity: 0.4; cursor: default; }
 .think-toggle svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
 .think-toggle.on {
   background: var(--accent-soft);
