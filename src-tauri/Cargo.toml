@@ -22,4 +22,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# HTTP-клиент для разговора с Ollama. default-features = false ⇒ без TLS:
+# ходим только на http://127.0.0.1, а отказ от TLS убирает зависимость от
+# системного OpenSSL и упрощает сборку под Linux/Windows в CI.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
