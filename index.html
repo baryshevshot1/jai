@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
@@ -9,10 +9,20 @@
   </head>
 
   <body>
-    <main class="chat">
+    <div class="app">
+      <aside class="sidebar">
+        <button type="button" class="sidebar__new" id="new-chat-btn">＋ Новый диалог</button>
+        <div class="sidebar__list" id="conv-list"></div>
+      </aside>
+
+      <main class="chat">
       <header class="chat__header">
         <span class="chat__title">jai</span>
         <span class="chat__status" id="status">проверка движка…</span>
+        <label class="chat__think" title="Режим рассуждений модели (медленнее, но точнее)">
+          <input type="checkbox" id="think-toggle" />
+          Размышления
+        </label>
         <button
           type="button"
           class="chat__refresh"
@@ -21,6 +31,11 @@
           aria-label="Обновить список моделей"
         >↻</button>
         <select class="chat__model" id="model-select" aria-label="Выбор модели"></select>
+        <button type="button" class="chat__refresh" id="theme-btn" title="Сменить тему" aria-label="Сменить тему">
+          <svg id="theme-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+          </svg>
+        </button>
       </header>
 
       <div class="chat__hw" id="hw-bar" hidden></div>
@@ -37,6 +52,7 @@
         <button type="submit" id="send-btn" class="chat__send">Отправить</button>
         <button type="button" id="stop-btn" class="chat__stop" hidden>Стоп</button>
       </form>
-    </main>
+      </main>
+    </div>
   </body>
 </html>

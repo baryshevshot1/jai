@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
+use tauri::Manager;
 
 /// Одно сообщение в диалоге (роль + текст). Приходит с фронтенда.
 #[derive(Clone, Serialize, Deserialize)]
@@ -25,6 +26,7 @@ enum ChatEvent {
 async fn chat_stream(
     model: String,
     messages: Vec<ChatMessage>,
+    think: bool,
     on_event: Channel<ChatEvent>,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
@@ -32,6 +34,8 @@ async fn chat_stream(
         "model": model,
         "messages": messages,
         "stream": true,
+        // Режим рассуждений (тумблер в интерфейсе). На обычных моделях игнорируется.
+        "think": think,
     });
 
     let mut resp = client
@@ -270,6 +274,137 @@ fn detect_vram() -> (Option<f64>, String) {
     (None, "unknown".to_string())
 }
 
+// ── История диалогов: хранение в appDataDir/conversations/<id>.json ──────────
+
+/// Полный диалог (как лежит в файле).
+#[derive(Serialize, Deserialize)]
+struct Conversation {
+    id: String,
+    title: String,
+    updated_at: i64,
+    messages: Vec<ChatMessage>,
+}
+
+/// Краткая карточка диалога для списка в боковой панели.
+#[derive(Serialize)]
+struct ConversationMeta {
+    id: String,
+    title: String,
+    updated_at: i64,
+}
+
+/// Каталог с диалогами внутри appDataDir (кроссплатформенно). Создаём при необходимости.
+fn conversations_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Не удалось получить appDataDir: {e}"))?
+        .join("conversations");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать каталог: {e}"))?;
+    Ok(dir)
+}
+
+/// Защита от обхода путей: id формируем сами (UUID), но всё равно проверяем.
+fn validate_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Некорректный идентификатор диалога".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_conversations(app: tauri::AppHandle) -> Result<Vec<ConversationMeta>, String> {
+    let dir = conversations_dir(&app)?;
+    let mut metas: Vec<ConversationMeta> = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(metas), // каталога нет/пуст — пустой список, не ошибка
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(conv) = serde_json::from_str::<Conversation>(&text) {
+                metas.push(ConversationMeta {
+                    id: conv.id,
+                    title: conv.title,
+                    updated_at: conv.updated_at,
+                });
+            }
+        }
+    }
+    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)); // свежие сверху
+    Ok(metas)
+}
+
+#[tauri::command]
+fn load_conversation(app: tauri::AppHandle, id: String) -> Result<Conversation, String> {
+    validate_id(&id)?;
+    let path = conversations_dir(&app)?.join(format!("{id}.json"));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Не удалось прочитать диалог: {e}"))?;
+    serde_json::from_str::<Conversation>(&text)
+        .map_err(|e| format!("Повреждённый файл диалога: {e}"))
+}
+
+#[tauri::command]
+fn save_conversation(app: tauri::AppHandle, conversation: Conversation) -> Result<(), String> {
+    validate_id(&conversation.id)?;
+    let path = conversations_dir(&app)?.join(format!("{}.json", conversation.id));
+    let text = serde_json::to_string_pretty(&conversation).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("Не удалось сохранить диалог: {e}"))
+}
+
+#[tauri::command]
+fn delete_conversation(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    validate_id(&id)?;
+    let path = conversations_dir(&app)?.join(format!("{id}.json"));
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("Не удалось удалить диалог: {e}"))?;
+    }
+    Ok(())
+}
+
+// ── Настройки приложения: appDataDir/settings.json (объект ключ→строка) ──────
+
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Не удалось получить appDataDir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать каталог: {e}"))?;
+    Ok(dir.join("settings.json"))
+}
+
+fn read_settings(app: &tauri::AppHandle) -> serde_json::Map<String, serde_json::Value> {
+    if let Ok(path) = settings_path(app) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&text) {
+                return map;
+            }
+        }
+    }
+    serde_json::Map::new()
+}
+
+#[tauri::command]
+fn get_setting(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    let map = read_settings(&app);
+    Ok(map.get(&key).and_then(|v| v.as_str()).map(String::from))
+}
+
+#[tauri::command]
+fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    let mut map = read_settings(&app);
+    map.insert(key, serde_json::Value::String(value));
+    let path = settings_path(&app)?;
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("Не удалось сохранить настройку: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -278,7 +413,13 @@ pub fn run() {
             chat_stream,
             list_models,
             ollama_version,
-            detect_hardware
+            detect_hardware,
+            list_conversations,
+            load_conversation,
+            save_conversation,
+            delete_conversation,
+            get_setting,
+            set_setting
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

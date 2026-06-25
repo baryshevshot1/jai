@@ -1,11 +1,28 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { renderMarkdown } from "./markdown";
+import "katex/dist/katex.min.css";
+import "highlight.js/styles/atom-one-dark.css";
+// Шрифты — локально (бандлятся Vite), без сети: Inter (UI), Fraunces (бренд), JetBrains Mono (код).
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/fraunces/500.css";
+import "@fontsource/fraunces/600.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
 
 // Модель по умолчанию. Выбор модели из набора — отдельный шаг (выпадающий список).
 // Текущая выбранная модель (заполняется из списка установленных).
 let selectedModel = "";
 
-// Лёгкая системная подсказка — задаёт тон ассистента.
-const SYSTEM = { role: "system" as const, content: "Ты — полезный ассистент. Отвечай по-русски." };
+// Системная подсказка — задаёт деловой тон ассистента и запрещает эмодзи.
+const SYSTEM = {
+  role: "system" as const,
+  content:
+    "Ты — деловой ассистент. Отвечай по-русски, профессионально и по существу. " +
+    "Не используй эмодзи и смайлики.",
+};
 
 // События из Rust (см. ChatEvent в lib.rs).
 type ChatEvent = { type: "chunk"; content: string } | { type: "done" };
@@ -16,12 +33,31 @@ interface Message {
   content: string;
 }
 
-// История диалога (без системного сообщения — его добавляем при отправке).
+// История ОТКРЫТОГО диалога (без системного сообщения — его добавляем при отправке).
 const history: Message[] = [];
+
+// id текущего диалога (файл appDataDir/conversations/<id>.json).
+let currentId = "";
+
+// Карточка диалога для боковой панели и полный диалог из файла.
+interface ConversationMeta {
+  id: string;
+  title: string;
+  updated_at: number;
+}
+interface Conversation {
+  id: string;
+  title: string;
+  updated_at: number;
+  messages: Message[];
+}
 
 // Счётчик «поколений»: позволяет кнопке «Стоп» игнорировать поздние кусочки.
 let generation = 0;
 let streaming = false;
+
+// Режим рассуждений (тумблер). По умолчанию включён; выбор хранится в localStorage.
+let thinkEnabled = true;
 
 let messagesEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
@@ -31,6 +67,20 @@ let modelSelectEl: HTMLSelectElement;
 let statusEl: HTMLElement;
 let refreshBtn: HTMLButtonElement;
 let hwBarEl: HTMLElement;
+let convListEl: HTMLElement;
+let newChatBtn: HTMLButtonElement;
+let thinkToggleEl: HTMLInputElement;
+let themeBtn: HTMLButtonElement;
+
+// Заполняет пузырь: ответ ассистента — как Markdown/формулы, реплику
+// пользователя — простым текстом (безопаснее, без неожиданной разметки).
+function setBubble(body: HTMLElement, role: Role, text: string) {
+  if (role === "assistant") {
+    body.innerHTML = renderMarkdown(text);
+  } else {
+    body.textContent = text;
+  }
+}
 
 // Создаёт пузырь сообщения и возвращает элемент с текстом (для дозаписи).
 function addBubble(role: Role, text: string): HTMLElement {
@@ -38,7 +88,7 @@ function addBubble(role: Role, text: string): HTMLElement {
   row.className = `msg msg--${role}`;
   const body = document.createElement("div");
   body.className = "msg__body";
-  body.textContent = text;
+  setBubble(body, role, text);
   row.appendChild(body);
   messagesEl.appendChild(row);
   scrollToBottom();
@@ -72,12 +122,15 @@ async function send() {
   autoGrow();
   history.push({ role: "user", content: text });
   addBubble("user", text);
+  persist(); // вопрос сохраняется сразу
 
   const myGen = ++generation;
   setStreaming(true);
 
   // Пузырь ассистента, в который будем дописывать ответ.
   const answerEl = addBubble("assistant", "");
+  answerEl.textContent = "Думает…"; // пока нет текста ответа (особенно в режиме рассуждений)
+  answerEl.classList.add("msg__pending");
   let answer = "";
   let settled = false;
 
@@ -86,6 +139,7 @@ async function send() {
     settled = true;
     if (answer.trim()) {
       history.push({ role: "assistant", content: answer });
+      persist(); // сохраняем готовый ответ
     } else {
       answerEl.parentElement?.remove(); // пустой ответ — убираем пузырь
     }
@@ -97,7 +151,10 @@ async function send() {
     if (myGen !== generation) return; // нажали «Стоп» — игнорируем хвост
     if (msg.type === "chunk") {
       answer += msg.content;
-      answerEl.textContent = answer;
+      if (answer) {
+        answerEl.classList.remove("msg__pending");
+        answerEl.innerHTML = renderMarkdown(answer);
+      }
       scrollToBottom();
     } else if (msg.type === "done") {
       finish();
@@ -108,6 +165,7 @@ async function send() {
     await invoke("chat_stream", {
       model: selectedModel,
       messages: [SYSTEM, ...history],
+      think: thinkEnabled,
       onEvent,
     });
     finish(); // если поток закончился без явного "done"
@@ -129,6 +187,133 @@ function stop() {
 function setComposerEnabled(on: boolean) {
   inputEl.disabled = !on;
   sendBtn.disabled = !on;
+}
+
+// ── Диалоги: сохранение/загрузка/переключение/удаление ──────────────────────
+
+// Заголовок диалога — из первого вопроса пользователя (обрезанный).
+function titleFromHistory(): string {
+  const first = history.find((m) => m.role === "user");
+  if (!first) return "Новый диалог";
+  const t = first.content.trim().replace(/\s+/g, " ");
+  return t.length > 40 ? t.slice(0, 40) + "…" : t;
+}
+
+// Сохраняет текущий диалог на диск и обновляет список. Пустой не сохраняем.
+async function persist() {
+  if (!history.length || !currentId) return;
+  const conv: Conversation = {
+    id: currentId,
+    title: titleFromHistory(),
+    updated_at: Date.now(),
+    messages: history,
+  };
+  try {
+    await invoke("save_conversation", { conversation: conv });
+    await refreshConversationList();
+  } catch (e) {
+    console.error("save_conversation:", e);
+  }
+}
+
+// Перерисовывает ленту по текущему массиву history.
+function renderHistory() {
+  messagesEl.innerHTML = "";
+  for (const m of history) addBubble(m.role, m.content);
+}
+
+// Обновляет список диалогов в боковой панели.
+async function refreshConversationList() {
+  let metas: ConversationMeta[];
+  try {
+    metas = await invoke<ConversationMeta[]>("list_conversations");
+  } catch {
+    return;
+  }
+  convListEl.innerHTML = "";
+  for (const m of metas) {
+    const item = document.createElement("div");
+    item.className =
+      "sidebar__item" + (m.id === currentId ? " sidebar__item--active" : "");
+
+    const title = document.createElement("span");
+    title.className = "sidebar__title";
+    title.textContent = m.title || "Без названия";
+    item.appendChild(title);
+
+    const del = document.createElement("button");
+    del.className = "sidebar__del";
+    del.textContent = "×";
+    del.title = "Удалить диалог";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteConversation(m.id);
+    });
+    item.appendChild(del);
+
+    item.addEventListener("click", () => openConversation(m.id));
+    convListEl.appendChild(item);
+  }
+}
+
+// Открывает диалог из файла в ленту.
+async function openConversation(id: string) {
+  if (streaming) stop();
+  let conv: Conversation;
+  try {
+    conv = await invoke<Conversation>("load_conversation", { id });
+  } catch (e) {
+    addError(`Не удалось открыть диалог: ${e}`);
+    return;
+  }
+  currentId = conv.id;
+  history.length = 0;
+  history.push(...conv.messages);
+  renderHistory();
+  refreshConversationList();
+  inputEl.focus();
+}
+
+// «Новый диалог»: пустой чат. Старый уже сохранён — ничего не теряется.
+function newDialog() {
+  if (streaming) stop();
+  currentId = crypto.randomUUID();
+  history.length = 0;
+  messagesEl.innerHTML = "";
+  refreshConversationList(); // снимет подсветку (нового ещё нет в списке)
+  inputEl.focus();
+}
+
+// Удаление диалога (с подтверждением — потеря данных необратима).
+async function deleteConversation(id: string) {
+  if (!confirm("Удалить этот диалог? Действие необратимо.")) return;
+  try {
+    await invoke("delete_conversation", { id });
+  } catch (e) {
+    addError(`Не удалось удалить диалог: ${e}`);
+    return;
+  }
+  if (id === currentId) {
+    newDialog();
+  } else {
+    refreshConversationList();
+  }
+}
+
+// При старте: открыть самый свежий диалог или начать пустой.
+async function initConversations() {
+  let metas: ConversationMeta[] = [];
+  try {
+    metas = await invoke<ConversationMeta[]>("list_conversations");
+  } catch {
+    metas = [];
+  }
+  if (metas.length > 0) {
+    await openConversation(metas[0].id); // свежий сверху
+  } else {
+    currentId = crypto.randomUUID(); // пустой новый диалог
+    await refreshConversationList();
+  }
 }
 
 // Тянет список установленных моделей из Ollama (через Rust-команду list_models)
@@ -242,13 +427,49 @@ function showModelHint(text: string) {
   setComposerEnabled(false);
 }
 
+// ── Тема (светлая/тёмная). Выбор хранится через Tauri (settings.json) ────────
+
+// Иконки: показываем действие-противоположность (в тёмной — солнце, в светлой — луна).
+const ICON_SUN =
+  '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>';
+const ICON_MOON = '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
+
+function applyTheme(theme: string) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const icon = document.querySelector("#theme-icon");
+  if (icon) icon.innerHTML = theme === "dark" ? ICON_SUN : ICON_MOON;
+}
+
+// При старте: тема из настроек Tauri; если не сохранена — по системной.
+async function initTheme() {
+  let theme: string | null = null;
+  try {
+    theme = await invoke<string | null>("get_setting", { key: "theme" });
+  } catch {
+    theme = null;
+  }
+  if (theme !== "light" && theme !== "dark") {
+    theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  applyTheme(theme);
+}
+
+function toggleTheme() {
+  const next =
+    document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  applyTheme(next);
+  invoke("set_setting", { key: "theme", value: next }).catch((e) =>
+    console.error("set_setting:", e),
+  );
+}
+
 // Авто-высота поля ввода под текст.
 function autoGrow() {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   messagesEl = document.querySelector("#messages")!;
   inputEl = document.querySelector("#chat-input")!;
   sendBtn = document.querySelector("#send-btn")!;
@@ -257,10 +478,26 @@ window.addEventListener("DOMContentLoaded", () => {
   statusEl = document.querySelector("#status")!;
   refreshBtn = document.querySelector("#refresh-btn")!;
   hwBarEl = document.querySelector("#hw-bar")!;
+  convListEl = document.querySelector("#conv-list")!;
+  newChatBtn = document.querySelector("#new-chat-btn")!;
+  thinkToggleEl = document.querySelector("#think-toggle")!;
+  themeBtn = document.querySelector("#theme-btn")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
   });
   refreshBtn.addEventListener("click", refreshAll);
+  newChatBtn.addEventListener("click", newDialog);
+  themeBtn.addEventListener("click", toggleTheme);
+  initTheme(); // применяем сохранённую/системную тему как можно раньше
+
+  // Восстанавливаем тумблер «Размышления» (по умолчанию включён).
+  const savedThink = localStorage.getItem("jai.think");
+  thinkEnabled = savedThink === null ? true : savedThink === "true";
+  thinkToggleEl.checked = thinkEnabled;
+  thinkToggleEl.addEventListener("change", () => {
+    thinkEnabled = thinkToggleEl.checked;
+    localStorage.setItem("jai.think", String(thinkEnabled));
+  });
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -277,6 +514,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
+  await initConversations(); // сначала восстановим диалоги в ленту
   checkOllama();             // неблокирующе: статус движка в шапке
   loadHardware();            // неблокирующе: светофор железа под шапкой
   loadModels();
