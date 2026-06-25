@@ -108,11 +108,36 @@ async fn list_models() -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// Версия Ollama: GET 127.0.0.1:11434/api/version — мягкая проверка «движок жив».
+/// Таймаут 3 с, чтобы не зависнуть, если порт открыт, но ответа нет. Только localhost.
+#[tauri::command]
+async fn ollama_version() -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:11434/api/version")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ollama вернул ошибку {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let version = json
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("неизвестно")
+        .to_string();
+    Ok(version)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![chat_stream, list_models])
+        .invoke_handler(tauri::generate_handler![chat_stream, list_models, ollama_version])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

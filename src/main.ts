@@ -28,6 +28,8 @@ let inputEl: HTMLTextAreaElement;
 let sendBtn: HTMLButtonElement;
 let stopBtn: HTMLButtonElement;
 let modelSelectEl: HTMLSelectElement;
+let statusEl: HTMLElement;
+let refreshBtn: HTMLButtonElement;
 
 // Создаёт пузырь сообщения и возвращает элемент с текстом (для дозаписи).
 function addBubble(role: Role, text: string): HTMLElement {
@@ -164,6 +166,28 @@ async function loadModels() {
   inputEl.focus();
 }
 
+// Мягкая проверка движка: спрашиваем версию Ollama и показываем её в шапке.
+// Неблокирующая — при недоступности просто показываем статус, приложение работает.
+async function checkOllama() {
+  try {
+    const version = await invoke<string>("ollama_version");
+    statusEl.textContent = `Ollama ${version}`;
+    statusEl.classList.remove("chat__status--down");
+  } catch {
+    statusEl.textContent = "Ollama недоступна — запустите движок";
+    statusEl.classList.add("chat__status--down");
+  }
+}
+
+// Кнопка «обновить»: заново проверяем движок и перечитываем список моделей,
+// чтобы подхватить только что скачанные модели без перезапуска приложения.
+async function refreshAll() {
+  refreshBtn.disabled = true;
+  await checkOllama();
+  await loadModels();
+  refreshBtn.disabled = false;
+}
+
 // Показывает в списке одиночную подсказку и блокирует ввод (нет моделей / нет Ollama).
 function showModelHint(text: string) {
   modelSelectEl.innerHTML = "";
@@ -187,9 +211,12 @@ window.addEventListener("DOMContentLoaded", () => {
   sendBtn = document.querySelector("#send-btn")!;
   stopBtn = document.querySelector("#stop-btn")!;
   modelSelectEl = document.querySelector("#model-select")!;
+  statusEl = document.querySelector("#status")!;
+  refreshBtn = document.querySelector("#refresh-btn")!;
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
   });
+  refreshBtn.addEventListener("click", refreshAll);
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -206,5 +233,6 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
+  checkOllama();             // неблокирующе: статус движка в шапке
   loadModels();
 });
