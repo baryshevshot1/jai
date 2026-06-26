@@ -79,11 +79,22 @@ interface IndexProgress {
   current: number;
   total: number;
 }
+// Прогресс установки модели (Channel из pull_model).
+type PullEvent =
+  | { type: "progress"; status: string; completed: number; total: number }
+  | { type: "done" };
 
 // Число документов в базе: >0 → перед ответом ищем релевантные фрагменты.
 let docsCount = 0;
 // Установлена ли модель эмбеддингов (без неё индексация/поиск невозможны).
 let embeddingReady = false;
+// Идёт ли установка модели (pull) и была ли она отменена пользователем.
+let pulling = false;
+let pullCancelled = false;
+
+// Документы-источники, уже показанные в строке «Источники» в текущем диалоге.
+// Каждый документ упоминаем один раз — дальше не повторяем заметку под ответами.
+const shownSourceFiles = new Set<string>();
 
 // События из Rust (см. ChatEvent в lib.rs).
 type ChatEvent =
@@ -168,6 +179,9 @@ let paneDocsEl: HTMLElement;
 let addDocBtn: HTMLButtonElement;
 let docListEl: HTMLElement;
 let docStatusEl: HTMLElement;
+let docStatusTextEl: HTMLElement;
+let installEmbedBtn: HTMLButtonElement;
+let pullCancelBtn: HTMLButtonElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -343,12 +357,16 @@ function buildApiMessages(contextMsg: Message | null): { role: string; content: 
       out.push({ role: contextMsg.role, content: contextMsg.content });
     }
     if (m.role === "user" && m.doc) {
+      // Документ — справочный материал к этому ходу. НЕ приказываем «отвечай только
+      // по нему» и не просим упоминать его в каждом ответе: модель обращается к файлу,
+      // когда это относится к вопросу, и не пересказывает его постоянно (как делают
+      // другие ассистенты). Содержимое остаётся в контексте диалога для follow-up.
       out.push({
         role: "user",
         content:
-          `К сообщению прикреплён документ «${m.doc.name}». Его содержимое:\n\n` +
-          `${m.doc.text}\n\n` +
-          `— Опираясь на этот документ, ответь на вопрос: ${m.content}`,
+          `[Прикреплён документ «${m.doc.name}» — справочный материал, ` +
+          `обращайся к нему, когда это относится к вопросу]\n\n` +
+          `${m.doc.text}\n\n———\n\n${m.content}`,
       });
     } else {
       out.push({ role: m.role, content: m.content });
@@ -632,13 +650,17 @@ async function refreshDocuments() {
   } catch {
     embeddingReady = false;
   }
-  // подсказка про отсутствие модели эмбеддингов (без неё база не работает)
+  // нет модели эмбеддингов → карточка с кнопкой установки. Во время установки
+  // карточку не показываем (на её месте — прогресс), но скрыть при готовности можно.
   if (embeddingReady) {
     docStatusEl.hidden = true;
-  } else {
+  } else if (!pulling) {
     docStatusEl.hidden = false;
-    docStatusEl.textContent =
-      "Модель поиска по документам не установлена. Установите её командой: ollama pull bge-m3";
+    docStatusTextEl.textContent =
+      "Для поиска по документам нужна модель bge-m3 (~1.2 ГБ). Её можно установить прямо отсюда — без терминала.";
+    installEmbedBtn.hidden = false;
+    installEmbedBtn.disabled = false;
+    installEmbedBtn.textContent = "Установить bge-m3 (~1.2 ГБ)";
   }
 
   let docs: DocumentMeta[] = [];
@@ -778,6 +800,75 @@ async function deleteDocument(d: DocumentMeta) {
   await refreshDocuments();
 }
 
+// ── Установка модели эмбеддингов (операционный слой): pull с прогрессом ───────
+
+// Частые статусы Ollama /api/pull → понятный русский.
+function ruPullStatus(status: string): string {
+  if (status.startsWith("pulling manifest")) return "Получение манифеста";
+  if (status.startsWith("pulling")) return "Скачивание";
+  if (status.startsWith("verifying")) return "Проверка";
+  if (status.startsWith("writing")) return "Запись";
+  if (status.startsWith("removing")) return "Очистка";
+  if (status === "success") return "Готово";
+  return status || "Установка";
+}
+
+function gb(bytes: number): string {
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} ГБ`;
+}
+
+// «Установить bge-m3»: тянет модель через Rust (pull_model) с прогрессом и отменой.
+async function installEmbeddingModel() {
+  installEmbedBtn.hidden = true;
+  docStatusEl.hidden = true; // на месте карточки — прогресс
+  pulling = true;
+  pullCancelled = false;
+  pullCancelBtn.hidden = false;
+  pullCancelBtn.disabled = false;
+  showIndexProgress("Подготовка установки…", 0.02);
+
+  const onEvent = new Channel<PullEvent>();
+  onEvent.onmessage = (e) => {
+    if (e.type !== "progress") return;
+    const frac = e.total > 0 ? e.completed / e.total : 0;
+    const ru = ruPullStatus(e.status);
+    const tail = e.total > 0 ? ` ${Math.round(frac * 100)}% (${gb(e.completed)} из ${gb(e.total)})` : "";
+    showIndexProgress(`${ru}${tail}`, frac);
+  };
+
+  try {
+    await invoke("pull_model", { name: "bge-m3", onEvent });
+    pullCancelBtn.hidden = true;
+    if (pullCancelled) {
+      flashIndexLabel("Установка отменена — можно докачать позже (Ollama продолжит с места)", false);
+    } else {
+      flashIndexLabel("Модель bge-m3 установлена", false);
+      // модель появилась — обновляем статус базы и список моделей без перезапуска
+      await refreshDocuments();
+      await loadModels();
+    }
+  } catch (e) {
+    pullCancelBtn.hidden = true;
+    flashIndexLabel(String(e), true);
+  } finally {
+    pulling = false;
+    pullCancelBtn.hidden = true;
+    // если модель так и не установилась — вернуть карточку с кнопкой
+    if (!embeddingReady) {
+      docStatusEl.hidden = false;
+      installEmbedBtn.hidden = false;
+      installEmbedBtn.disabled = false;
+    }
+  }
+}
+
+function cancelPull() {
+  pullCancelled = true;
+  pullCancelBtn.disabled = true;
+  invoke("cancel_pull").catch(() => {});
+  showIndexProgress("Отмена…", 0);
+}
+
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
 
 // Пакует найденные фрагменты в одно system-сообщение в рамках бюджета символов.
@@ -805,15 +896,20 @@ function buildContext(retrieved: RetrievedChunk[]): {
   return { contextMsg: { role: "system" as Role, content }, sources };
 }
 
-// Рисует строку источников под ответом ассистента (сгруппировано по документу).
+// Рисует строку источников под ответом — но КАЖДЫЙ документ упоминаем один раз за
+// диалог. Если все источники этого ответа уже показывались ранее — заметку не рисуем
+// (не повторяем под каждым сообщением). Новый документ, попавший в дело, покажем один раз.
 function renderSources(turn: HTMLElement, sources: SourceRef[]) {
   if (!sources.length) return;
   const byDoc = new Map<string, number[]>();
   for (const s of sources) {
+    if (shownSourceFiles.has(s.filename)) continue; // этот документ уже упоминали
     const arr = byDoc.get(s.filename) ?? [];
     arr.push(s.chunk_index + 1);
     byDoc.set(s.filename, arr);
   }
+  if (byDoc.size === 0) return; // все источники уже показаны ранее — не повторяемся
+  for (const name of byDoc.keys()) shownSourceFiles.add(name);
   const items = [...byDoc.entries()].map(
     ([name, frags]) => `${name} (фрагм. ${frags.join(", ")})`,
   );
@@ -857,6 +953,7 @@ async function persist() {
 // Перерисовывает ленту по текущему массиву history.
 function renderHistory() {
   messagesEl.innerHTML = "";
+  shownSourceFiles.clear(); // заново считаем «первое упоминание» источников в этом диалоге
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
   for (const m of history) addBubble(m.role, m.content, m.doc, m.sources);
   refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
@@ -951,6 +1048,7 @@ function newDialog() {
   if (streaming) stop();
   currentId = crypto.randomUUID();
   history.length = 0;
+  shownSourceFiles.clear(); // новый диалог — источники снова показываем с первого раза
   messagesEl.innerHTML = "";
   refreshEmptyState(); // пустой диалог → показываем приветствие
   refreshConversationList(); // снимет подсветку (нового ещё нет в списке)
@@ -1321,12 +1419,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   addDocBtn = document.querySelector("#add-doc-btn")!;
   docListEl = document.querySelector("#doc-list")!;
   docStatusEl = document.querySelector("#doc-status")!;
+  docStatusTextEl = document.querySelector("#doc-status-text")!;
+  installEmbedBtn = document.querySelector("#install-embed-btn")!;
+  pullCancelBtn = document.querySelector("#pull-cancel-btn")!;
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
   tabChatsBtn.addEventListener("click", () => switchTab("chats"));
   tabDocsBtn.addEventListener("click", () => switchTab("docs"));
   addDocBtn.addEventListener("click", addDocument);
+  installEmbedBtn.addEventListener("click", installEmbeddingModel);
+  pullCancelBtn.addEventListener("click", cancelPull);
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности

@@ -11,6 +11,10 @@ use tauri::Manager;
 /// Флаг отмены текущего стрима (нажата «Стоп»). Управляется через состояние Tauri.
 struct CancelFlag(AtomicBool);
 
+/// Отдельный флаг отмены установки модели (`/api/pull`). Отдельный от CancelFlag,
+/// чтобы отмена скачивания не гасила идущий чат и наоборот — они могут идти параллельно.
+struct PullCancelFlag(AtomicBool);
+
 /// Сериализует доступ к settings.json. set_setting делает read-modify-write всего
 /// файла; без этого лока две близкие записи (тема/модель/Thinking) могли бы прочитать
 /// старое состояние и затереть ключи друг друга. Лок держим на время чтения+записи.
@@ -165,6 +169,112 @@ async fn chat_stream(
 /// чтение — соединение с Ollama закроется, генерация остановится (не жжём GPU).
 #[tauri::command]
 fn cancel_stream(cancel: tauri::State<'_, CancelFlag>) {
+    cancel.0.store(true, Ordering::Relaxed);
+}
+
+// ── Установка моделей (операционный слой): /api/pull с прогрессом ─────────────
+
+/// Прогресс установки модели. status — стадия (manifest/downloading/verify/…),
+/// completed/total — байты текущего слоя (0/0 у статусных строк без чисел).
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum PullEvent {
+    Progress {
+        status: String,
+        completed: u64,
+        total: u64,
+    },
+    Done,
+}
+
+/// Установка модели в Ollama (`POST /api/pull`, stream:true). Тянет модель из
+/// интернета (онлайн-провижининг). Поток NDJSON разбираем тем же способом, что и
+/// chat_stream; прогресс шлём через Channel; поддерживаем отмену (PullCancelFlag).
+/// Только localhost — наружу ходит сама Ollama, не приложение.
+#[tauri::command]
+async fn pull_model(
+    name: String,
+    on_event: Channel<PullEvent>,
+    cancel: tauri::State<'_, PullCancelFlag>,
+) -> Result<(), String> {
+    cancel.0.store(false, Ordering::Relaxed); // новая установка — сбрасываем отмену
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "name": name, "stream": true });
+
+    let mut resp = client
+        .post("http://127.0.0.1:11434/api/pull")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Ollama вернул ошибку {status}: {text}"));
+    }
+
+    // Разбор одной NDJSON-строки: статус/прогресс или ошибка (напр. нет интернета).
+    let handle = |line: &str, on_event: &Channel<PullEvent>| -> Result<(), String> {
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(j) => j,
+            Err(_) => return Ok(()), // неполная/служебная строка — пропускаем
+        };
+        // Ошибка приходит полем "error" (нет сети, неизвестная модель и т. п.).
+        if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
+            return Err(format!(
+                "Не удалось скачать модель: {err}. Нужен доступ в интернет \
+                 (офлайн-установка моделей с диска появится отдельным механизмом)."
+            ));
+        }
+        let status = json
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let completed = json.get("completed").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let _ = on_event.send(PullEvent::Progress {
+            status,
+            completed,
+            total,
+        });
+        Ok(())
+    };
+
+    // Тот же байтовый разбор NDJSON, что в chat_stream (UTF-8 на границе чанков,
+    // дочитка хвоста). Проверяем отмену на каждом чанке — прерывание скачивания.
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if cancel.0.load(Ordering::Relaxed) {
+            // отмена: рвём соединение; Ollama останавливает закачку и докачает с места при повторе
+            return Ok(());
+        }
+        buf.extend_from_slice(&chunk);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            if !line.is_empty() {
+                handle(line, &on_event)?;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim();
+        if !line.is_empty() {
+            handle(line, &on_event)?;
+        }
+    }
+
+    let _ = on_event.send(PullEvent::Done);
+    Ok(())
+}
+
+/// Отмена текущей установки модели. pull_model увидит флаг и прервёт скачивание.
+#[tauri::command]
+fn cancel_pull(cancel: tauri::State<'_, PullCancelFlag>) {
     cancel.0.store(true, Ordering::Relaxed);
 }
 
@@ -829,10 +939,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CancelFlag(AtomicBool::new(false)))
+        .manage(PullCancelFlag(AtomicBool::new(false)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             cancel_stream,
+            pull_model,
+            cancel_pull,
             extract_document,
             index_document,
             list_documents,
