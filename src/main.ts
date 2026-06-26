@@ -43,6 +43,48 @@ interface DocAttachment {
 // он привязывается к сообщению (Message.doc) и поле ввода очищается.
 let pendingDoc: DocAttachment | null = null;
 
+// ── База документов (Фаза B5): RAG-поиск перед ответом ───────────────────────
+// Сколько фрагментов искать и бюджет их суммарного объёма в контексте. Бюджет —
+// эволюция Фазы A: место в num_ctx 8192 теперь занимают найденные фрагменты, плюс
+// при активном поиске урезаем глубину истории, чтобы ответ не обрывался.
+const RAG_TOP_K = 6;
+const CONTEXT_CHAR_BUDGET = 7000; // ~2300 токенов — с запасом под систему/вопрос/ответ
+const RAG_HISTORY_LIMIT = 6; // последних сообщений истории при активном поиске
+
+// Источник ответа (документ + № фрагмента) — для показа под ответом и истории.
+interface SourceRef {
+  filename: string;
+  chunk_index: number;
+}
+// Найденный фрагмент из Rust (search_documents).
+interface RetrievedChunk {
+  text: string;
+  filename: string;
+  chunk_index: number;
+  page: number | null;
+  distance: number;
+}
+// Карточка документа базы (list_documents).
+interface DocumentMeta {
+  id: number;
+  filename: string;
+  ext: string;
+  added_at: number;
+  char_count: number;
+  chunk_count: number;
+}
+// Прогресс индексации (Channel из index_document).
+interface IndexProgress {
+  phase: string;
+  current: number;
+  total: number;
+}
+
+// Число документов в базе: >0 → перед ответом ищем релевантные фрагменты.
+let docsCount = 0;
+// Установлена ли модель эмбеддингов (без неё индексация/поиск невозможны).
+let embeddingReady = false;
+
 // События из Rust (см. ChatEvent в lib.rs).
 type ChatEvent =
   | { type: "chunk"; content: string }
@@ -54,6 +96,7 @@ interface Message {
   role: Role;
   content: string;
   doc?: DocAttachment; // только у реплик пользователя, к которым приложен файл
+  sources?: SourceRef[]; // только у ответов ассистента на основе базы документов
 }
 
 // Модель + поддержка рассуждений (из list_models).
@@ -118,6 +161,16 @@ let docChipEl: HTMLElement;
 let docChipBadgeEl: HTMLElement;
 let docChipNameEl: HTMLElement;
 let docRemoveBtn: HTMLButtonElement;
+let tabChatsBtn: HTMLButtonElement;
+let tabDocsBtn: HTMLButtonElement;
+let paneChatsEl: HTMLElement;
+let paneDocsEl: HTMLElement;
+let addDocBtn: HTMLButtonElement;
+let docListEl: HTMLElement;
+let docStatusEl: HTMLElement;
+let indexProgressEl: HTMLElement;
+let indexProgressFill: HTMLElement;
+let indexProgressLabel: HTMLElement;
 
 // Формат файла → подпись бейджа и CSS-класс цвета. Неизвестное — нейтральный «ФАЙЛ».
 function fileFormat(ext: string): { label: string; cls: string } {
@@ -170,7 +223,12 @@ function buildDocCard(doc: DocAttachment): HTMLElement {
 
 // Создаёт «обмен» (turn) и возвращает контейнер для текста (для дозаписи):
 // пользователь — справа в градиент-пузыре; ассистент — слева с аватаром «j».
-function addBubble(role: Role, text: string, doc?: DocAttachment): HTMLElement {
+function addBubble(
+  role: Role,
+  text: string,
+  doc?: DocAttachment,
+  sources?: SourceRef[],
+): HTMLElement {
   const turn = document.createElement("div");
   let body: HTMLElement;
   if (role === "user") {
@@ -186,6 +244,7 @@ function addBubble(role: Role, text: string, doc?: DocAttachment): HTMLElement {
     body.className = "msg";
     body.innerHTML = renderMarkdown(text); // ответ — как Markdown/формулы, без аватара/подписи
     turn.appendChild(body);
+    if (sources && sources.length) renderSources(turn, sources); // источники из базы
   }
   messagesEl.appendChild(turn);
   refreshEmptyState();
@@ -270,12 +329,19 @@ function setStreaming(on: boolean) {
   if (!on && selectedModel) inputEl.focus(); // вернуть фокус в поле после ответа
 }
 
-// Собирает массив сообщений для Ollama: система + история. Реплику с приложенным
-// документом разворачиваем в текст «документ + вопрос» (модель видит содержимое),
-// сам объект doc в запрос не попадает — только чистые {role, content}.
-function buildApiMessages(): { role: string; content: string }[] {
+// Собирает массив сообщений для Ollama: система + история (+ контекст из базы).
+// Реплику с приложенным документом разворачиваем в текст «документ + вопрос»; сам
+// объект doc/sources в запрос не попадает — только чистые {role, content}.
+// contextMsg (если есть) — фрагменты из базы, вставляются ПЕРЕД текущим вопросом;
+// при активном поиске историю урезаем — место в num_ctx занимают фрагменты.
+function buildApiMessages(contextMsg: Message | null): { role: string; content: string }[] {
   const out: { role: string; content: string }[] = [SYSTEM];
-  for (const m of history) {
+  const msgs = contextMsg ? history.slice(-RAG_HISTORY_LIMIT) : history;
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (contextMsg && i === msgs.length - 1 && m.role === "user") {
+      out.push({ role: contextMsg.role, content: contextMsg.content });
+    }
     if (m.role === "user" && m.doc) {
       out.push({
         role: "user",
@@ -386,10 +452,31 @@ async function send() {
     // финал — по результату команды ниже (авторитетный полный ответ)
   };
 
-  // Контекст для модели: система + история. У реплик с приложенным файлом текст
-  // документа вшиваем прямо в этот ход (doc остаётся «при своём» сообщении и не
-  // уходит в Ollama отдельным полем). Так follow-up вопросы продолжают видеть файл.
-  const messages = buildApiMessages();
+  // RAG: при непустой базе ищем релевантные фрагменты ДО обращения к модели и
+  // вставляем их как контекст. Поиск не должен ронять чат — при сбое идём обычным.
+  let contextMsg: Message | null = null;
+  let sources: SourceRef[] = [];
+  if (docsCount > 0) {
+    try {
+      const retrieved = await invoke<RetrievedChunk[]>("search_documents", {
+        query: text,
+        k: RAG_TOP_K,
+      });
+      if (myGen !== generation) return; // остановили во время поиска
+      if (retrieved.length) {
+        const built = buildContext(retrieved);
+        contextMsg = built.contextMsg;
+        sources = built.sources;
+      }
+    } catch (e) {
+      if (myGen !== generation) return;
+      addNotice(`Поиск по документам недоступен: ${e}`);
+    }
+  }
+
+  // Контекст для модели: система + история (урезанная при RAG) + контекст из базы.
+  // У реплик с приложенным файлом текст документа вшивается в ход (как в Фазе A).
+  const messages = buildApiMessages(contextMsg);
 
   try {
     // Возвращённое значение — ПОЛНЫЙ текст ответа (без гонок с доставкой канала).
@@ -408,7 +495,12 @@ async function send() {
       answer = full; // авторитетный полный ответ
       if (answer.trim()) {
         renderAnswer(answer); // финальное форматирование один раз
-        history.push({ role: "assistant", content: answer });
+        if (sources.length) renderSources(ui.turn, sources); // из каких документов взято
+        history.push({
+          role: "assistant",
+          content: answer,
+          ...(sources.length ? { sources } : {}),
+        });
         persist();
       } else if (!reasoning.trim()) {
         ui.turn.remove(); // совсем пусто — убираем
@@ -522,6 +614,219 @@ function removeDocument() {
   inputEl.focus();
 }
 
+// ── База документов (Фаза B5): вкладки сайдбара + список/добавление/удаление ──
+
+function switchTab(tab: "chats" | "docs") {
+  const docs = tab === "docs";
+  paneChatsEl.hidden = docs;
+  paneDocsEl.hidden = !docs;
+  tabChatsBtn.classList.toggle("active", !docs);
+  tabDocsBtn.classList.toggle("active", docs);
+  if (docs) refreshDocuments(); // на открытии вкладки — свежий список и статус модели
+}
+
+// Тянет список документов и статус модели эмбеддингов; обновляет docsCount.
+async function refreshDocuments() {
+  try {
+    embeddingReady = await invoke<boolean>("embedding_status");
+  } catch {
+    embeddingReady = false;
+  }
+  // подсказка про отсутствие модели эмбеддингов (без неё база не работает)
+  if (embeddingReady) {
+    docStatusEl.hidden = true;
+  } else {
+    docStatusEl.hidden = false;
+    docStatusEl.textContent =
+      "Модель поиска по документам не установлена. Установите её командой: ollama pull bge-m3";
+  }
+
+  let docs: DocumentMeta[] = [];
+  try {
+    docs = await invoke<DocumentMeta[]>("list_documents");
+  } catch (e) {
+    console.error("list_documents:", e);
+  }
+  docsCount = docs.length;
+  renderDocList(docs);
+}
+
+function renderDocList(docs: DocumentMeta[]) {
+  docListEl.innerHTML = "";
+  if (docs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "doc-empty";
+    empty.textContent = embeddingReady
+      ? "База пуста. Добавьте документы — и спрашивайте по ним."
+      : "Документов пока нет.";
+    docListEl.appendChild(empty);
+    return;
+  }
+  for (const d of docs) {
+    const fmt = fileFormat(d.ext);
+    const item = document.createElement("div");
+    item.className = "doc-item";
+
+    const badge = document.createElement("span");
+    badge.className = `fmt-badge ${fmt.cls}`;
+    badge.textContent = fmt.label;
+    item.appendChild(badge);
+
+    const info = document.createElement("div");
+    info.className = "doc-item__info";
+    const name = document.createElement("span");
+    name.className = "doc-item__name";
+    name.textContent = d.filename;
+    const sub = document.createElement("span");
+    sub.className = "doc-item__sub";
+    const frags = `${d.chunk_count} ${plural(d.chunk_count, "фрагмент", "фрагмента", "фрагментов")}`;
+    sub.textContent = `${new Date(d.added_at).toLocaleDateString("ru")} · ${frags}`;
+    info.append(name, sub);
+    item.appendChild(info);
+
+    const del = document.createElement("button");
+    del.className = "doc-item__del";
+    del.textContent = "×";
+    del.title = "Удалить документ из базы";
+    del.addEventListener("click", () => deleteDocument(d));
+    item.appendChild(del);
+
+    docListEl.appendChild(item);
+  }
+}
+
+function showIndexProgress(label: string, frac: number) {
+  indexProgressEl.hidden = false;
+  indexProgressFill.style.width = `${Math.round(frac * 100)}%`;
+  indexProgressLabel.textContent = label;
+  indexProgressLabel.classList.remove("danger");
+}
+
+function hideIndexProgress() {
+  indexProgressEl.hidden = true;
+  indexProgressFill.style.width = "0";
+}
+
+// Краткая надпись в области прогресса (итог/ошибка), затем авто-скрытие.
+function flashIndexLabel(text: string, isError: boolean) {
+  indexProgressEl.hidden = false;
+  indexProgressFill.style.width = "0";
+  indexProgressLabel.textContent = text;
+  indexProgressLabel.classList.toggle("danger", isError);
+  setTimeout(() => {
+    indexProgressLabel.classList.remove("danger");
+    indexProgressEl.hidden = true;
+  }, 3500);
+}
+
+// «Добавить документ»: выбор файла (плагин Фазы A) → индексация с прогрессом.
+async function addDocument() {
+  let path: string | null;
+  try {
+    const sel = await open({
+      multiple: false,
+      filters: [{ name: "Документы", extensions: ["pdf", "docx", "txt", "md"] }],
+    });
+    path = typeof sel === "string" ? sel : null;
+  } catch (e) {
+    flashIndexLabel(`Не удалось открыть диалог: ${e}`, true);
+    return;
+  }
+  if (!path) return;
+
+  addDocBtn.disabled = true;
+  showIndexProgress("Чтение документа…", 0.04);
+
+  const onProgress = new Channel<IndexProgress>();
+  onProgress.onmessage = (p) => {
+    const frac = p.total ? p.current / p.total : 0;
+    if (p.phase === "chunk") showIndexProgress(`Подготовка фрагментов: ${p.total}`, 0.08);
+    else if (p.phase === "embed") showIndexProgress(`Индексация: ${p.current} из ${p.total}`, frac);
+    else if (p.phase === "done") showIndexProgress("Сохранение…", 1);
+  };
+
+  try {
+    const res = await invoke<{ status: string; document: DocumentMeta; rebuilt: boolean }>(
+      "index_document",
+      { path, onProgress },
+    );
+    await refreshDocuments();
+    if (res.rebuilt) {
+      // сменилась модель эмбеддингов → база пересоздана под новую размерность
+      flashIndexLabel("База пересоздана под новую модель поиска — прежние документы добавьте заново", true);
+    } else if (res.status === "exists") {
+      flashIndexLabel(`«${res.document.filename}» уже в базе`, false);
+    } else {
+      flashIndexLabel(`Добавлен: ${res.document.filename}`, false);
+    }
+  } catch (e) {
+    hideIndexProgress();
+    flashIndexLabel(String(e), true);
+  } finally {
+    addDocBtn.disabled = false;
+  }
+}
+
+async function deleteDocument(d: DocumentMeta) {
+  if (!(await confirmModal(`Удалить «${d.filename}» из базы документов?`))) return;
+  try {
+    await invoke("delete_document", { id: d.id });
+  } catch (e) {
+    flashIndexLabel(`Не удалось удалить: ${e}`, true);
+    return;
+  }
+  await refreshDocuments();
+}
+
+// ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
+
+// Пакует найденные фрагменты в одно system-сообщение в рамках бюджета символов.
+// Возвращает сообщение контекста и список источников (для показа под ответом).
+function buildContext(retrieved: RetrievedChunk[]): {
+  contextMsg: Message;
+  sources: SourceRef[];
+} {
+  const parts: string[] = [];
+  const sources: SourceRef[] = [];
+  let used = 0;
+  for (const r of retrieved) {
+    const block = `[Документ «${r.filename}», фрагмент ${r.chunk_index + 1}]\n${r.text}`;
+    if (parts.length && used + block.length > CONTEXT_CHAR_BUDGET) break; // бюджет
+    parts.push(block);
+    sources.push({ filename: r.filename, chunk_index: r.chunk_index });
+    used += block.length;
+  }
+  const content =
+    "Ниже — фрагменты из документов пользователя, которые могут относиться к его вопросу. " +
+    "Если вопрос касается этих документов — отвечай, опираясь на фрагменты, и если нужного " +
+    "ответа в них нет, честно скажи, что в документах это не найдено, и ничего не придумывай. " +
+    "Если же вопрос не связан с этими фрагментами — просто ответь на него как обычно.\n\n" +
+    parts.join("\n\n");
+  return { contextMsg: { role: "system" as Role, content }, sources };
+}
+
+// Рисует строку источников под ответом ассистента (сгруппировано по документу).
+function renderSources(turn: HTMLElement, sources: SourceRef[]) {
+  if (!sources.length) return;
+  const byDoc = new Map<string, number[]>();
+  for (const s of sources) {
+    const arr = byDoc.get(s.filename) ?? [];
+    arr.push(s.chunk_index + 1);
+    byDoc.set(s.filename, arr);
+  }
+  const items = [...byDoc.entries()].map(
+    ([name, frags]) => `${name} (фрагм. ${frags.join(", ")})`,
+  );
+  const row = document.createElement("div");
+  row.className = "sources";
+  const label = document.createElement("span");
+  label.className = "sources__label";
+  label.textContent = "Источники: ";
+  row.appendChild(label);
+  row.appendChild(document.createTextNode(items.join("; ")));
+  turn.appendChild(row);
+}
+
 // ── Диалоги: сохранение/загрузка/переключение/удаление ──────────────────────
 
 // Заголовок диалога — из первого вопроса пользователя (обрезанный).
@@ -553,7 +858,7 @@ async function persist() {
 function renderHistory() {
   messagesEl.innerHTML = "";
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
-  for (const m of history) addBubble(m.role, m.content, m.doc);
+  for (const m of history) addBubble(m.role, m.content, m.doc, m.sources);
   refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
 }
 
@@ -964,6 +1269,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   docRemoveBtn = document.querySelector("#doc-remove")!;
   attachBtn.addEventListener("click", attachDocument);
   docRemoveBtn.addEventListener("click", removeDocument);
+  tabChatsBtn = document.querySelector("#tab-chats-btn")!;
+  tabDocsBtn = document.querySelector("#tab-docs-btn")!;
+  paneChatsEl = document.querySelector("#pane-chats")!;
+  paneDocsEl = document.querySelector("#pane-docs")!;
+  addDocBtn = document.querySelector("#add-doc-btn")!;
+  docListEl = document.querySelector("#doc-list")!;
+  docStatusEl = document.querySelector("#doc-status")!;
+  indexProgressEl = document.querySelector("#index-progress")!;
+  indexProgressFill = document.querySelector("#index-progress-fill")!;
+  indexProgressLabel = document.querySelector("#index-progress-label")!;
+  tabChatsBtn.addEventListener("click", () => switchTab("chats"));
+  tabDocsBtn.addEventListener("click", () => switchTab("docs"));
+  addDocBtn.addEventListener("click", addDocument);
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности
@@ -1043,4 +1361,5 @@ window.addEventListener("DOMContentLoaded", async () => {
   checkOllama();             // неблокирующе: статус движка в шапке
   loadHardware();            // неблокирующе: светофор железа под шапкой
   loadModels();
+  refreshDocuments();        // неблокирующе: число документов (для RAG) и статус модели
 });

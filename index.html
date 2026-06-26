@@ -20,19 +20,46 @@
   <body>
     <div class="app">
       <aside class="sidebar">
-        <div class="side-top">
-          <button type="button" class="newchat" id="new-chat-btn">
-            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-            Новый диалог
-          </button>
+        <div class="side-tabs">
+          <button type="button" class="side-tab active" id="tab-chats-btn">Диалоги</button>
+          <button type="button" class="side-tab" id="tab-docs-btn">Документы</button>
         </div>
 
-        <div class="search">
-          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
-          <input id="conv-search" placeholder="Поиск по диалогам" />
+        <!-- Вкладка «Диалоги» -->
+        <div class="tab-pane" id="pane-chats">
+          <div class="side-top">
+            <button type="button" class="newchat" id="new-chat-btn">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+              Новый диалог
+            </button>
+          </div>
+
+          <div class="search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+            <input id="conv-search" placeholder="Поиск по диалогам" />
+          </div>
+
+          <div class="conv-list" id="conv-list"></div>
         </div>
 
-        <div class="conv-list" id="conv-list"></div>
+        <!-- Вкладка «Документы» (база с поиском по смыслу) -->
+        <div class="tab-pane" id="pane-docs" hidden>
+          <div class="side-top">
+            <button type="button" class="newchat" id="add-doc-btn">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+              Добавить документ
+            </button>
+          </div>
+
+          <div class="doc-status" id="doc-status" hidden></div>
+
+          <div class="index-progress" id="index-progress" hidden>
+            <div class="index-progress__bar"><i id="index-progress-fill"></i></div>
+            <div class="index-progress__label" id="index-progress-label"></div>
+          </div>
+
+          <div class="doc-list" id="doc-list"></div>
+        </div>
 
         <div class="side-foot">
           <div class="hwchip" id="hw-bar" hidden>

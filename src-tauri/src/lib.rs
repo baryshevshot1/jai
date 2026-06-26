@@ -1,5 +1,9 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod chunk; // Чанкинг (Фаза B): резка текста на фрагменты по границам
+mod docstore; // База документов (Фаза B): векторное хранилище SQLite + sqlite-vec
+mod embed; // Эмбеддинги (Фаза B): bge-m3 через Ollama, батчем
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 use tauri::Manager;
@@ -20,15 +24,25 @@ struct DocAttachment {
     truncated: bool,
 }
 
-/// Одно сообщение в диалоге (роль + текст, опц. прикреплённый документ).
-/// Приходит с фронтенда. `doc` сериализуется только когда есть (skip None),
-/// иначе бы пустое поле улетало в запрос к Ollama.
+/// Источник ответа: документ базы и номер фрагмента, на который опирался ответ
+/// (Фаза B5). Сохраняется в истории, в Ollama не уходит.
+#[derive(Clone, Serialize, Deserialize)]
+struct SourceRef {
+    filename: String,
+    chunk_index: i64,
+}
+
+/// Одно сообщение в диалоге (роль + текст, опц. прикреплённый документ, опц.
+/// источники из базы). Приходит с фронтенда. `doc`/`sources` сериализуются только
+/// когда есть (skip None), иначе пустые поля улетали бы в запрос к Ollama.
 #[derive(Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     doc: Option<DocAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sources: Option<Vec<SourceRef>>,
 }
 
 /// Кусочки, которые Rust шлёт обратно в окно по мере генерации ответа.
@@ -217,6 +231,13 @@ async fn ollama_version() -> Result<String, String> {
     Ok(version)
 }
 
+/// Установлена ли модель эмбеддингов (для интерфейса базы документов): можно ли
+/// индексировать и искать. Мягкая проверка, сетевые сбои → false.
+#[tauri::command]
+async fn embedding_status() -> bool {
+    embed::is_available().await
+}
+
 /// Сведения о железе для «светофора». Считается локально, без сети.
 #[derive(Serialize)]
 struct HardwareInfo {
@@ -369,7 +390,13 @@ struct DocumentText {
 /// Синхронная команда: тяжёлый разбор (крупный PDF) идёт в пуле потоков Tauri.
 #[tauri::command]
 fn extract_document(path: String) -> Result<DocumentText, String> {
-    let p = std::path::Path::new(&path);
+    read_document(&path)
+}
+
+/// Извлечение текста из файла. Переиспользуется индексацией базы (Фаза B3),
+/// поэтому вынесено из команды в обычную функцию.
+fn read_document(path: &str) -> Result<DocumentText, String> {
+    let p = std::path::Path::new(path);
     if !p.is_file() {
         return Err("Файл не найден или недоступен".to_string());
     }
@@ -455,6 +482,175 @@ fn extract_docx(p: &std::path::Path) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+// ── База документов (Фаза B): индексация, список, удаление ────────────────────
+
+/// Прогресс индексации, шлётся в окно через Channel (как стриминг чата).
+/// phase: "chunk" | "embed" | "store" | "done".
+#[derive(Clone, Serialize)]
+struct IndexProgress {
+    phase: String,
+    current: usize,
+    total: usize,
+}
+
+/// Итог индексации одного документа.
+/// status: "indexed" — добавлен; "exists" — уже был (тот же sha256), не дублируем;
+/// "reindexed" — база была пересоздана из-за смены размерности вектора.
+#[derive(Serialize)]
+struct IndexResult {
+    status: String,
+    document: docstore::DocumentMeta,
+    rebuilt: bool,
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Индексация документа в базу: sha256 → извлечение текста (Фаза A) → чанкинг →
+/// эмбеддинги батчами (с прогрессом) → запись в транзакции. Идемпотентно по sha256.
+#[tauri::command]
+async fn index_document(
+    app: tauri::AppHandle,
+    path: String,
+    on_progress: Channel<IndexProgress>,
+) -> Result<IndexResult, String> {
+    // 1) sha256 содержимого файла — для идемпотентности.
+    let bytes = std::fs::read(&path).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+
+    // 2) текст (переиспуем извлечение Фазы A) + резка на фрагменты по границам.
+    let doc = read_document(&path)?;
+    let chunks = chunk::chunk_text(&doc.text);
+    if chunks.is_empty() {
+        return Err("Не удалось разбить документ на фрагменты".to_string());
+    }
+    let total = chunks.len();
+    let _ = on_progress.send(IndexProgress {
+        phase: "chunk".into(),
+        current: total,
+        total,
+    });
+
+    // 3) дубликат по sha256 — короткая сессия БД, соединение не держим через await.
+    {
+        let conn = docstore::open(&docstore::db_path(&app)?)?;
+        if let Some(existing) = docstore::find_by_hash(&conn, &sha)? {
+            return Ok(IndexResult {
+                status: "exists".into(),
+                document: existing,
+                rebuilt: false,
+            });
+        }
+    }
+
+    // 4) эмбеддинги батчами — самый долгий этап, шлём прогресс по каждому батчу.
+    const BATCH: usize = 16;
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(total);
+    for batch in chunks.chunks(BATCH) {
+        let part = embed::embed_batch(batch).await?;
+        vectors.extend(part);
+        let _ = on_progress.send(IndexProgress {
+            phase: "embed".into(),
+            current: vectors.len(),
+            total,
+        });
+    }
+    let dim = vectors[0].len();
+
+    // 5) запись: документ + фрагменты + векторы одной транзакцией (атомарно).
+    let added_at = now_ms();
+    let mut conn = docstore::open(&docstore::db_path(&app)?)?;
+    let rebuilt = docstore::ensure_vec_table(&conn, dim)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Не удалось начать транзакцию: {e}"))?;
+    let doc_id = docstore::insert_document(
+        &tx,
+        &doc.name,
+        &doc.ext,
+        &sha,
+        added_at,
+        doc.chars as i64,
+        total as i64,
+    )?;
+    for (i, (text, vec)) in chunks.iter().zip(&vectors).enumerate() {
+        let chunk_id = docstore::insert_chunk(&tx, doc_id, i as i64, text, None)?;
+        docstore::insert_vector(&tx, chunk_id, vec)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("Не удалось сохранить индекс: {e}"))?;
+    let _ = on_progress.send(IndexProgress {
+        phase: "done".into(),
+        current: total,
+        total,
+    });
+
+    Ok(IndexResult {
+        status: if rebuilt { "reindexed" } else { "indexed" }.into(),
+        document: docstore::DocumentMeta {
+            id: doc_id,
+            filename: doc.name,
+            ext: doc.ext,
+            added_at,
+            char_count: doc.chars as i64,
+            chunk_count: total as i64,
+        },
+        rebuilt,
+    })
+}
+
+/// Список документов базы (для интерфейса).
+#[tauri::command]
+fn list_documents(app: tauri::AppHandle) -> Result<Vec<docstore::DocumentMeta>, String> {
+    let conn = docstore::open(&docstore::db_path(&app)?)?;
+    docstore::list_documents(&conn)
+}
+
+/// Удаление документа из базы (вместе с фрагментами и векторами).
+#[tauri::command]
+fn delete_document(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let conn = docstore::open(&docstore::db_path(&app)?)?;
+    docstore::delete_document(&conn, id)
+}
+
+/// Пуста ли база документов (фронт решает, включать ли поиск перед вопросом).
+#[tauri::command]
+fn documents_empty(app: tauri::AppHandle) -> Result<bool, String> {
+    let conn = docstore::open(&docstore::db_path(&app)?)?;
+    docstore::is_empty(&conn)
+}
+
+/// Семантический поиск по базе: эмбеддинг вопроса → KNN top-k фрагментов с
+/// метаданными. Пустой запрос/пустая база → пусто (без обращения к эмбеддингам).
+#[tauri::command]
+async fn search_documents(
+    app: tauri::AppHandle,
+    query: String,
+    k: usize,
+) -> Result<Vec<docstore::RetrievedChunk>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    // пустая база → не трогаем эмбеддинги (соединение не держим через await)
+    {
+        let conn = docstore::open(&docstore::db_path(&app)?)?;
+        if docstore::is_empty(&conn)? {
+            return Ok(Vec::new());
+        }
+    }
+    let qvec = embed::embed_one(q).await?;
+    let conn = docstore::open(&docstore::db_path(&app)?)?;
+    docstore::search(&conn, &qvec, k)
 }
 
 // ── История диалогов: хранение в appDataDir/conversations/<id>.json ──────────
@@ -613,6 +809,7 @@ fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    docstore::register_vec(); // зарегистрировать sqlite-vec до открытия любых соединений
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -621,8 +818,14 @@ pub fn run() {
             chat_stream,
             cancel_stream,
             extract_document,
+            index_document,
+            list_documents,
+            delete_document,
+            documents_empty,
+            search_documents,
             list_models,
             ollama_version,
+            embedding_status,
             detect_hardware,
             list_conversations,
             load_conversation,
