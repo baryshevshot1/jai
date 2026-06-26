@@ -60,19 +60,29 @@ git push --tags            # запускает .github/workflows/release.yml
 ```
 index.html              — точка входа фронтенда (Vite)
 src/                    — фронтенд (TypeScript)
-  main.ts               — входной скрипт
+  main.ts               — входной скрипт (чат, документы/RAG, настройки, UI)
+  markdown.ts           — рендер Markdown/формул в ответах
   styles.css
   assets/
 src-tauri/              — бэкенд Rust + конфиг Tauri
-  src/main.rs, lib.rs   — код Rust
+  src/main.rs, lib.rs   — код Rust (Tauri-команды: чат, модели, документы, настройки)
+  src/docstore.rs       — векторное хранилище документов (SQLite + sqlite-vec)
+  src/embed.rs          — эмбеддинги bge-m3 через Ollama
+  src/chunk.rs          — разбивка текста на фрагменты (чанкинг)
   tauri.conf.json       — конфиг приложения (имя, окно, бандл, иконки)
   capabilities/default.json — разрешения (permissions)
   Cargo.toml            — зависимости Rust
   icons/                — иконки приложения
-.github/workflows/release.yml — CI-сборка (tauri-action, matrix)
-docs/                   — руководство и инженерный отчёт
+.github/workflows/release.yml — CI-сборка (tauri-action, matrix Linux/Windows/macOS)
+docs/                   — проектные документы (руководство, инженерный отчёт, отчёт Фазы B)
+CHANGELOG.md            — журнал изменений (актуальное состояние по фичам)
 CLAUDE.md, README.md, LICENSE, .gitignore, .editorconfig, .nvmrc
 ```
+
+> **Статус реализации** (что уже работает vs планы) — в [`CHANGELOG.md`](./CHANGELOG.md).
+> Готово: чат, история, документы (прикрепление + база/RAG), установка моделей из UI,
+> светофор железа, темы, долговечные настройки. В планах: зрение/OCR, навык кода,
+> остальной операционный слой (управление процессом Ollama, офлайн-поставка моделей).
 
 ## Что НЕ трогать
 
@@ -139,4 +149,8 @@ tool-calling (веб-поиск, чтение URL, готовые API — пог
 
 ## Полная документация
 
-См. `docs/` — пошаговое руководство (11 фаз, 42 шага) и инженерный отчёт с обоснованием решений.
+- [`CHANGELOG.md`](./CHANGELOG.md) — журнал изменений: что и когда реализовано, со ссылками на коммиты (актуальный статус).
+- [`README.md`](./README.md) — как поднять/запустить проект, возможности, структура.
+- `docs/` — проектные документы фазы проектирования: пошаговое руководство (11 фаз, 42 шага),
+  инженерный отчёт с обоснованием решений, отчёт по Фазе B (RAG). HTML-файлы — снимки замысла;
+  актуальное состояние кода отражает `CHANGELOG.md`.
