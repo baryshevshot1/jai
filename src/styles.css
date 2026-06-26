@@ -351,7 +351,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-card__actions { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--border); }
+.settings-card__actions { margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--border); }
 .ep-btn {
   flex-shrink: 0;
   padding: 7px 14px;
@@ -392,8 +392,23 @@ body.resizing { cursor: col-resize; user-select: none; }
 .settings-status--error { background: var(--danger-soft); color: var(--danger); }
 
 /* раздел «Модели»: список с состоянием и действиями */
-.models-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s3); }
-.models-head .ep-btn { flex-shrink: 0; }
+/* шапка: короткий заголовок слева + кнопка справа (описание — строкой ниже) */
+.models-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.models-head .settings-card__title { margin: 0; }
+/* описание на всю ширину под шапкой — кнопке не мешает, помещается строкой */
+.models-desc { margin: 0 0 var(--s3); }
+/* фиксированная ширина кнопки → при смене текста её размер не меняется. По центру. */
+.models-head .ep-btn {
+  flex-shrink: 0;
+  min-width: 206px;
+  justify-content: center;
+}
 .model-list { display: flex; flex-direction: column; }
 .model-row {
   display: flex;

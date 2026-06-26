@@ -1139,8 +1139,8 @@ function openSettings() {
   settingsView.hidden = false;
   settingsBtn.classList.add("active");
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
-  loadModelStates(); // локальные состояния моделей набора
-  applyCheckButton(); // восстановить итог проверки обновлений (сессия)
+  loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
+  resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
 }
 
 // Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
@@ -1317,40 +1317,50 @@ const ICON_REFRESH_CW = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.
 const ICON_CHECK = '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
 const ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>';
 
-// Итог последней проверки обновлений — хранится в сессии, восстанавливается на странице.
+// Итог последней проверки обновлений (для подсчётов). Постоянный статус каждой
+// модели живёт в бейджах строк (updateByTag), а не в кнопке.
 let lastCheck: { current: number; updates: number; errors: number } | null = null;
+let checkBtnTimer: number | undefined;
 
-// Отрисовка кнопки «Проверить обновления» по сохранённому итогу (компактно, цветом).
-function applyCheckButton() {
+// Показать итог проверки В КНОПКЕ кратко (цветом), затем вернуть её к исходному виду.
+// Кнопка не «залипает» — постоянное состояние видно по бейджам у моделей.
+function showCheckResult() {
   checkUpdatesBtn.disabled = false;
-  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err", "checking");
+  checkUpdatesBtn.classList.remove("checking", "check-ok", "check-update", "check-err");
+  if (checkBtnTimer) clearTimeout(checkBtnTimer);
   if (!lastCheck) {
-    checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
-    checkUpdatesBtn.title = "Сверить версии с реестром Ollama (нужен интернет)";
-  } else if (lastCheck.errors > 0) {
+    resetCheckButton();
+    return;
+  }
+  if (lastCheck.errors > 0) {
     checkUpdatesBtn.classList.add("check-err");
     checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Нет сети`;
-    checkUpdatesBtn.title = "Не удалось проверить — нужен интернет. Нажмите, чтобы повторить.";
   } else if (lastCheck.updates > 0) {
     checkUpdatesBtn.classList.add("check-update");
     checkUpdatesBtn.innerHTML = `${ICON_ALERT}Есть обновления (${lastCheck.updates})`;
-    checkUpdatesBtn.title = "Доступны обновления. Нажмите, чтобы перепроверить.";
   } else {
     checkUpdatesBtn.classList.add("check-ok");
     checkUpdatesBtn.innerHTML = `${ICON_CHECK}Актуально`;
-    checkUpdatesBtn.title = "Все установленные модели актуальны. Нажмите, чтобы перепроверить.";
   }
+  // показать кратко и вернуть к исходному виду (не гореть постоянно)
+  checkBtnTimer = window.setTimeout(resetCheckButton, 3500);
 }
 
-// Сброс кнопки к исходному виду (при уходе со страницы); итог в сессии сохраняется.
+// Вернуть кнопку к исходному виду «Проверить обновления».
 function resetCheckButton() {
-  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err");
+  if (checkBtnTimer) {
+    clearTimeout(checkBtnTimer);
+    checkBtnTimer = undefined;
+  }
+  checkUpdatesBtn.disabled = false;
+  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err", "checking");
   checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
+  checkUpdatesBtn.title = "Сверить версии с реестром Ollama (нужен интернет)";
 }
 
-// Пересчитать итог в кнопке из текущих статусов (после установки/обновления модели).
+// Пересчитать итог из текущих статусов и кратко показать (после установки/обновления).
 function recomputeLastCheck() {
-  if (!lastCheck) return; // проверки не было — кнопку не меняем
+  if (!lastCheck) return; // проверки не было — кнопку не трогаем
   let current = 0;
   let updates = 0;
   let errors = 0;
@@ -1361,7 +1371,7 @@ function recomputeLastCheck() {
     else if (s === "error") errors++;
   }
   lastCheck = { current, updates, errors };
-  applyCheckButton();
+  showCheckResult();
 }
 
 function renderModelList() {
@@ -1439,7 +1449,7 @@ async function checkModelUpdates() {
   } catch {
     lastCheck = { current: 0, updates: 0, errors: 1 };
   } finally {
-    applyCheckButton();
+    showCheckResult();
   }
 }
 
