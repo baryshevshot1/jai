@@ -53,6 +53,14 @@ body {
 
 .app { display: flex; height: 100vh; }
 
+/* плавная смена темы на поверхностях без собственного transition
+   (у кнопок/полей он уже есть и сам анимирует цвета) */
+body, .sidebar, .topbar, .main, .hwchip, .modal, .modal-overlay,
+.user-msg, .msg, .code, .err, .divider-v,
+.empty-state__title, .empty-state__hint {
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+}
+
 /* ===================== БОКОВАЯ ПАНЕЛЬ ===================== */
 .sidebar {
   width: var(--side-w);
@@ -160,9 +168,10 @@ body {
 }
 .hwchip {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* кружок у первой строки при опрятном переносе */
   gap: var(--s2);
-  font-size: var(--t-sm);
+  font-size: var(--t-xs);
+  line-height: 1.4;
   color: var(--muted);
   padding: 8px 10px;
   border-radius: var(--r-sm);
@@ -174,6 +183,7 @@ body {
   border-radius: 50%;
   background: var(--green);
   flex-shrink: 0;
+  margin-top: 3px; /* выровнять кружок к первой строке текста */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent);
 }
 .hwchip b { color: var(--text); font-weight: 600; }
@@ -274,7 +284,7 @@ body {
 .divider-v { width: 1px; height: 22px; background: var(--border); }
 
 /* ===================== ЛЕНТА СООБЩЕНИЙ ===================== */
-.feed { flex: 1; overflow-y: auto; }
+.feed { flex: 1; overflow-y: auto; position: relative; }
 .thread {
   max-width: var(--read-w);
   margin: 0 auto;
@@ -282,6 +292,35 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--s6);
+}
+
+/* пустое состояние: видно только когда лента пуста (CSS, без JS) */
+.empty-state { display: none; }
+.thread:empty ~ .empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: var(--s3);
+  padding: var(--s6);
+  pointer-events: none;
+}
+.empty-state__title {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1.1;
+}
+.empty-state__hint {
+  max-width: 360px;
+  font-size: var(--t-md);
+  line-height: 1.55;
+  color: var(--muted);
 }
 .turn { display: flex; flex-direction: column; gap: var(--s2); }
 
@@ -316,7 +355,6 @@ body {
 }
 
 /* рассуждение — переливающийся текст, без рамки и коллапса */
-.reason { margin-bottom: var(--s2); }
 .reason-word { font-size: var(--t-md); font-weight: 500; color: var(--muted); }
 .reason-word.reason-done { cursor: pointer; }
 .reason-word.reason-done:hover { color: var(--text); }
@@ -566,12 +604,33 @@ body {
 .modal__btn--danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .modal__btn--danger:hover { filter: brightness(0.92); border-color: var(--danger); }
 
+/* ===================== ФОКУС-КОЛЬЦА (навигация с клавиатуры) ===================== */
+.newchat:focus-visible,
+.sbtn:focus-visible,
+.iconbtn:focus-visible,
+.tool:focus-visible,
+.think-toggle:focus-visible,
+.send:focus-visible,
+.model-pick:focus-visible,
+.modal__btn:focus-visible,
+.conv-del:focus-visible,
+.reason-toggle:focus-visible,
+.copy:focus-visible,
+.conv:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ===================== СКРОЛЛБАРЫ ===================== */
-::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 99px;
   border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-track { background: transparent; }

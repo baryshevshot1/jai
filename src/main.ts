@@ -592,36 +592,46 @@ interface HardwareInfo {
   tier: "green" | "yellow" | "red";
 }
 
-// «Светофор» железа: определяем ресурсы и показываем полоску под шапкой
-// с рекомендацией модели. Неблокирующая — при сбое показываем нейтральный текст.
+// Склонение существительного по числу (русские правила): 1 ядро, 4 ядра, 18 ядер.
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+// «Светофор» железа: словесная оценка + характеристики с подписями. Уровень,
+// числа и рекомендуемую модель берём из detect_hardware (логику НЕ меняем).
 async function loadHardware() {
   const textEl = document.querySelector("#hw-text")!;
   let hw: HardwareInfo;
   try {
     hw = await invoke<HardwareInfo>("detect_hardware");
   } catch {
-    textEl.textContent = "Железо: не определено";
+    textEl.textContent = "Конфигурация не определена";
     hwBarEl.className = "hwchip hwchip--unknown";
     hwBarEl.removeAttribute("title");
     hwBarEl.hidden = false;
     return;
   }
 
-  const tierWord =
-    hw.tier === "green" ? "зелёный" : hw.tier === "yellow" ? "жёлтый" : "красный";
-  const rec =
-    hw.tier === "green"
-      ? "Рекомендуемая модель: qwen3.5:9b"
-      : hw.tier === "yellow"
-        ? "Рекомендуемая модель: qwen3.5:4b"
-        : "Рекомендуются модели до 4B";
+  // Цвет — у кружка (классы hwchip--*), в тексте — словесная оценка.
+  const word =
+    hw.tier === "green" ? "Оптимально" : hw.tier === "yellow" ? "Достаточно" : "Ограничено";
+  const model = hw.tier === "green" ? "qwen3.5:9b" : "qwen3.5:4b";
 
-  const parts = [`${hw.ram_gb.toFixed(0)} ГБ`, `${hw.cpu_cores} ядер`];
-  if (hw.vram_gb != null) parts.push(`${hw.vram_gb.toFixed(0)} ГБ VRAM`);
+  // Внутри характеристики — неразрывные пробелы (не рвётся); перенос только между ними.
+  const nb = " ";
+  const specs: string[] = [];
+  // GPU — только при наличии выделенной видеопамяти (на unified/Apple Silicon vram_gb == null).
+  if (hw.vram_gb != null) specs.push(`GPU${nb}${hw.vram_gb.toFixed(0)}${nb}ГБ`);
+  specs.push(`RAM${nb}${hw.ram_gb.toFixed(0)}${nb}ГБ`);
+  specs.push(`CPU${nb}${hw.cpu_cores}${nb}${plural(hw.cpu_cores, "ядро", "ядра", "ядер")}`);
 
-  textEl.innerHTML = `Железо: <b>${tierWord}</b> · ${parts.join(" · ")}`;
+  textEl.innerHTML = `<b>${word}</b> · ${specs.join(" · ")}`;
   hwBarEl.className = `hwchip hwchip--${hw.tier}`;
-  hwBarEl.title = rec;
+  hwBarEl.title = `Рекомендуется ${model}`;
   hwBarEl.hidden = false;
 }
 
