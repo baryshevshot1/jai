@@ -53,7 +53,10 @@
 
           <div class="doc-status" id="doc-status" hidden>
             <div class="doc-status__text" id="doc-status-text"></div>
-            <button type="button" class="doc-install-btn" id="install-embed-btn" hidden></button>
+            <div class="doc-status__actions">
+              <button type="button" class="doc-install-btn" id="install-embed-btn" hidden></button>
+              <button type="button" class="doc-install-btn doc-install-btn--ghost" id="install-local-btn" hidden>Указать локально</button>
+            </div>
           </div>
 
           <div class="index-progress" id="index-progress" hidden>
@@ -67,8 +70,15 @@
 
         <div class="side-foot">
           <div class="hwchip" id="hw-bar" hidden>
-            <span class="led"></span>
-            <span id="hw-text"></span>
+            <div class="hwchip__status">
+              <span class="led"></span>
+              <span class="hwchip__word" id="hw-word"></span>
+            </div>
+            <div class="hwchip__specs" id="hw-specs"></div>
+            <div class="hwchip__model" id="hw-model" hidden>
+              <svg class="hwchip__micon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" /></svg>
+              <span id="hw-model-name"></span>
+            </div>
           </div>
           <div class="side-actions">
             <button type="button" class="sbtn" id="check-btn" title="Проверить движок и железо">
@@ -81,10 +91,14 @@
             </button>
           </div>
         </div>
+        <div class="sidebar-resizer" id="sidebar-resizer" title="Потянуть, чтобы изменить ширину"></div>
       </aside>
 
       <main class="main">
         <div class="topbar">
+          <button type="button" class="iconbtn" id="sidebar-toggle" title="Скрыть/показать панель" aria-label="Скрыть или показать панель">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" /></svg>
+          </button>
           <span class="brand">Jarvis AI</span>
           <select class="model-pick" id="model-select" aria-label="Выбор модели"></select>
           <div class="spacer"></div>
@@ -96,6 +110,9 @@
             <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
           </button>
           <div class="divider-v"></div>
+          <button type="button" class="iconbtn" id="settings-btn" title="Настройки · движок и модели" aria-label="Настройки">
+            <svg viewBox="-2 -2 28 28"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+          </button>
           <button type="button" class="iconbtn" id="theme-btn" title="Сменить тему" aria-label="Сменить тему">
             <svg id="theme-icon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></svg>
           </button>
@@ -146,6 +163,56 @@
           </div>
           <div class="hint">Jarvis AI работает офлайн на вашем компьютере · Enter — отправить, Shift+Enter — перенос</div>
         </form>
+
+        <!-- Полноэкранная страница настроек (на месте ленты диалогов) -->
+        <section class="settings-view" id="settings-view" hidden>
+          <div class="settings-head">
+            <button type="button" class="iconbtn" id="settings-back" title="Назад" aria-label="Назад">
+              <svg viewBox="0 0 24 24"><path d="M19 12H5" /><path d="M12 19l-7-7 7-7" /></svg>
+            </button>
+            <span class="settings-head__title">Настройки</span>
+          </div>
+
+          <div class="settings-body">
+            <section class="settings-card">
+              <div class="settings-card__head">
+                <h2 class="settings-card__title">Движок и модели</h2>
+                <p class="settings-card__desc">
+                  Для работы без интернета укажите предзагруженный каталог моделей Ollama и, при
+                  необходимости, путь к движку. Пути сохраняются и применяются при запуске.
+                </p>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Каталог моделей</div>
+                  <div class="settings-field__value" id="ep-models">по умолчанию</div>
+                </div>
+                <button type="button" class="ep-btn" id="ep-set-models">Указать…</button>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Движок Ollama</div>
+                  <div class="settings-field__value" id="ep-engine">по умолчанию</div>
+                </div>
+                <button type="button" class="ep-btn" id="ep-set-engine">Указать…</button>
+              </div>
+
+              <div class="settings-card__actions">
+                <button type="button" class="ep-btn ep-btn--ghost" id="ep-reset">Сбросить к авто-разрешению</button>
+              </div>
+
+              <div class="settings-status" id="settings-status" hidden></div>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
   </body>

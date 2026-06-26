@@ -164,6 +164,13 @@ let convListEl: HTMLElement;
 let newChatBtn: HTMLButtonElement;
 let thinkToggleEl: HTMLButtonElement;
 let themeBtn: HTMLButtonElement;
+let settingsBtn: HTMLButtonElement;
+let settingsView: HTMLElement;
+let settingsBackBtn: HTMLButtonElement;
+let composerWrapEl: HTMLElement;
+let appEl: HTMLElement;
+let sidebarResizer: HTMLElement;
+let sidebarToggleBtn: HTMLButtonElement;
 let convSearchEl: HTMLInputElement;
 let checkBtn: HTMLButtonElement;
 let clearBtn: HTMLButtonElement;
@@ -181,7 +188,14 @@ let docListEl: HTMLElement;
 let docStatusEl: HTMLElement;
 let docStatusTextEl: HTMLElement;
 let installEmbedBtn: HTMLButtonElement;
+let installLocalBtn: HTMLButtonElement;
 let pullCancelBtn: HTMLButtonElement;
+let epModelsEl: HTMLElement;
+let epEngineEl: HTMLElement;
+let epSetModelsBtn: HTMLButtonElement;
+let epSetEngineBtn: HTMLButtonElement;
+let epResetBtn: HTMLButtonElement;
+let settingsStatusEl: HTMLElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -657,10 +671,12 @@ async function refreshDocuments() {
   } else if (!pulling) {
     docStatusEl.hidden = false;
     docStatusTextEl.textContent =
-      "Для поиска по документам нужна модель bge-m3 (~1.2 ГБ). Её можно установить прямо отсюда — без терминала.";
+      "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или укажите локальную поставку (каталог моделей Ollama) — без терминала.";
     installEmbedBtn.hidden = false;
     installEmbedBtn.disabled = false;
-    installEmbedBtn.textContent = "Установить bge-m3 (~1.2 ГБ)";
+    installEmbedBtn.textContent = "Скачать (~1.2 ГБ)";
+    installLocalBtn.hidden = false;
+    installLocalBtn.disabled = false;
   }
 
   let docs: DocumentMeta[] = [];
@@ -869,6 +885,182 @@ function cancelPull() {
   showIndexProgress("Отмена…", 0);
 }
 
+// ── Левая панель: изменение ширины и сворачивание ────────────────────────────
+
+const SIDEBAR_MIN = 200; // нижняя граница ширины
+const SIDEBAR_MAX = 420; // верхняя граница ширины
+
+// Установить ширину панели (в пределах [MIN, MAX]); опц. сохранить в настройки.
+function setSidebarWidth(px: number, persist: boolean) {
+  const w = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(px)));
+  document.documentElement.style.setProperty("--side-w", `${w}px`);
+  if (persist) {
+    invoke("set_setting", { key: "sidebar_width", value: String(w) }).catch(() => {});
+  }
+}
+
+// Перетаскивание ручки у правого края панели. Ширина = позиция курсора по X
+// (панель прижата к левому краю окна). Сохраняем на отпускании.
+function startSidebarResize(e: PointerEvent) {
+  e.preventDefault();
+  document.body.classList.add("resizing");
+  const move = (ev: PointerEvent) => setSidebarWidth(ev.clientX, false);
+  const up = (ev: PointerEvent) => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    document.body.classList.remove("resizing");
+    setSidebarWidth(ev.clientX, true);
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+}
+
+// Свернуть/показать панель (состояние сохраняется).
+function toggleSidebar() {
+  const collapsed = appEl.classList.toggle("sidebar-collapsed");
+  invoke("set_setting", { key: "sidebar_collapsed", value: String(collapsed) }).catch(() => {});
+}
+
+// Восстановить ширину и состояние панели из настроек при старте.
+async function initSidebar() {
+  try {
+    const w = await invoke<string | null>("get_setting", { key: "sidebar_width" });
+    if (w) {
+      const n = parseInt(w, 10);
+      if (!Number.isNaN(n)) setSidebarWidth(n, false);
+    }
+    const collapsed = await invoke<string | null>("get_setting", { key: "sidebar_collapsed" });
+    if (collapsed === "true") appEl.classList.add("sidebar-collapsed");
+  } catch {
+    /* настройки недоступны — ширина по умолчанию */
+  }
+}
+
+// ── Страница настроек (на месте ленты диалогов) ──────────────────────────────
+
+// Открыть настройки: лента и поле ввода скрываются, страница занимает их место.
+function openSettings() {
+  feedEl.hidden = true;
+  composerWrapEl.hidden = true;
+  settingsView.hidden = false;
+  settingsBtn.classList.add("active");
+  refreshEnginePaths(); // подтянуть актуальные пути при открытии
+}
+
+// Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
+function closeSettings() {
+  settingsView.hidden = true;
+  feedEl.hidden = false;
+  composerWrapEl.hidden = false;
+  settingsBtn.classList.remove("active");
+  if (!streaming && selectedModel) inputEl.focus();
+}
+
+// ── Офлайн-поставка: override-пути движка/моделей (без интернета) ─────────────
+
+// Текущие override-пути на странице настроек (из settings.json).
+async function refreshEnginePaths() {
+  try {
+    const models = await invoke<string | null>("get_setting", { key: "ollama_models_dir" });
+    const engine = await invoke<string | null>("get_setting", { key: "ollama_path" });
+    epModelsEl.textContent = models || "по умолчанию";
+    epEngineEl.textContent = engine || "по умолчанию";
+  } catch {
+    /* настройки недоступны — оставляем как есть */
+  }
+}
+
+// Статус-сообщение на странице настроек.
+function settingsStatus(text: string, isError: boolean) {
+  settingsStatusEl.hidden = false;
+  settingsStatusEl.textContent = text;
+  settingsStatusEl.classList.toggle("settings-status--error", isError);
+}
+
+// Выбор каталога моделей Ollama через системный диалог.
+async function pickModelsDir(): Promise<string | null> {
+  try {
+    const sel = await open({ directory: true, multiple: false, title: "Каталог моделей Ollama" });
+    return typeof sel === "string" ? sel : null;
+  } catch {
+    return null;
+  }
+}
+
+// Ядро применения локального каталога моделей: запись override (с валидацией) →
+// перезапуск нашего движка с новым OLLAMA_MODELS (или честно про внешний). Без сети.
+// report — контекстная обратная связь (карточка «Документы» либо страница настроек).
+async function applyModelsDir(dir: string, report: (t: string, err: boolean) => void) {
+  try {
+    await invoke("set_models_dir", { path: dir }); // валидация manifests/blobs + запись
+    const res = await invoke<{ status: string; message: string }>("reload_engine");
+    await refreshDocuments();
+    await loadModels();
+    if (res.status === "external") report(res.message, false);
+    else if (embeddingReady) report("Локальный каталог моделей применён", false);
+    else report("Каталог применён, но bge-m3 в нём не найдена", true);
+  } catch (e) {
+    report(String(e), true); // напр. «не похоже на каталог моделей Ollama»
+  } finally {
+    refreshEnginePaths();
+  }
+}
+
+// «Указать локально» из карточки в «Документах» — обратная связь в прогресс-панель.
+async function installFromLocalDir() {
+  const dir = await pickModelsDir();
+  if (!dir) return;
+  installEmbedBtn.disabled = true;
+  installLocalBtn.disabled = true;
+  showIndexProgress("Применение локального каталога…", 0.4);
+  await applyModelsDir(dir, (t, err) => flashIndexLabel(t, err));
+  installEmbedBtn.disabled = false;
+  installLocalBtn.disabled = false;
+}
+
+// «Указать…» каталог моделей со страницы настроек — обратная связь там же.
+async function settingsPickModels() {
+  const dir = await pickModelsDir();
+  if (!dir) return;
+  settingsStatus("Применение локального каталога…", false);
+  await applyModelsDir(dir, settingsStatus);
+}
+
+// «Указать…» исполняемый файл движка (air-gapped, когда Ollama нет в PATH).
+async function setEnginePathDialog() {
+  let file: string | null;
+  try {
+    const sel = await open({ multiple: false, title: "Исполняемый файл Ollama" });
+    file = typeof sel === "string" ? sel : null;
+  } catch (e) {
+    settingsStatus(`Не удалось открыть диалог: ${e}`, true);
+    return;
+  }
+  if (!file) return;
+  try {
+    await invoke("set_engine_path", { path: file }); // валидация исполняемого файла
+    settingsStatus("Путь к движку сохранён (применится при следующем запуске движка).", false);
+  } catch (e) {
+    settingsStatus(String(e), true);
+  }
+  refreshEnginePaths();
+}
+
+// «Сбросить»: вернуться к авто-разрешению (ресурс → PATH) и применить к движку.
+async function resetEnginePaths() {
+  if (!(await confirmModal("Сбросить override-пути движка и каталога моделей?", "Сбросить"))) return;
+  try {
+    await invoke("clear_engine_overrides");
+    await invoke("reload_engine");
+    await refreshDocuments();
+    await loadModels();
+    settingsStatus("Пути сброшены — авто-разрешение (ресурс → PATH).", false);
+  } catch (e) {
+    settingsStatus(String(e), true);
+  }
+  refreshEnginePaths();
+}
+
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
 
 // Пакует найденные фрагменты в одно system-сообщение в рамках бюджета символов.
@@ -1028,6 +1220,7 @@ function renderConvList() {
 // Открывает диалог из файла в ленту.
 async function openConversation(id: string) {
   if (streaming) stop();
+  if (!settingsView.hidden) closeSettings(); // вышли из настроек — показываем ленту
   let conv: Conversation;
   try {
     conv = await invoke<Conversation>("load_conversation", { id });
@@ -1046,6 +1239,7 @@ async function openConversation(id: string) {
 // «Новый диалог»: пустой чат. Старый уже сохранён — ничего не теряется.
 function newDialog() {
   if (streaming) stop();
+  if (!settingsView.hidden) closeSettings(); // вышли из настроек — показываем ленту
   currentId = crypto.randomUUID();
   history.length = 0;
   shownSourceFiles.clear(); // новый диалог — источники снова показываем с первого раза
@@ -1232,19 +1426,23 @@ function plural(n: number, one: string, few: string, many: string): string {
 // «Светофор» железа: словесная оценка + характеристики с подписями. Уровень,
 // числа и рекомендуемую модель берём из detect_hardware (логику НЕ меняем).
 async function loadHardware() {
-  const textEl = document.querySelector("#hw-text")!;
+  const wordEl = document.querySelector("#hw-word")!;
+  const specsEl = document.querySelector("#hw-specs")!;
+  const modelEl = document.querySelector("#hw-model") as HTMLElement;
+  const modelNameEl = document.querySelector("#hw-model-name")!;
   let hw: HardwareInfo;
   try {
     hw = await invoke<HardwareInfo>("detect_hardware");
   } catch {
-    textEl.textContent = "Конфигурация не определена";
+    wordEl.textContent = "Конфигурация не определена";
+    specsEl.textContent = "";
+    modelEl.hidden = true;
     hwBarEl.className = "hwchip hwchip--unknown";
-    hwBarEl.removeAttribute("title");
     hwBarEl.hidden = false;
     return;
   }
 
-  // Цвет — у кружка (классы hwchip--*), в тексте — словесная оценка.
+  // Цвет — у кружка (классы hwchip--*); статус и рекомендованная модель — текстом в блоке.
   const word =
     hw.tier === "green" ? "Оптимально" : hw.tier === "yellow" ? "Достаточно" : "Ограничено";
   const model = hw.tier === "green" ? "qwen3.5:9b" : "qwen3.5:4b";
@@ -1257,9 +1455,11 @@ async function loadHardware() {
   specs.push(`RAM${nb}${hw.ram_gb.toFixed(0)}${nb}ГБ`);
   specs.push(`CPU${nb}${hw.cpu_cores}${nb}${plural(hw.cpu_cores, "ядро", "ядра", "ядер")}`);
 
-  textEl.innerHTML = `<b>${word}</b> · ${specs.join(" · ")}`;
+  wordEl.textContent = word; // строка 1: статус
+  specsEl.textContent = specs.join(" · "); // строка 2: характеристики (перенос по « · »)
+  modelNameEl.textContent = `Рекомендуется ${model}`; // строка 3: модель — прямо в блоке
+  modelEl.hidden = false;
   hwBarEl.className = `hwchip hwchip--${hw.tier}`;
-  hwBarEl.title = `Рекомендуется ${model}`;
   hwBarEl.hidden = false;
 }
 
@@ -1425,6 +1625,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
   themeBtn = document.querySelector("#theme-btn")!;
+  settingsBtn = document.querySelector("#settings-btn")!;
+  settingsView = document.querySelector("#settings-view")!;
+  settingsBackBtn = document.querySelector("#settings-back")!;
+  composerWrapEl = document.querySelector("#chat-form")!;
+  appEl = document.querySelector(".app")!;
+  sidebarResizer = document.querySelector("#sidebar-resizer")!;
+  sidebarToggleBtn = document.querySelector("#sidebar-toggle")!;
   convSearchEl = document.querySelector("#conv-search")!;
   checkBtn = document.querySelector("#check-btn")!;
   clearBtn = document.querySelector("#clear-btn")!;
@@ -1444,7 +1651,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   docStatusEl = document.querySelector("#doc-status")!;
   docStatusTextEl = document.querySelector("#doc-status-text")!;
   installEmbedBtn = document.querySelector("#install-embed-btn")!;
+  installLocalBtn = document.querySelector("#install-local-btn")!;
   pullCancelBtn = document.querySelector("#pull-cancel-btn")!;
+  epModelsEl = document.querySelector("#ep-models")!;
+  epEngineEl = document.querySelector("#ep-engine")!;
+  epSetModelsBtn = document.querySelector("#ep-set-models")!;
+  epSetEngineBtn = document.querySelector("#ep-set-engine")!;
+  epResetBtn = document.querySelector("#ep-reset")!;
+  settingsStatusEl = document.querySelector("#settings-status")!;
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
@@ -1452,7 +1666,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   tabDocsBtn.addEventListener("click", () => switchTab("docs"));
   addDocBtn.addEventListener("click", addDocument);
   installEmbedBtn.addEventListener("click", installEmbeddingModel);
+  installLocalBtn.addEventListener("click", installFromLocalDir);
   pullCancelBtn.addEventListener("click", cancelPull);
+  epSetModelsBtn.addEventListener("click", settingsPickModels);
+  epSetEngineBtn.addEventListener("click", setEnginePathDialog);
+  epResetBtn.addEventListener("click", resetEnginePaths);
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности
@@ -1464,6 +1682,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   refreshBtn.addEventListener("click", refreshAll);
   newChatBtn.addEventListener("click", newDialog);
   themeBtn.addEventListener("click", toggleTheme);
+  settingsBtn.addEventListener("click", openSettings);
+  settingsBackBtn.addEventListener("click", closeSettings);
+  sidebarResizer.addEventListener("pointerdown", startSidebarResize);
+  sidebarToggleBtn.addEventListener("click", toggleSidebar);
   checkBtn.addEventListener("click", recheck);
   clearBtn.addEventListener("click", clearAllConversations);
   convSearchEl.addEventListener("input", () => {
@@ -1506,6 +1728,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   initTheme(); // применяем сохранённую/системную тему как можно раньше
   initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
+  initSidebar(); // восстанавливаем ширину и состояние левой панели
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {
     e.preventDefault();

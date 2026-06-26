@@ -77,12 +77,43 @@ body, .sidebar, .topbar, .main, .hwchip, .modal, .modal-overlay,
 /* ===================== БОКОВАЯ ПАНЕЛЬ ===================== */
 .sidebar {
   width: var(--side-w);
+  max-width: 42vw; /* при сужении окна панель не «съедает» весь экран */
   flex-shrink: 0;
   background: var(--sidebar);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  position: relative; /* для ручки-ресайзера у правого края */
 }
+/* свёрнутая панель — скрыта; вернуть кнопкой-переключателем в шапке */
+.app.sidebar-collapsed .sidebar { display: none; }
+
+/* ручка изменения ширины у правого края панели */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 3px;
+  width: 2px;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.sidebar-resizer:hover::after,
+body.resizing .sidebar-resizer::after { opacity: 1; }
+body.resizing { cursor: col-resize; user-select: none; }
 .side-top { padding: var(--s4) var(--s3) var(--s2); }
 .newchat {
   width: 100%;
@@ -247,6 +278,102 @@ body, .sidebar, .topbar, .main, .hwchip, .modal, .modal-overlay,
 }
 .doc-install-btn:hover { background: var(--accent-hover); }
 .doc-install-btn:disabled { opacity: 0.6; cursor: default; }
+.doc-status__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.doc-install-btn--ghost {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+}
+.doc-install-btn--ghost:hover { background: var(--hover); color: var(--text); }
+
+/* ===================== СТРАНИЦА НАСТРОЕК (на месте ленты) ===================== */
+.settings-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+.settings-view[hidden] { display: none; }
+.settings-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--border);
+}
+.settings-head__title { font-size: var(--t-lg); font-weight: 600; color: var(--text); }
+.settings-body {
+  width: 100%;
+  max-width: var(--read-w);
+  margin: 0 auto;
+  padding: var(--s6) var(--s5);
+}
+.settings-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--s5);
+}
+.settings-card__head { margin-bottom: var(--s4); }
+.settings-card__title { font-size: var(--t-xl); font-weight: 600; color: var(--text); margin: 0 0 var(--s2); }
+.settings-card__desc { font-size: var(--t-base); line-height: var(--lh-base); color: var(--muted); margin: 0; }
+.settings-field {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--border);
+}
+.settings-field__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.settings-field__icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.settings-field__info { flex: 1; min-width: 0; }
+.settings-field__label { font-size: var(--t-base); color: var(--text); margin-bottom: 2px; }
+.settings-field__value {
+  font-size: var(--t-sm);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-card__actions { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--border); }
+.ep-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+}
+.ep-btn:hover { background: var(--hover); border-color: var(--border-strong); }
+.ep-btn--ghost { background: transparent; color: var(--muted); font-weight: 400; }
+.ep-btn--ghost:hover { color: var(--danger); background: var(--danger-soft); }
+.settings-status {
+  margin-top: var(--s4);
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.settings-status--error { background: var(--danger-soft); color: var(--danger); }
 
 .index-progress { margin: 0 var(--s3) var(--s3); }
 .index-progress__bar { height: 5px; border-radius: var(--r-pill); background: var(--hover); overflow: hidden; }
@@ -282,27 +409,53 @@ body, .sidebar, .topbar, .main, .hwchip, .modal, .modal-overlay,
   flex-direction: column;
   gap: var(--s2);
 }
+/* Карточка «Железо»: статус → характеристики → рекомендованная модель, по центру */
 .hwchip {
   display: flex;
-  align-items: flex-start; /* кружок у первой строки при опрятном переносе */
-  gap: var(--s2);
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 5px;
   font-size: var(--t-xs);
   line-height: 1.4;
   color: var(--muted);
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  border-radius: var(--r);
   background: var(--green-soft);
 }
+.hwchip__status { display: inline-flex; align-items: center; gap: 6px; }
 .hwchip .led {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--green);
   flex-shrink: 0;
-  margin-top: 3px; /* выровнять кружок к первой строке текста */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent);
 }
-.hwchip b { color: var(--text); font-weight: 600; }
+.hwchip__word { color: var(--text); font-weight: 600; font-size: var(--t-base); letter-spacing: -0.01em; }
+.hwchip__specs { color: var(--muted); line-height: 1.5; } /* переносится по « · » */
+.hwchip__model {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  align-self: stretch; /* разделитель на всю ширину карточки, контент по центру */
+  margin-top: 3px;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--muted);
+}
+.hwchip__model[hidden] { display: none; }
+.hwchip__micon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  opacity: 0.7;
+}
+.hwchip__model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hwchip--yellow { background: color-mix(in srgb, #d9a441 14%, var(--surface)); }
 .hwchip--yellow .led { background: #d9a441; box-shadow: 0 0 0 3px color-mix(in srgb, #d9a441 20%, transparent); }
 .hwchip--red { background: var(--danger-soft); }
@@ -865,3 +1018,29 @@ body, .sidebar, .topbar, .main, .hwchip, .modal, .modal-overlay,
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ===================== АДАПТИВ (сужение окна) ===================== */
+/* Элементы топбара должны уметь сжиматься, а не выталкивать друг друга. */
+.model-pick { min-width: 0; }
+.engine { min-width: 0; }
+#status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Среднее окно: плотнее топбар, бренд скрываем (ширину панели ограничивает max-width). */
+@media (max-width: 860px) {
+  .topbar { padding: 0 var(--s4); gap: var(--s2); }
+  .brand { display: none; }
+  .model-pick { max-width: 190px; }
+  #status { max-width: 120px; }
+  .settings-body { padding: var(--s5) var(--s4); }
+  .composer-wrap { padding: var(--s3) var(--s4) var(--s4); }
+}
+
+/* Узкое окно: ещё компактнее; статус движка — только индикатор. */
+@media (max-width: 640px) {
+  .topbar { padding: 0 var(--s3); }
+  .model-pick { max-width: 150px; font-size: var(--t-sm); }
+  #status { max-width: 0; padding: 0; } /* прячем текст, остаётся кружок-индикатор */
+  .iconbtn { width: 32px; height: 32px; }
+  .side-top { padding: var(--s3) var(--s2) var(--s2); }
+  .conv-list, .doc-list { padding-left: var(--s2); padding-right: var(--s2); }
+}

@@ -132,6 +132,53 @@ fn well_known_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
 
+// ── Валидация override-путей (офлайн-поставка) ───────────────────────────────
+
+/// Проверяет, что путь — исполняемый файл движка (для override `ollama_path`).
+pub fn validate_engine_exe(p: &Path) -> Result<(), String> {
+    if !p.is_file() {
+        return Err("Файл движка не найден по указанному пути".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(p)
+            .map_err(|e| format!("Не удалось прочитать файл: {e}"))?
+            .permissions()
+            .mode();
+        if mode & 0o111 == 0 {
+            return Err("Указанный файл не исполняемый (нет права на выполнение)".to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let is_exe = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false);
+        if !is_exe {
+            return Err("Ожидается исполняемый файл .exe".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Проверяет, что каталог похож на каталог моделей Ollama: внутри есть `manifests`
+/// и `blobs` (для override `ollama_models_dir`). Так отсекаем случайные папки.
+pub fn validate_models_dir(p: &Path) -> Result<(), String> {
+    if !p.is_dir() {
+        return Err("Каталог моделей не найден по указанному пути".to_string());
+    }
+    if !p.join("manifests").is_dir() || !p.join("blobs").is_dir() {
+        return Err(
+            "Это не похоже на каталог моделей Ollama (нужны подкаталоги manifests и blobs)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Обеспечить работу движка. Возвращает статус для интерфейса; при запуске своего
 /// процесса сохраняет его дескриптор в EngineState (для остановки на выходе).
 pub async fn ensure(
@@ -231,6 +278,16 @@ fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// Запускали ли движок мы сами (для решения «можно ли перезапустить с новым override»).
+pub fn was_started_by_us(state: &EngineState) -> bool {
+    state.0.lock().unwrap_or_else(|e| e.into_inner()).started_by_us
+}
+
+/// Жив ли движок сейчас (публичная обёртка над проверкой /api/version).
+pub async fn is_running() -> bool {
+    alive().await
+}
+
 /// Остановить движок, ЕСЛИ его запустили мы. Внешний/системный — не трогаем.
 pub fn stop_if_ours(state: &EngineState) {
     let mut g = state.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -274,4 +331,54 @@ fn kill_tree(mut child: Child) {
         .stderr(Stdio::null())
         .status();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("jai_eng_{}_{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // Каталог моделей опознаётся только по наличию manifests/ и blobs/.
+    #[test]
+    fn models_dir_validation() {
+        let d = tmp("models");
+        assert!(validate_models_dir(&d).is_err(), "пустой каталог — не модели");
+        fs::create_dir_all(d.join("manifests")).unwrap();
+        fs::create_dir_all(d.join("blobs")).unwrap();
+        assert!(validate_models_dir(&d).is_ok(), "manifests+blobs — это модели");
+        assert!(validate_models_dir(&d.join("nope")).is_err(), "несуществующий путь");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // Исполняемый файл движка: Unix — по биту исполнения; Windows — по .exe.
+    #[test]
+    fn engine_exe_validation() {
+        let d = tmp("engine");
+        let f = d.join(exe_name());
+        fs::write(&f, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(validate_engine_exe(&f).is_err(), "без бита исполнения — ошибка");
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(validate_engine_exe(&f).is_ok(), "с битом исполнения — ок");
+        }
+        #[cfg(windows)]
+        {
+            assert!(validate_engine_exe(&f).is_ok());
+            let bad = d.join("ollama.txt");
+            fs::write(&bad, b"x").unwrap();
+            assert!(validate_engine_exe(&bad).is_err(), "не .exe — ошибка");
+        }
+        assert!(validate_engine_exe(&d.join("nope")).is_err(), "несуществующий файл");
+        let _ = fs::remove_dir_all(&d);
+    }
 }
