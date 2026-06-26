@@ -7,11 +7,28 @@ use tauri::Manager;
 /// Флаг отмены текущего стрима (нажата «Стоп»). Управляется через состояние Tauri.
 struct CancelFlag(AtomicBool);
 
-/// Одно сообщение в диалоге (роль + текст). Приходит с фронтенда.
+/// Документ, прикреплённый к сообщению пользователя (для сохранения в истории).
+/// Текст уже усечён фронтендом под бюджет контекста. В Ollama НЕ уходит —
+/// при отправке фронт собирает чистые {role, content}, поэтому здесь doc = None.
+#[derive(Clone, Serialize, Deserialize)]
+struct DocAttachment {
+    name: String,
+    ext: String,
+    text: String,
+    chars: usize,
+    #[serde(default)]
+    truncated: bool,
+}
+
+/// Одно сообщение в диалоге (роль + текст, опц. прикреплённый документ).
+/// Приходит с фронтенда. `doc` сериализуется только когда есть (skip None),
+/// иначе бы пустое поле улетало в запрос к Ollama.
 #[derive(Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doc: Option<DocAttachment>,
 }
 
 /// Кусочки, которые Rust шлёт обратно в окно по мере генерации ответа.
@@ -337,6 +354,109 @@ fn detect_vram() -> (Option<f64>, String) {
     (None, "unknown".to_string())
 }
 
+// ── Документы (Фаза A): извлечение текста из одного файла ────────────────────
+
+/// Результат извлечения текста из документа.
+#[derive(Serialize)]
+struct DocumentText {
+    name: String,
+    ext: String,
+    text: String,
+    chars: usize,
+}
+
+/// Извлекает текст из файла по пути. Тип — по расширению. Чтение только в Rust.
+/// Синхронная команда: тяжёлый разбор (крупный PDF) идёт в пуле потоков Tauri.
+#[tauri::command]
+fn extract_document(path: String) -> Result<DocumentText, String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_file() {
+        return Err("Файл не найден или недоступен".to_string());
+    }
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("документ")
+        .to_string();
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let text = match ext.as_str() {
+        "txt" | "md" => extract_txt(p)?,
+        "pdf" => extract_pdf(p)?,
+        "docx" => extract_docx(p)?,
+        _ => return Err("Формат не поддерживается. Доступны: PDF, Word, текст".to_string()),
+    };
+
+    let text = text.trim().to_string();
+    if text.chars().filter(|c| !c.is_whitespace()).count() < 5 {
+        return Err("Не удалось извлечь текст: файл пуст или без текстового слоя".to_string());
+    }
+    let chars = text.chars().count();
+    Ok(DocumentText { name, ext, text, chars })
+}
+
+// TXT/MD: читаем как UTF-8 с заменой битых байтов (без паники).
+fn extract_txt(p: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(p).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// PDF: текстовый слой через pdf-extract (lopdf, чистый Rust). Скан → понятная ошибка.
+fn extract_pdf(p: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(p).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
+    let text = pdf_extract::extract_text_from_mem(&bytes)
+        .map_err(|e| format!("Не удалось разобрать PDF: {e}"))?;
+    if text.chars().filter(|c| !c.is_whitespace()).count() < 20 {
+        return Err(
+            "Похоже, это PDF-скан (изображение без текстового слоя). \
+             Распознавание текста (OCR) появится в этапе по зрению."
+                .to_string(),
+        );
+    }
+    Ok(text)
+}
+
+// DOCX: это ZIP; берём word/document.xml и собираем текст из <w:t>, перенос на </w:p>.
+fn extract_docx(p: &std::path::Path) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use std::io::Read;
+
+    let file = std::fs::File::open(p).map_err(|e| format!("Не удалось открыть файл: {e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|_| "Повреждённый файл DOCX".to_string())?;
+    let mut xml = String::new();
+    zip.by_name("word/document.xml")
+        .map_err(|_| "Это не похоже на документ Word".to_string())?
+        .read_to_string(&mut xml)
+        .map_err(|e| format!("Ошибка чтения DOCX: {e}"))?;
+
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut out = String::new();
+    let mut in_text = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.name().as_ref() == b"w:t" => in_text = true,
+            Ok(Event::End(e)) if e.name().as_ref() == b"w:t" => in_text = false,
+            Ok(Event::End(e)) if e.name().as_ref() == b"w:p" => out.push('\n'),
+            Ok(Event::Text(t)) if in_text => {
+                if let Ok(decoded) = t.decode() {
+                    match quick_xml::escape::unescape(&decoded) {
+                        Ok(u) => out.push_str(&u),
+                        Err(_) => out.push_str(&decoded),
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("Ошибка разбора DOCX: {e}")),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 // ── История диалогов: хранение в appDataDir/conversations/<id>.json ──────────
 
 /// Полный диалог (как лежит в файле).
@@ -495,10 +615,12 @@ fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(CancelFlag(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             cancel_stream,
+            extract_document,
             list_models,
             ollama_version,
             detect_hardware,

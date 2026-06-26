@@ -88,9 +88,14 @@
 
         <form class="composer-wrap" id="chat-form">
           <div class="composer">
+            <div class="doc-chip" id="doc-chip" hidden>
+              <span class="fmt-badge fmt--txt" id="doc-chip-badge"></span>
+              <span class="doc-chip__name" id="doc-chip-name"></span>
+              <button type="button" class="doc-chip__remove" id="doc-remove" title="Убрать документ" aria-label="Убрать документ">×</button>
+            </div>
             <textarea id="chat-input" rows="1" placeholder="Спросите что-нибудь…"></textarea>
             <div class="composer-bar">
-              <button type="button" class="tool" disabled title="Прикрепить документ — скоро">
+              <button type="button" class="tool" id="attach-btn" title="Прикрепить документ (PDF, Word, текст)">
                 <svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.2 20.3a5 5 0 0 1-7.1-7.1l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4l8.5-8.5" /></svg>
               </button>
               <button type="button" class="tool" disabled title="Изображение — скоро">

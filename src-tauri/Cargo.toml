@@ -28,6 +28,12 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # Системная информация (RAM, число ядер) — кроссплатформенно, без сети.
 sysinfo = "0.33"
+# Извлечение текста из документов (Фаза A). Чистый Rust (без C/Python), MIT/Apache-2.0.
+# zip: только deflate (miniz_oxide), чтобы не тянуть C-крейты bzip2/zstd.
+pdf-extract = "0.12"
+quick-xml = "0.40"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+tauri-plugin-dialog = "2"
 
 # Определение видеопамяти на Windows через DXGI (DedicatedVideoMemory).
 # Только под Windows — на Mac/Linux этот крейт не собирается.

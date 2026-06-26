@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { renderMarkdown } from "./markdown";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/atom-one-dark.css";
@@ -24,6 +25,24 @@ const SYSTEM = {
     "Не используй эмодзи и смайлики.",
 };
 
+// Прикреплённый документ (Фаза A). text уже усечён под бюджет контекста.
+// ~50% от num_ctx 8192 (≈3 симв/токен) — остаётся место под систему/историю/ответ.
+const DOC_CHAR_BUDGET = 12000;
+
+// Документ, привязанный к сообщению пользователя. text — уже усечённый под бюджет
+// фрагмент (его «видит» модель); chars — полный размер исходника (для подписи).
+interface DocAttachment {
+  name: string;
+  ext: string;
+  text: string;
+  chars: number;
+  truncated: boolean;
+}
+
+// «Ожидающий» документ: выбран в композере, но ещё не отправлен. При отправке
+// он привязывается к сообщению (Message.doc) и поле ввода очищается.
+let pendingDoc: DocAttachment | null = null;
+
 // События из Rust (см. ChatEvent в lib.rs).
 type ChatEvent =
   | { type: "chunk"; content: string }
@@ -34,6 +53,7 @@ type Role = "user" | "assistant";
 interface Message {
   role: Role;
   content: string;
+  doc?: DocAttachment; // только у реплик пользователя, к которым приложен файл
 }
 
 // Модель + поддержка рассуждений (из list_models).
@@ -93,14 +113,69 @@ let themeBtn: HTMLButtonElement;
 let convSearchEl: HTMLInputElement;
 let checkBtn: HTMLButtonElement;
 let clearBtn: HTMLButtonElement;
+let attachBtn: HTMLButtonElement;
+let docChipEl: HTMLElement;
+let docChipBadgeEl: HTMLElement;
+let docChipNameEl: HTMLElement;
+let docRemoveBtn: HTMLButtonElement;
+
+// Формат файла → подпись бейджа и CSS-класс цвета. Неизвестное — нейтральный «ФАЙЛ».
+function fileFormat(ext: string): { label: string; cls: string } {
+  switch (ext.toLowerCase()) {
+    case "pdf":
+      return { label: "PDF", cls: "fmt--pdf" };
+    case "docx":
+    case "doc":
+      return { label: "DOCX", cls: "fmt--docx" };
+    case "md":
+      return { label: "MD", cls: "fmt--md" };
+    case "txt":
+      return { label: "TXT", cls: "fmt--txt" };
+    default:
+      return { label: "ФАЙЛ", cls: "fmt--txt" };
+  }
+}
+
+// Подпись под именем файла: полный размер либо отметка усечённого фрагмента.
+function docSubline(doc: DocAttachment): string {
+  const n = doc.chars.toLocaleString("ru");
+  const unit = plural(doc.chars, "символ", "символа", "символов");
+  return doc.truncated ? `Фрагмент · из ${n} ${unit}` : `${n} ${unit}`;
+}
+
+// Карточка прикреплённого файла внутри пузыря сообщения (иконка-бейдг + имя + размер).
+function buildDocCard(doc: DocAttachment): HTMLElement {
+  const fmt = fileFormat(doc.ext);
+  const card = document.createElement("div");
+  card.className = "msg-doc";
+  card.title = `${doc.name} · ${fmt.label}`;
+
+  const badge = document.createElement("span");
+  badge.className = `fmt-badge ${fmt.cls}`;
+  badge.textContent = fmt.label;
+  card.appendChild(badge);
+
+  const info = document.createElement("div");
+  info.className = "msg-doc__info";
+  const name = document.createElement("span");
+  name.className = "msg-doc__name";
+  name.textContent = doc.name;
+  const sub = document.createElement("span");
+  sub.className = "msg-doc__sub";
+  sub.textContent = docSubline(doc);
+  info.append(name, sub);
+  card.appendChild(info);
+  return card;
+}
 
 // Создаёт «обмен» (turn) и возвращает контейнер для текста (для дозаписи):
 // пользователь — справа в градиент-пузыре; ассистент — слева с аватаром «j».
-function addBubble(role: Role, text: string): HTMLElement {
+function addBubble(role: Role, text: string, doc?: DocAttachment): HTMLElement {
   const turn = document.createElement("div");
   let body: HTMLElement;
   if (role === "user") {
     turn.className = "turn me";
+    if (doc) turn.appendChild(buildDocCard(doc)); // карточка файла — над текстом запроса
     body = document.createElement("div");
     body.className = "user-msg";
     body.textContent = text; // реплику пользователя — простым текстом
@@ -167,6 +242,16 @@ function addError(text: string) {
   scrollToBottom();
 }
 
+// Нейтральное уведомление в ленте (не ошибка) — напр. предупреждение об усечении.
+function addNotice(text: string) {
+  const row = document.createElement("div");
+  row.className = "notice";
+  row.textContent = text;
+  messagesEl.appendChild(row);
+  refreshEmptyState();
+  scrollToBottom();
+}
+
 function scrollToBottom() {
   if (!autoScroll) return; // прокрутил вверх — не тянем обратно вниз
   feedEl.scrollTop = feedEl.scrollHeight;
@@ -185,15 +270,40 @@ function setStreaming(on: boolean) {
   if (!on && selectedModel) inputEl.focus(); // вернуть фокус в поле после ответа
 }
 
+// Собирает массив сообщений для Ollama: система + история. Реплику с приложенным
+// документом разворачиваем в текст «документ + вопрос» (модель видит содержимое),
+// сам объект doc в запрос не попадает — только чистые {role, content}.
+function buildApiMessages(): { role: string; content: string }[] {
+  const out: { role: string; content: string }[] = [SYSTEM];
+  for (const m of history) {
+    if (m.role === "user" && m.doc) {
+      out.push({
+        role: "user",
+        content:
+          `К сообщению прикреплён документ «${m.doc.name}». Его содержимое:\n\n` +
+          `${m.doc.text}\n\n` +
+          `— Опираясь на этот документ, ответь на вопрос: ${m.content}`,
+      });
+    } else {
+      out.push({ role: m.role, content: m.content });
+    }
+  }
+  return out;
+}
+
 async function send() {
   const text = inputEl.value.trim();
   if (!text || streaming || !selectedModel) return;
 
   inputEl.value = "";
   autoGrow();
-  history.push({ role: "user", content: text });
-  addBubble("user", text);
-  persist(); // вопрос сохраняется сразу
+  // Документ из композера привязываем к ЭТОМУ сообщению и сразу убираем из поля
+  // ввода — он «уехал» вместе с вопросом и больше не висит над строкой.
+  const doc = pendingDoc ?? undefined;
+  clearPendingDoc();
+  history.push({ role: "user", content: text, ...(doc ? { doc } : {}) });
+  addBubble("user", text, doc);
+  persist(); // вопрос (с файлом) сохраняется сразу
   autoScroll = true; // при отправке снова следуем за ответом
 
   const myGen = ++generation;
@@ -276,11 +386,16 @@ async function send() {
     // финал — по результату команды ниже (авторитетный полный ответ)
   };
 
+  // Контекст для модели: система + история. У реплик с приложенным файлом текст
+  // документа вшиваем прямо в этот ход (doc остаётся «при своём» сообщении и не
+  // уходит в Ollama отдельным полем). Так follow-up вопросы продолжают видеть файл.
+  const messages = buildApiMessages();
+
   try {
     // Возвращённое значение — ПОЛНЫЙ текст ответа (без гонок с доставкой канала).
     const full = await invoke<string>("chat_stream", {
       model: selectedModel,
-      messages: [SYSTEM, ...history],
+      messages,
       // think:true шлём ТОЛЬКО моделям, которые это поддерживают (иначе Ollama
       // вернёт ошибку «не умеет размышлять»).
       think: thinkEnabled && (thinkingByModel.get(selectedModel) ?? false),
@@ -322,6 +437,91 @@ function setComposerEnabled(on: boolean) {
   sendBtn.disabled = !on;
 }
 
+// ── Документы (Фаза A): прикрепление одного файла ────────────────────────────
+
+// Чип над полем ввода в режиме загрузки (пока Rust извлекает текст).
+function showDocChipLoading() {
+  docChipBadgeEl.className = "fmt-badge fmt--txt";
+  docChipBadgeEl.textContent = "…";
+  docChipNameEl.textContent = "Читаю документ…";
+  docChipEl.classList.add("doc-chip--loading");
+  docRemoveBtn.hidden = true;
+  docChipEl.hidden = false;
+}
+
+// Чип над полем ввода для готового документа (бейдж формата + имя + кнопка «убрать»).
+function showDocChip(doc: DocAttachment) {
+  const fmt = fileFormat(doc.ext);
+  docChipBadgeEl.className = `fmt-badge ${fmt.cls}`;
+  docChipBadgeEl.textContent = fmt.label;
+  docChipNameEl.textContent = doc.name;
+  docChipEl.title = `${doc.name} · ${docSubline(doc)}`;
+  docChipEl.classList.remove("doc-chip--loading");
+  docRemoveBtn.hidden = false;
+  docChipEl.hidden = false;
+}
+
+function hideDocChip() {
+  docChipEl.hidden = true;
+  docChipEl.classList.remove("doc-chip--loading");
+  docChipEl.removeAttribute("title");
+}
+
+// Полностью сбросить «ожидающий» документ и убрать чип из композера.
+function clearPendingDoc() {
+  pendingDoc = null;
+  hideDocChip();
+}
+
+// «Прикрепить документ»: нативный диалог → извлечение текста в Rust → чип.
+async function attachDocument() {
+  let path: string | null;
+  try {
+    const sel = await open({
+      multiple: false,
+      filters: [{ name: "Документы", extensions: ["pdf", "docx", "txt", "md"] }],
+    });
+    path = typeof sel === "string" ? sel : null;
+  } catch (e) {
+    addError(`Не удалось открыть диалог: ${e}`);
+    return;
+  }
+  if (!path) return; // отмена выбора
+
+  attachBtn.disabled = true;
+  showDocChipLoading();
+
+  let doc: { name: string; ext: string; text: string; chars: number };
+  try {
+    doc = await invoke("extract_document", { path });
+  } catch (e) {
+    clearPendingDoc();
+    attachBtn.disabled = false;
+    addError(String(e));
+    return;
+  }
+
+  // Бюджет контекста: большой документ не валим целиком — берём первую часть и предупреждаем.
+  const truncated = doc.text.length > DOC_CHAR_BUDGET;
+  const text = truncated ? doc.text.slice(0, DOC_CHAR_BUDGET) : doc.text;
+  pendingDoc = { name: doc.name, ext: doc.ext, text, chars: doc.chars, truncated };
+  showDocChip(pendingDoc);
+  attachBtn.disabled = false;
+  if (truncated) {
+    addNotice(
+      `Документ «${doc.name}» большой (${doc.chars.toLocaleString("ru")} символов). ` +
+        `Использована первая часть (~${DOC_CHAR_BUDGET.toLocaleString("ru")} символов). ` +
+        `Полная работа с большими документами появится в следующем этапе (поиск по документу).`,
+    );
+  }
+  inputEl.focus();
+}
+
+function removeDocument() {
+  clearPendingDoc();
+  inputEl.focus();
+}
+
 // ── Диалоги: сохранение/загрузка/переключение/удаление ──────────────────────
 
 // Заголовок диалога — из первого вопроса пользователя (обрезанный).
@@ -353,7 +553,7 @@ async function persist() {
 function renderHistory() {
   messagesEl.innerHTML = "";
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
-  for (const m of history) addBubble(m.role, m.content);
+  for (const m of history) addBubble(m.role, m.content, m.doc);
   refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
 }
 
@@ -757,6 +957,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   convSearchEl = document.querySelector("#conv-search")!;
   checkBtn = document.querySelector("#check-btn")!;
   clearBtn = document.querySelector("#clear-btn")!;
+  attachBtn = document.querySelector("#attach-btn")!;
+  docChipEl = document.querySelector("#doc-chip")!;
+  docChipBadgeEl = document.querySelector("#doc-chip-badge")!;
+  docChipNameEl = document.querySelector("#doc-chip-name")!;
+  docRemoveBtn = document.querySelector("#doc-remove")!;
+  attachBtn.addEventListener("click", attachDocument);
+  docRemoveBtn.addEventListener("click", removeDocument);
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности
