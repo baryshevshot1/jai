@@ -571,14 +571,54 @@ async function send() {
   // У реплик с приложенным файлом текст документа вшивается в ход (как в Фазе A).
   const messages = buildApiMessages(contextMsg);
 
+  // Лестница смягчения (S2): ДО запуска оцениваем память по формуле. При нехватке —
+  // снижаем контекст / подбираем модель полегче «вниз» / честно отказываем. Ручной
+  // выбор не меняем: downscale действует только на этот запрос.
+  let useModel = selectedModel;
+  let useCtx: number | undefined;
+  let downscaleNote: string | null = null;
+  try {
+    const plan = await invoke<{
+      action: string;
+      model: string;
+      num_ctx: number;
+      reason: string | null;
+      original_model: string;
+    }>("plan_inference", { model: selectedModel });
+    if (myGen !== generation) return;
+    if (plan.action === "refuse") {
+      ui.thinking.remove();
+      ui.turn.remove();
+      addNotice(
+        `Не запускаю «${plan.original_model}»: ${plan.reason}. ` +
+          `Выберите модель полегче или освободите память.`,
+      );
+      setStreaming(false);
+      return;
+    }
+    useModel = plan.model;
+    useCtx = plan.num_ctx;
+    if (plan.action === "downscale" && plan.reason) {
+      const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+      downscaleNote =
+        plan.model !== plan.original_model
+          ? `Выполнено на «${plan.model}»: ${plan.reason}.`
+          : `${cap(plan.reason)}.`;
+    }
+  } catch {
+    if (myGen !== generation) return;
+    // оценка недоступна (нет Ollama и т.п.) — не блокируем, идём как есть
+  }
+
   try {
     // Возвращённое значение — ПОЛНЫЙ текст ответа (без гонок с доставкой канала).
     const full = await invoke<string>("chat_stream", {
-      model: selectedModel,
+      model: useModel,
       messages,
       // think:true шлём ТОЛЬКО моделям, которые это поддерживают (иначе Ollama
       // вернёт ошибку «не умеет размышлять»).
-      think: thinkEnabled && (thinkingByModel.get(selectedModel) ?? false),
+      think: thinkEnabled && (thinkingByModel.get(useModel) ?? false),
+      numCtx: useCtx, // рычаг смягчения (Rust: undefined → 8192)
       onEvent,
     });
     if (myGen === generation) {
@@ -598,6 +638,8 @@ async function send() {
       } else if (!reasoning.trim()) {
         ui.turn.remove(); // совсем пусто — убираем
       }
+      // Пост-фактум: спокойно сообщаем, что подобрали модель/контекст полегче.
+      if (downscaleNote && (answer.trim() || reasoning.trim())) addNotice(downscaleNote);
       scrollToBottom();
       setStreaming(false);
     }

@@ -247,6 +247,21 @@ fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
     let mut cmd = Command::new(exe);
     cmd.arg("serve");
     cmd.env("OLLAMA_HOST", OLLAMA_HOST); // явно только localhost (правило проекта)
+
+    // Экономный режим (защита от зависания-от-свопа). Действует, только когда движок
+    // поднимает само приложение; внешнему/системному экземпляру не навязываем.
+    // - MAX_LOADED_MODELS=1: НЕ держать несколько моделей в памяти одновременно —
+    //   главный фикс «маленький запрос уронил систему» (чат + bge-m3 после RAG +
+    //   зрение давали суммарный объём за пределы RAM → своп → зависание).
+    // - NUM_PARALLEL=1: не умножать память на параллельные запросы.
+    // - FLASH_ATTENTION + KV_CACHE_TYPE=q8_0: KV-кэш примерно вдвое меньше.
+    // - KEEP_ALIVE: умеренный (точка тонкой настройки); эмбеддинги уже выгружаются за 30с.
+    cmd.env("OLLAMA_MAX_LOADED_MODELS", "1");
+    cmd.env("OLLAMA_NUM_PARALLEL", "1");
+    cmd.env("OLLAMA_FLASH_ATTENTION", "1");
+    cmd.env("OLLAMA_KV_CACHE_TYPE", "q8_0");
+    cmd.env("OLLAMA_KEEP_ALIVE", "5m");
+
     match models_dir {
         // явный override каталога моделей (для будущей офлайн-поставки)
         Some(dir) => {
