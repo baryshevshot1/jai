@@ -53,6 +53,10 @@ struct ChatMessage {
     doc: Option<DocAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sources: Option<Vec<SourceRef>>,
+    // Зрение (qwen3-vl): сырой base64 изображений. Ollama ждёт поле `images`
+    // прямо в сообщении. Пустой массив не сериализуется (в текстовых не появляется).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
 }
 
 /// Кусочки, которые Rust шлёт обратно в окно по мере генерации ответа.
@@ -279,11 +283,12 @@ fn cancel_pull(cancel: tauri::State<'_, PullCancelFlag>) {
     cancel.0.store(true, Ordering::Relaxed);
 }
 
-/// Модель + флаг поддержки рассуждений (capability "thinking").
+/// Модель + поддержка рассуждений ("thinking") и зрения ("vision") из capabilities.
 #[derive(Serialize)]
 struct ModelInfo {
     name: String,
     thinking: bool,
+    vision: bool,
 }
 
 /// Список установленных моделей из Ollama: GET 127.0.0.1:11434/api/tags.
@@ -309,12 +314,16 @@ async fn list_models() -> Result<Vec<ModelInfo>, String> {
             arr.iter()
                 .filter_map(|m| {
                     let name = m.get("name").and_then(|n| n.as_str())?.to_string();
-                    let thinking = m
-                        .get("capabilities")
-                        .and_then(|c| c.as_array())
-                        .map(|caps| caps.iter().any(|c| c.as_str() == Some("thinking")))
-                        .unwrap_or(false);
-                    Some(ModelInfo { name, thinking })
+                    let caps = m.get("capabilities").and_then(|c| c.as_array());
+                    let has = |cap: &str| {
+                        caps.map(|c| c.iter().any(|x| x.as_str() == Some(cap)))
+                            .unwrap_or(false)
+                    };
+                    Some(ModelInfo {
+                        name,
+                        thinking: has("thinking"),
+                        vision: has("vision"),
+                    })
                 })
                 .collect::<Vec<_>>()
         })
@@ -531,6 +540,36 @@ struct DocumentText {
 #[tauri::command]
 fn extract_document(path: String) -> Result<DocumentText, String> {
     read_document(&path)
+}
+
+/// Читает изображение и возвращает СЫРОЙ base64 (без префикса `data:`) для вложения
+/// в сообщение (поле `images` у vision-моделей). Проверяет тип и размер; чтение — в Rust.
+#[tauri::command]
+fn read_image_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let p = std::path::Path::new(&path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif") {
+        return Err("Формат не поддерживается. Доступны: PNG, JPG, WEBP, GIF".to_string());
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("Не удалось прочитать изображение: {e}"))?;
+    if bytes.is_empty() {
+        return Err("Файл пуст".to_string());
+    }
+    // Картинка занимает контекст vision-модели — ограничиваем размер во избежание
+    // переполнения num_ctx и тяжёлых запросов. Очень большие — понятная ошибка.
+    const MAX: usize = 12 * 1024 * 1024;
+    if bytes.len() > MAX {
+        return Err(format!(
+            "Слишком большое изображение ({} МБ). Максимум — 12 МБ; уменьшите файл.",
+            bytes.len() / 1024 / 1024
+        ));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// Извлечение текста из файла. Переиспользуется индексацией базы (Фаза B3),
@@ -1042,6 +1081,7 @@ pub fn run() {
             cancel_pull,
             ensure_engine,
             extract_document,
+            read_image_base64,
             index_document,
             list_documents,
             delete_document,

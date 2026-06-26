@@ -39,6 +39,7 @@ sqlite-vec = "0.1.9"
 zerocopy = "0.8.52"
 sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["time"] }
+base64 = "0.22.1"
 
 # Определение видеопамяти на Windows через DXGI (DedicatedVideoMemory).
 # Только под Windows — на Mac/Linux этот крейт не собирается.

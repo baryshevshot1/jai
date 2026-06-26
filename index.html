@@ -141,12 +141,17 @@
               <span class="doc-chip__name" id="doc-chip-name"></span>
               <button type="button" class="doc-chip__remove" id="doc-remove" title="Убрать документ" aria-label="Убрать документ">×</button>
             </div>
+            <div class="img-chip" id="img-chip" hidden>
+              <img class="img-chip__thumb" id="img-chip-thumb" alt="Прикреплённое изображение" />
+              <button type="button" class="img-chip__ocr" id="img-ocr" title="Распознать текст на изображении">Извлечь текст</button>
+              <button type="button" class="img-chip__remove" id="img-remove" title="Убрать изображение" aria-label="Убрать изображение">×</button>
+            </div>
             <textarea id="chat-input" rows="1" placeholder="Спросите что-нибудь…"></textarea>
             <div class="composer-bar">
               <button type="button" class="tool" id="attach-btn" title="Прикрепить документ (PDF, Word, текст)">
                 <svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.2 20.3a5 5 0 0 1-7.1-7.1l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4l8.5-8.5" /></svg>
               </button>
-              <button type="button" class="tool" disabled title="Изображение — скоро">
+              <button type="button" class="tool" id="image-btn" title="Прикрепить изображение (PNG, JPG, WEBP)">
                 <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" /></svg>
               </button>
               <button type="button" class="think-toggle" id="think-toggle" title="Режим рассуждений модели (медленнее, но точнее)">

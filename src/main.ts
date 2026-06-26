@@ -43,6 +43,10 @@ interface DocAttachment {
 // он привязывается к сообщению (Message.doc) и поле ввода очищается.
 let pendingDoc: DocAttachment | null = null;
 
+// «Ожидающее» изображение (зрение): base64 выбранной картинки до отправки.
+// Одно изображение за сообщение — бюджет-безопасно для num_ctx.
+let pendingImage: string | null = null;
+
 // ── База документов (Фаза B5): RAG-поиск перед ответом ───────────────────────
 // Сколько фрагментов искать и бюджет их суммарного объёма в контексте. Бюджет —
 // эволюция Фазы A: место в num_ctx 8192 теперь занимают найденные фрагменты, плюс
@@ -108,15 +112,21 @@ interface Message {
   content: string;
   doc?: DocAttachment; // только у реплик пользователя, к которым приложен файл
   sources?: SourceRef[]; // только у ответов ассистента на основе базы документов
+  images?: string[]; // base64 прикреплённых изображений (зрение, qwen3-vl)
 }
 
-// Модель + поддержка рассуждений (из list_models).
+// Сообщение для Ollama: role/content (+ опц. images у vision-запросов).
+type ApiMsg = { role: string; content: string; images?: string[] };
+
+// Модель + поддержка рассуждений и зрения (из list_models).
 interface ModelInfo {
   name: string;
   thinking: boolean;
+  vision: boolean;
 }
-// Какие модели поддерживают «Размышления» (имя → bool).
+// Какие модели поддерживают «Размышления» / «Зрение» (имя → bool).
 const thinkingByModel = new Map<string, boolean>();
+const visionByModel = new Map<string, boolean>();
 
 // История ОТКРЫТОГО диалога (без системного сообщения — его добавляем при отправке).
 const history: Message[] = [];
@@ -179,6 +189,11 @@ let docChipEl: HTMLElement;
 let docChipBadgeEl: HTMLElement;
 let docChipNameEl: HTMLElement;
 let docRemoveBtn: HTMLButtonElement;
+let imageBtn: HTMLButtonElement;
+let imgChipEl: HTMLElement;
+let imgChipThumb: HTMLImageElement;
+let imgOcrBtn: HTMLButtonElement;
+let imgRemoveBtn: HTMLButtonElement;
 let tabChatsBtn: HTMLButtonElement;
 let tabDocsBtn: HTMLButtonElement;
 let paneChatsEl: HTMLElement;
@@ -256,12 +271,22 @@ function addBubble(
   text: string,
   doc?: DocAttachment,
   sources?: SourceRef[],
+  images?: string[],
 ): HTMLElement {
   const turn = document.createElement("div");
   let body: HTMLElement;
   if (role === "user") {
     turn.className = "turn me";
     if (doc) turn.appendChild(buildDocCard(doc)); // карточка файла — над текстом запроса
+    if (images) {
+      for (const b64 of images) {
+        const img = document.createElement("img");
+        img.className = "msg-img";
+        img.src = imageDataUrl(b64);
+        img.alt = "Прикреплённое изображение";
+        turn.appendChild(img); // миниатюра — над текстом запроса
+      }
+    }
     body = document.createElement("div");
     body.className = "user-msg";
     body.textContent = text; // реплику пользователя — простым текстом
@@ -362,29 +387,35 @@ function setStreaming(on: boolean) {
 // объект doc/sources в запрос не попадает — только чистые {role, content}.
 // contextMsg (если есть) — фрагменты из базы, вставляются ПЕРЕД текущим вопросом;
 // при активном поиске историю урезаем — место в num_ctx занимают фрагменты.
-function buildApiMessages(contextMsg: Message | null): { role: string; content: string }[] {
-  const out: { role: string; content: string }[] = [SYSTEM];
+function buildApiMessages(contextMsg: Message | null): ApiMsg[] {
+  const out: ApiMsg[] = [SYSTEM];
   const msgs = contextMsg ? history.slice(-RAG_HISTORY_LIMIT) : history;
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (contextMsg && i === msgs.length - 1 && m.role === "user") {
       out.push({ role: contextMsg.role, content: contextMsg.content });
     }
+    let item: ApiMsg;
     if (m.role === "user" && m.doc) {
       // Документ — справочный материал к этому ходу. НЕ приказываем «отвечай только
       // по нему» и не просим упоминать его в каждом ответе: модель обращается к файлу,
       // когда это относится к вопросу, и не пересказывает его постоянно (как делают
       // другие ассистенты). Содержимое остаётся в контексте диалога для follow-up.
-      out.push({
+      item = {
         role: "user",
         content:
           `[Прикреплён документ «${m.doc.name}» — справочный материал, ` +
           `обращайся к нему, когда это относится к вопросу]\n\n` +
           `${m.doc.text}\n\n———\n\n${m.content}`,
-      });
+      };
     } else {
-      out.push({ role: m.role, content: m.content });
+      item = { role: m.role, content: m.content };
     }
+    // Изображения (зрение) — сырой base64 в поле images; остаются в контексте для follow-up.
+    if (m.role === "user" && m.images && m.images.length) {
+      item.images = m.images;
+    }
+    out.push(item);
   }
   return out;
 }
@@ -395,13 +426,20 @@ async function send() {
 
   inputEl.value = "";
   autoGrow();
-  // Документ из композера привязываем к ЭТОМУ сообщению и сразу убираем из поля
-  // ввода — он «уехал» вместе с вопросом и больше не висит над строкой.
+  // Документ и/или изображение из композера привязываем к ЭТОМУ сообщению и сразу
+  // убираем из поля ввода — они «уехали» вместе с вопросом.
   const doc = pendingDoc ?? undefined;
+  const images = pendingImage ? [pendingImage] : undefined;
   clearPendingDoc();
-  history.push({ role: "user", content: text, ...(doc ? { doc } : {}) });
-  addBubble("user", text, doc);
-  persist(); // вопрос (с файлом) сохраняется сразу
+  clearPendingImage();
+  history.push({
+    role: "user",
+    content: text,
+    ...(doc ? { doc } : {}),
+    ...(images ? { images } : {}),
+  });
+  addBubble("user", text, doc, undefined, images);
+  persist(); // вопрос (с файлом/картинкой) сохраняется сразу
   autoScroll = true; // при отправке снова следуем за ответом
 
   const myGen = ++generation;
@@ -644,6 +682,139 @@ async function attachDocument() {
 function removeDocument() {
   clearPendingDoc();
   inputEl.focus();
+}
+
+// ── Зрение (qwen3-vl): прикрепление изображения, превью, OCR ─────────────────
+
+// MIME изображения по сигнатуре base64 (для data-URL превью; точный тип не храним).
+function imageMime(b64: string): string {
+  if (b64.startsWith("/9j/")) return "image/jpeg";
+  if (b64.startsWith("iVBORw0KG")) return "image/png";
+  if (b64.startsWith("UklGR")) return "image/webp";
+  if (b64.startsWith("R0lGOD")) return "image/gif";
+  return "image/png";
+}
+
+function imageDataUrl(b64: string): string {
+  return `data:${imageMime(b64)};base64,${b64}`;
+}
+
+function showImageChip(b64: string) {
+  imgChipThumb.src = imageDataUrl(b64);
+  imgChipEl.hidden = false;
+}
+
+function clearPendingImage() {
+  pendingImage = null;
+  imgChipEl.hidden = true;
+  imgChipThumb.removeAttribute("src");
+}
+
+// Есть ли среди установленных моделей хоть одна с поддержкой зрения.
+function anyVisionModel(): string | null {
+  for (const [name, vision] of visionByModel) if (vision) return name;
+  return null;
+}
+
+// «Прикрепить изображение»: диалог → чтение base64 в Rust → превью + гейт vision-модели.
+async function attachImage() {
+  let path: string | null;
+  try {
+    const sel = await open({
+      multiple: false,
+      filters: [{ name: "Изображения", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+    });
+    path = typeof sel === "string" ? sel : null;
+  } catch (e) {
+    addError(`Не удалось открыть диалог: ${e}`);
+    return;
+  }
+  if (!path) return;
+
+  let b64: string;
+  try {
+    b64 = await invoke<string>("read_image_base64", { path });
+  } catch (e) {
+    addError(String(e)); // формат/размер — понятная ошибка из Rust
+    return;
+  }
+  pendingImage = b64;
+  showImageChip(b64);
+  ensureVisionModel(); // подобрать/переключить vision-модель или предложить установку
+  inputEl.focus();
+}
+
+function removeImage() {
+  clearPendingImage();
+  inputEl.focus();
+}
+
+// Подбор vision-модели: текущая умеет — ок; иначе переключиться на установленную
+// (с уведомлением) либо предложить установить qwen3-vl.
+function ensureVisionModel() {
+  if (visionByModel.get(selectedModel)) return; // текущая модель видит изображения
+  const vis = anyVisionModel();
+  if (vis) {
+    selectedModel = vis;
+    modelSelectEl.value = vis;
+    updateThinkAvailability();
+    invoke("set_setting", { key: "selected_model", value: vis }).catch(() => {});
+    addNotice(`Для работы с изображением переключился на модель «${vis}».`);
+  } else {
+    offerInstallVision();
+  }
+}
+
+// OCR: «Извлечь текст» — тот же путь зрения, но с готовым OCR-промптом на русском.
+const OCR_PROMPT =
+  "Распознай и извлеки весь текст с изображения дословно, сохраняя структуру " +
+  "(абзацы, списки, таблицы по возможности). Выведи только извлечённый текст.";
+
+function ocrImage() {
+  if (!pendingImage || streaming || !selectedModel) return;
+  inputEl.value = OCR_PROMPT;
+  autoGrow();
+  send(); // vision-запрос с OCR-промптом + прикреплённая картинка
+}
+
+// Нет vision-модели → предложить установить qwen3-vl через существующий pull_model.
+const VISION_MODEL = "qwen3-vl:2b"; // лёгкий вариант для зрения/OCR
+
+async function offerInstallVision() {
+  const ok = await confirmModal(
+    `Для работы с изображениями нужна модель зрения. Установить ${VISION_MODEL} (~2 ГБ)? Потребуется интернет.`,
+    "Установить",
+  );
+  if (!ok) {
+    addNotice(
+      "Чтобы работать с изображениями, установите vision-модель (например, qwen3-vl) — " +
+        "онлайн или с диска (вкладка «Документы» → локальная поставка).",
+    );
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "notice";
+  row.textContent = `Установка ${VISION_MODEL}…`;
+  messagesEl.appendChild(row);
+  refreshEmptyState();
+  scrollToBottom();
+
+  const onEvent = new Channel<PullEvent>();
+  onEvent.onmessage = (e) => {
+    if (e.type !== "progress") return;
+    const pct = e.total > 0 ? ` ${Math.round((e.completed / e.total) * 100)}%` : "";
+    row.textContent = `Установка ${VISION_MODEL}: ${ruPullStatus(e.status)}${pct}`;
+    scrollToBottom();
+  };
+  try {
+    await invoke("pull_model", { name: VISION_MODEL, onEvent });
+    row.textContent = `Модель ${VISION_MODEL} установлена — можно работать с изображениями.`;
+    await loadModels();
+    ensureVisionModel(); // теперь vision-модель есть → переключимся на неё
+  } catch (e) {
+    row.className = "err";
+    row.textContent = `Не удалось установить ${VISION_MODEL}: ${e}`;
+  }
 }
 
 // ── База документов (Фаза B5): вкладки сайдбара + список/добавление/удаление ──
@@ -1147,7 +1318,7 @@ function renderHistory() {
   messagesEl.innerHTML = "";
   shownSourceFiles.clear(); // заново считаем «первое упоминание» источников в этом диалоге
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
-  for (const m of history) addBubble(m.role, m.content, m.doc, m.sources);
+  for (const m of history) addBubble(m.role, m.content, m.doc, m.sources, m.images);
   refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
 }
 
@@ -1360,9 +1531,11 @@ async function loadModels() {
   }
 
   thinkingByModel.clear();
+  visionByModel.clear();
   modelSelectEl.innerHTML = "";
   for (const m of models) {
     thinkingByModel.set(m.name, m.thinking);
+    visionByModel.set(m.name, m.vision);
     const opt = document.createElement("option");
     opt.value = m.name;
     opt.textContent = m.name;
@@ -1640,8 +1813,16 @@ window.addEventListener("DOMContentLoaded", async () => {
   docChipBadgeEl = document.querySelector("#doc-chip-badge")!;
   docChipNameEl = document.querySelector("#doc-chip-name")!;
   docRemoveBtn = document.querySelector("#doc-remove")!;
+  imageBtn = document.querySelector("#image-btn")!;
+  imgChipEl = document.querySelector("#img-chip")!;
+  imgChipThumb = document.querySelector("#img-chip-thumb")!;
+  imgOcrBtn = document.querySelector("#img-ocr")!;
+  imgRemoveBtn = document.querySelector("#img-remove")!;
   attachBtn.addEventListener("click", attachDocument);
   docRemoveBtn.addEventListener("click", removeDocument);
+  imageBtn.addEventListener("click", attachImage);
+  imgRemoveBtn.addEventListener("click", removeImage);
+  imgOcrBtn.addEventListener("click", ocrImage);
   tabChatsBtn = document.querySelector("#tab-chats-btn")!;
   tabDocsBtn = document.querySelector("#tab-docs-btn")!;
   paneChatsEl = document.querySelector("#pane-chats")!;
