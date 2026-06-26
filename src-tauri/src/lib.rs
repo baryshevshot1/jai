@@ -2,6 +2,7 @@
 mod chunk; // Чанкинг (Фаза B): резка текста на фрагменты по границам
 mod docstore; // База документов (Фаза B): векторное хранилище SQLite + sqlite-vec
 mod embed; // Эмбеддинги (Фаза B): bge-m3 через Ollama, батчем
+mod engine; // Операционный слой: управление процессом движка Ollama
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -351,6 +352,30 @@ async fn ollama_version() -> Result<String, String> {
 #[tauri::command]
 async fn embedding_status() -> bool {
     embed::is_available().await
+}
+
+/// Override-путь из настроек (для гибкого разрешения путей движка/моделей). Пустой
+/// или отсутствующий → None. Заполняется в будущем офлайн-инсталлером.
+fn read_setting_path(app: &tauri::AppHandle, key: &str) -> Option<std::path::PathBuf> {
+    read_settings(app)
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Обеспечить работу движка Ollama при старте: переиспользовать запущенный или
+/// поднять свой (с OLLAMA_HOST/OLLAMA_MODELS), дождавшись готовности. Пути к движку
+/// и моделям — гибко (override из настроек → ресурс рядом → PATH), без абсолютов.
+#[tauri::command]
+async fn ensure_engine(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, engine::EngineState>,
+) -> Result<engine::EngineStatus, String> {
+    let exe_override = read_setting_path(&app, "ollama_path");
+    let models_override = read_setting_path(&app, "ollama_models_dir");
+    let resource_dir = app.path().resource_dir().ok();
+    Ok(engine::ensure(&state, exe_override, models_override, resource_dir).await)
 }
 
 /// Сведения о железе для «светофора». Считается локально, без сети.
@@ -941,11 +966,13 @@ pub fn run() {
         .manage(CancelFlag(AtomicBool::new(false)))
         .manage(PullCancelFlag(AtomicBool::new(false)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
+        .manage(engine::EngineState::new())
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             cancel_stream,
             pull_model,
             cancel_pull,
+            ensure_engine,
             extract_document,
             index_document,
             list_documents,
@@ -964,6 +991,14 @@ pub fn run() {
             get_setting,
             set_setting
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            // На выходе из приложения — остановить движок, ЕСЛИ его подняли мы сами.
+            // Внешний/системный экземпляр не трогаем (Принцип 1).
+            if let tauri::RunEvent::Exit = event {
+                let state = handle.state::<engine::EngineState>();
+                engine::stop_if_ours(&state);
+            }
+        });
 }

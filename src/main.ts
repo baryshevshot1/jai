@@ -1263,6 +1263,29 @@ async function loadHardware() {
   hwBarEl.hidden = false;
 }
 
+// Обеспечить движок при старте: приложение само переиспользует запущенную Ollama
+// или поднимает свою (терминал пользователю не нужен). Возвращает, готов ли движок.
+async function ensureEngine(): Promise<boolean> {
+  const engine = document.querySelector("#engine")!;
+  statusEl.textContent = "Запуск движка…";
+  engine.classList.remove("engine--down");
+  let res: { status: string; message: string };
+  try {
+    res = await invoke("ensure_engine");
+  } catch (e) {
+    statusEl.textContent = "Движок недоступен";
+    engine.classList.add("engine--down");
+    console.error("ensure_engine:", e);
+    return false;
+  }
+  if (res.status === "ready") return true; // checkOllama ниже покажет версию
+  // not_installed / error — показываем понятный статус, дальнейшие шаги пропустим
+  statusEl.textContent =
+    res.status === "not_installed" ? "Движок не установлен" : "Движок не запущен";
+  engine.classList.add("engine--down");
+  return false;
+}
+
 // Мягкая проверка движка: спрашиваем версию Ollama и показываем её в шапке.
 // Неблокирующая — при недоступности просто показываем статус, приложение работает.
 async function checkOllama() {
@@ -1500,8 +1523,14 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
   await initConversations(); // сначала восстановим диалоги в ленту
-  checkOllama();             // неблокирующе: статус движка в шапке
-  loadHardware();            // неблокирующе: светофор железа под шапкой
-  loadModels();
-  refreshDocuments();        // неблокирующе: число документов (для RAG) и статус модели
+  loadHardware();            // неблокирующе: светофор железа (локально, без движка)
+  // Сначала обеспечиваем движок (поднимаем свой или переиспользуем системный), затем
+  // уже опираемся на него. Если не готов — статус выставлен, движок-зависимые шаги
+  // пропускаем (пользователь может повторить кнопкой «Проверка»).
+  const engineReady = await ensureEngine();
+  if (engineReady) {
+    checkOllama();           // покажет версию Ollama в шапке
+    loadModels();
+    refreshDocuments();      // число документов (для RAG) и статус модели эмбеддингов
+  }
 });
