@@ -1,10 +1,19 @@
 <!doctype html>
-<html lang="ru" data-theme="light">
+<html lang="ru" data-theme="light" class="no-transitions">
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Jarvis AI</title>
+    <script>
+      // Начальная тема по системной — ДО первой отрисовки (без вспышки светлой темы
+      // на тёмных машинах). Сохранённый выбор пользователя применяется позже в initTheme.
+      try {
+        document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+      } catch (e) {}
+    </script>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -63,10 +72,16 @@
 
         <div class="feed" id="feed">
           <div class="thread" id="messages"></div>
-          <div class="empty-state">
+          <div class="empty-state" id="empty-state" hidden>
             <div class="empty-state__title">Чем помочь?</div>
             <div class="empty-state__hint">
-              Jarvis AI работает офлайн на этом компьютере — данные никуда не уходят.
+              Работаю офлайн на вашем компьютере — ваши данные остаются только у вас.
+            </div>
+            <div class="empty-state__chips">
+              <button type="button" class="chip" data-prompt="Составить деловое письмо">Составить деловое письмо</button>
+              <button type="button" class="chip" data-prompt="Сформулировать ответ клиенту">Сформулировать ответ клиенту</button>
+              <button type="button" class="chip" data-prompt="Свести данные в таблицу">Свести данные в таблицу</button>
+              <button type="button" class="chip" data-prompt="Объяснить простыми словами">Объяснить простыми словами</button>
             </div>
           </div>
         </div>

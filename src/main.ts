@@ -78,6 +78,7 @@ let thinkEnabled = true;
 
 let messagesEl: HTMLElement;
 let feedEl: HTMLElement;
+let emptyStateEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
 let sendBtn: HTMLButtonElement;
 let stopBtn: HTMLButtonElement;
@@ -112,6 +113,7 @@ function addBubble(role: Role, text: string): HTMLElement {
     turn.appendChild(body);
   }
   messagesEl.appendChild(turn);
+  refreshEmptyState();
   scrollToBottom();
   return body;
 }
@@ -151,6 +153,7 @@ function addAssistantTurn() {
   turn.appendChild(msg);
 
   messagesEl.appendChild(turn);
+  refreshEmptyState();
   scrollToBottom();
   return { turn, thinking, reason, reasonWord, rbody, toggle, msg };
 }
@@ -160,12 +163,18 @@ function addError(text: string) {
   row.className = "err";
   row.textContent = text;
   messagesEl.appendChild(row);
+  refreshEmptyState();
   scrollToBottom();
 }
 
 function scrollToBottom() {
   if (!autoScroll) return; // прокрутил вверх — не тянем обратно вниз
   feedEl.scrollTop = feedEl.scrollHeight;
+}
+
+// Приветствие видно, только когда в открытом диалоге нет сообщений.
+function refreshEmptyState() {
+  emptyStateEl.hidden = messagesEl.children.length > 0;
 }
 
 function setStreaming(on: boolean) {
@@ -345,6 +354,7 @@ function renderHistory() {
   messagesEl.innerHTML = "";
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
   for (const m of history) addBubble(m.role, m.content);
+  refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
 }
 
 // Перечитывает список диалогов из файлов и перерисовывает боковую панель.
@@ -437,6 +447,7 @@ function newDialog() {
   currentId = crypto.randomUUID();
   history.length = 0;
   messagesEl.innerHTML = "";
+  refreshEmptyState(); // пустой диалог → показываем приветствие
   refreshConversationList(); // снимет подсветку (нового ещё нет в списке)
   inputEl.focus();
 }
@@ -528,6 +539,7 @@ async function initConversations() {
     currentId = crypto.randomUUID();
     await refreshConversationList();
   }
+  refreshEmptyState(); // история загружена — теперь решаем, показывать ли приветствие
 }
 
 // Тянет список установленных моделей из Ollama (через Rust-команду list_models)
@@ -708,6 +720,8 @@ async function initTheme() {
     theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
   applyTheme(theme);
+  // Тема применена — включаем переходы (чтобы интерфейс не «переплывал» на старте).
+  requestAnimationFrame(() => document.documentElement.classList.remove("no-transitions"));
 }
 
 function toggleTheme() {
@@ -728,6 +742,7 @@ function autoGrow() {
 window.addEventListener("DOMContentLoaded", async () => {
   messagesEl = document.querySelector("#messages")!;
   feedEl = document.querySelector("#feed")!;
+  emptyStateEl = document.querySelector("#empty-state")!;
   inputEl = document.querySelector("#chat-input")!;
   sendBtn = document.querySelector("#send-btn")!;
   stopBtn = document.querySelector("#stop-btn")!;
@@ -778,6 +793,15 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Авто-следование за ответом включаем/выключаем по позиции прокрутки.
   feedEl.addEventListener("scroll", () => {
     autoScroll = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 80;
+  });
+
+  // Чипы пустого состояния: подставляют текст в поле (без автоотправки).
+  emptyStateEl.addEventListener("click", (e) => {
+    const chip = (e.target as HTMLElement).closest(".chip") as HTMLButtonElement | null;
+    if (!chip) return;
+    inputEl.value = chip.dataset.prompt || chip.textContent?.trim() || "";
+    autoGrow(); // существующий авто-ресайз поля
+    inputEl.focus();
   });
 
   initTheme(); // применяем сохранённую/системную тему как можно раньше
