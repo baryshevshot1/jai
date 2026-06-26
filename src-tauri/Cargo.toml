@@ -25,7 +25,7 @@ serde_json = "1"
 # HTTP-клиент для разговора с Ollama. default-features = false ⇒ без TLS:
 # ходим только на http://127.0.0.1, а отказ от TLS убирает зависимость от
 # системного OpenSSL и упрощает сборку под Linux/Windows в CI.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Системная информация (RAM, число ядер) — кроссплатформенно, без сети.
 sysinfo = "0.33"
 # Извлечение текста из документов (Фаза A). Чистый Rust (без C/Python), MIT/Apache-2.0.

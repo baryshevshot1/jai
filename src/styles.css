@@ -309,6 +309,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   max-width: var(--read-w);
   margin: 0 auto;
   padding: var(--s6) var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5); /* отступ между карточками настроек, чтобы не сливались */
 }
 .settings-card {
   background: var(--surface);
@@ -362,6 +365,19 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
 }
 .ep-btn:hover { background: var(--hover); border-color: var(--border-strong); }
+.ep-btn--icon { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ep-btn--icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+/* кнопка «Проверить обновления» с цветным итогом проверки */
+.ep-btn.check-ok { background: var(--green-soft); color: var(--green); border-color: transparent; }
+.ep-btn.check-ok:hover { background: color-mix(in srgb, var(--green) 16%, var(--surface)); }
+:root[data-theme="dark"] .ep-btn.check-ok { color: var(--text); }
+.ep-btn.check-update { background: color-mix(in srgb, #d9a441 18%, var(--surface)); color: #b9831f; border-color: transparent; }
+.ep-btn.check-update:hover { background: color-mix(in srgb, #d9a441 26%, var(--surface)); }
+.ep-btn.check-err { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+/* живое вращение стрелок во время проверки (360°, как у «обновить») */
+@keyframes ep-spin { to { transform: rotate(360deg); } }
+.ep-btn.checking svg { animation: ep-spin 0.7s linear infinite; transform-origin: center; }
+.ep-btn.checking { opacity: 0.85; cursor: progress; }
 .ep-btn--ghost { background: transparent; color: var(--muted); font-weight: 400; }
 .ep-btn--ghost:hover { color: var(--danger); background: var(--danger-soft); }
 .settings-status {
@@ -374,6 +390,67 @@ body.resizing { cursor: col-resize; user-select: none; }
   color: var(--text);
 }
 .settings-status--error { background: var(--danger-soft); color: var(--danger); }
+
+/* раздел «Модели»: список с состоянием и действиями */
+.models-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s3); }
+.models-head .ep-btn { flex-shrink: 0; }
+.model-list { display: flex; flex-direction: column; }
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.model-row__icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.model-row__icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.model-row__info { flex: 1; min-width: 0; }
+.model-row__title { font-size: var(--t-base); color: var(--text); display: flex; align-items: center; gap: 7px; }
+.model-row__req {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  padding: 1px 7px;
+}
+.model-row__tag {
+  font-size: var(--t-xs);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+.model-badge {
+  flex-shrink: 0;
+  font-size: var(--t-xs);
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+}
+.model-badge--ok { background: var(--green-soft); color: var(--green); }
+.model-badge--update { background: color-mix(in srgb, #d9a441 16%, var(--surface)); color: #b9831f; }
+.model-badge--missing { background: var(--hover); color: var(--muted); }
+:root[data-theme="dark"] .model-badge--ok { color: var(--text); }
+.model-row .ep-btn { flex-shrink: 0; padding: 5px 11px; }
+
+.model-progress { margin: var(--s3) 0 0; }
+.model-progress[hidden] { display: none; }
+.model-progress .index-progress__bar { height: 5px; border-radius: var(--r-pill); background: var(--hover); overflow: hidden; }
+.model-progress .index-progress__bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s ease; }
+.model-progress .index-progress__label { margin-top: 6px; font-size: var(--t-xs); color: var(--muted); }
 
 .index-progress { margin: 0 var(--s3) var(--s3); }
 .index-progress__bar { height: 5px; border-radius: var(--r-pill); background: var(--hover); overflow: hidden; }

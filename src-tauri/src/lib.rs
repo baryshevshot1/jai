@@ -331,6 +331,175 @@ async fn list_models() -> Result<Vec<ModelInfo>, String> {
     Ok(models)
 }
 
+// ── Управление моделями (M1): явный набор нужных моделей + локальное состояние ──
+
+/// Описание модели из нужного набора. Список ниже — единственное место правки,
+/// чтобы добавлять/менять модели (теги/роли) без переписывания логики.
+struct ModelSpec {
+    tag: &'static str,    // точный тег Ollama (по нему идут pull и сравнение digest)
+    role: &'static str,   // "text" | "embed" | "vision" | "code"
+    title: &'static str,  // человекочитаемое название
+    required: bool,       // обязательная (без неё ломается сценарий) или опциональная
+}
+
+/// Нужный набор моделей приложения. Расширяется правкой ОДНОГО этого списка.
+/// Теги — реальные (фактически устанавливаемые), не абстрактные.
+const MODEL_SET: &[ModelSpec] = &[
+    ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true },
+    ModelSpec { tag: "qwen3:8b", role: "text", title: "Текстовая (лёгкая)", required: false },
+    ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true },
+    ModelSpec { tag: "qwen2.5vl:7b", role: "vision", title: "Зрение и OCR", required: false },
+    ModelSpec { tag: "moondream:latest", role: "vision", title: "Зрение (лёгкая)", required: false },
+    ModelSpec { tag: "qwen2.5-coder:7b-instruct", role: "code", title: "Код", required: false },
+];
+
+/// Локальное состояние одной модели набора (без сети). digest/size/date — если установлена.
+#[derive(Serialize)]
+struct ModelState {
+    tag: String,
+    role: String,
+    title: String,
+    required: bool,
+    installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ModelStatesResult {
+    models: Vec<ModelState>, // модели набора (в порядке списка)
+    others: Vec<String>,     // установленные вне набора — «прочие», не мешаем
+}
+
+/// Локальные состояния моделей набора по `/api/tags` (без сети): установлена ли,
+/// локальный digest/размер/дата. Статус обновления считается отдельно (M2, онлайн).
+#[tauri::command]
+async fn model_states() -> Result<ModelStatesResult, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:11434/api/tags")
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Ollama вернул ошибку {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let empty: Vec<serde_json::Value> = Vec::new();
+    let arr = json.get("models").and_then(|m| m.as_array()).unwrap_or(&empty);
+
+    let mut models = Vec::new();
+    for spec in MODEL_SET {
+        let m = arr
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(spec.tag));
+        models.push(ModelState {
+            tag: spec.tag.to_string(),
+            role: spec.role.to_string(),
+            title: spec.title.to_string(),
+            required: spec.required,
+            installed: m.is_some(),
+            digest: m.and_then(|m| m.get("digest")).and_then(|d| d.as_str()).map(str::to_string),
+            size: m.and_then(|m| m.get("size")).and_then(|s| s.as_u64()),
+            modified_at: m
+                .and_then(|m| m.get("modified_at"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string),
+        });
+    }
+    let others: Vec<String> = arr
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+        .filter(|name| !MODEL_SET.iter().any(|s| s.tag == *name))
+        .map(str::to_string)
+        .collect();
+    Ok(ModelStatesResult { models, others })
+}
+
+// ── Проверка обновлений по digest (M2): онлайн, по явному запросу ─────────────
+
+/// Статус обновления одной модели набора.
+/// status: "current" (актуальна) | "update" (есть обновление) | "not_installed" | "error".
+#[derive(Serialize)]
+struct UpdateStatus {
+    tag: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+/// Локальные digest по тегам из `/api/tags` (без сети).
+async fn local_digests(client: &reqwest::Client) -> Result<std::collections::HashMap<String, String>, String> {
+    let resp = client
+        .get("http://127.0.0.1:11434/api/tags")
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut map = std::collections::HashMap::new();
+    if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
+        for m in arr {
+            if let (Some(name), Some(dig)) = (
+                m.get("name").and_then(|n| n.as_str()),
+                m.get("digest").and_then(|d| d.as_str()),
+            ) {
+                map.insert(name.to_string(), dig.to_string());
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// digest манифеста тега в реестре Ollama = sha256 тела ответа (проверено: совпадает
+/// с локальным digest). Требует HTTPS (rustls-tls) — единственный выход в интернет.
+async fn registry_digest(client: &reqwest::Client, tag: &str) -> Result<String, String> {
+    let (model, t) = tag.split_once(':').unwrap_or((tag, "latest"));
+    let url = format!("https://registry.ollama.ai/v2/library/{model}/manifests/{t}");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Нет доступа к реестру (нужен интернет): {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Реестр вернул {} для «{tag}»", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Проверить обновления моделей набора (онлайн, по запросу). Для установленных
+/// сравнивает локальный digest с реестром. Без сети — каждая модель отдаёт "error".
+#[tauri::command]
+async fn check_model_updates() -> Result<Vec<UpdateStatus>, String> {
+    let client = reqwest::Client::new();
+    let local = local_digests(&client).await?;
+    let mut out = Vec::new();
+    for spec in MODEL_SET {
+        let Some(local_dig) = local.get(spec.tag) else {
+            out.push(UpdateStatus { tag: spec.tag.to_string(), status: "not_installed".into(), message: None });
+            continue;
+        };
+        match registry_digest(&client, spec.tag).await {
+            Ok(remote) => {
+                let status = if &remote == local_dig { "current" } else { "update" };
+                out.push(UpdateStatus { tag: spec.tag.to_string(), status: status.into(), message: None });
+            }
+            Err(e) => {
+                out.push(UpdateStatus { tag: spec.tag.to_string(), status: "error".into(), message: Some(e) });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Версия Ollama: GET 127.0.0.1:11434/api/version — мягкая проверка «движок жив».
 /// Таймаут 3 с, чтобы не зависнуть, если порт открыт, но ответа нет. Только localhost.
 #[tauri::command]
@@ -1088,6 +1257,8 @@ pub fn run() {
             documents_empty,
             search_documents,
             list_models,
+            model_states,
+            check_model_updates,
             ollama_version,
             embedding_status,
             detect_hardware,

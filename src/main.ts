@@ -128,6 +128,21 @@ interface ModelInfo {
 const thinkingByModel = new Map<string, boolean>();
 const visionByModel = new Map<string, boolean>();
 
+// Управление моделями (M1–M4): локальное состояние модели набора.
+interface ModelState {
+  tag: string;
+  role: string;
+  title: string;
+  required: boolean;
+  installed: boolean;
+  size?: number;
+  digest?: string;
+  modified_at?: string;
+}
+// Статус обновления (M2): tag → "current" | "update" | "not_installed" | "error".
+const updateByTag = new Map<string, string>();
+let modelStates: ModelState[] = [];
+
 // История ОТКРЫТОГО диалога (без системного сообщения — его добавляем при отправке).
 const history: Message[] = [];
 
@@ -211,6 +226,14 @@ let epSetModelsBtn: HTMLButtonElement;
 let epSetEngineBtn: HTMLButtonElement;
 let epResetBtn: HTMLButtonElement;
 let settingsStatusEl: HTMLElement;
+let modelListEl: HTMLElement;
+let checkUpdatesBtn: HTMLButtonElement;
+let installFromDiskBtn: HTMLButtonElement;
+let modelsStatusEl: HTMLElement;
+let modelProgressEl: HTMLElement;
+let modelProgressFill: HTMLElement;
+let modelProgressLabel: HTMLElement;
+let modelPullCancelBtn: HTMLButtonElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -1116,6 +1139,8 @@ function openSettings() {
   settingsView.hidden = false;
   settingsBtn.classList.add("active");
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
+  loadModelStates(); // локальные состояния моделей набора
+  applyCheckButton(); // восстановить итог проверки обновлений (сессия)
 }
 
 // Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
@@ -1124,6 +1149,8 @@ function closeSettings() {
   feedEl.hidden = false;
   composerWrapEl.hidden = false;
   settingsBtn.classList.remove("active");
+  resetCheckButton(); // уход со страницы — кнопка к исходному (итог в сессии сохранён)
+  modelsStatusEl.hidden = true;
   if (!streaming && selectedModel) inputEl.focus();
 }
 
@@ -1230,6 +1257,233 @@ async function resetEnginePaths() {
     settingsStatus(String(e), true);
   }
   refreshEnginePaths();
+}
+
+// ── Управление моделями (M4): состояние, установка/обновление, источник ───────
+
+let modelsStatusTimer: number | undefined;
+function modelsStatus(text: string, isError: boolean) {
+  modelsStatusEl.hidden = false;
+  modelsStatusEl.textContent = text;
+  modelsStatusEl.classList.toggle("settings-status--error", isError);
+  if (modelsStatusTimer) clearTimeout(modelsStatusTimer);
+  // успех не висит постоянно — прячем через несколько секунд; ошибки остаются
+  if (!isError) {
+    modelsStatusTimer = window.setTimeout(() => {
+      modelsStatusEl.hidden = true;
+    }, 3500);
+  }
+}
+
+function fmtSize(bytes?: number): string {
+  if (!bytes) return "";
+  return ` · ${(bytes / 1024 / 1024 / 1024).toFixed(1)} ГБ`;
+}
+
+// Локальные состояния моделей набора (без сети) → отрисовка списка.
+async function loadModelStates() {
+  try {
+    const res = await invoke<{ models: ModelState[]; others: string[] }>("model_states");
+    modelStates = res.models;
+  } catch (e) {
+    modelStates = [];
+    modelsStatus(`Не удалось получить список моделей: ${e}`, true);
+  }
+  renderModelList();
+}
+
+// Бейдж состояния модели с учётом онлайн-проверки обновлений.
+function modelBadge(m: ModelState): { text: string; cls: string } {
+  if (!m.installed) return { text: "не установлена", cls: "model-badge--missing" };
+  const upd = updateByTag.get(m.tag);
+  if (upd === "update") return { text: "есть обновление", cls: "model-badge--update" };
+  if (upd === "current") return { text: "актуальна", cls: "model-badge--ok" };
+  return { text: "установлена", cls: "model-badge--ok" }; // обновление ещё не проверяли
+}
+
+// Иконка по роли модели (stroke-стиль, как в топбаре).
+function roleIcon(role: string): string {
+  const paths: Record<string, string> = {
+    text: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    embed: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    vision: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+    code: '<path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>',
+  };
+  return `<svg viewBox="0 0 24 24">${paths[role] ?? paths.text}</svg>`;
+}
+
+const ICON_DOWNLOAD = '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>';
+const ICON_REFRESH_CW = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>';
+
+// Итог последней проверки обновлений — хранится в сессии, восстанавливается на странице.
+let lastCheck: { current: number; updates: number; errors: number } | null = null;
+
+// Отрисовка кнопки «Проверить обновления» по сохранённому итогу (компактно, цветом).
+function applyCheckButton() {
+  checkUpdatesBtn.disabled = false;
+  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err", "checking");
+  if (!lastCheck) {
+    checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
+    checkUpdatesBtn.title = "Сверить версии с реестром Ollama (нужен интернет)";
+  } else if (lastCheck.errors > 0) {
+    checkUpdatesBtn.classList.add("check-err");
+    checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Нет сети`;
+    checkUpdatesBtn.title = "Не удалось проверить — нужен интернет. Нажмите, чтобы повторить.";
+  } else if (lastCheck.updates > 0) {
+    checkUpdatesBtn.classList.add("check-update");
+    checkUpdatesBtn.innerHTML = `${ICON_ALERT}Есть обновления (${lastCheck.updates})`;
+    checkUpdatesBtn.title = "Доступны обновления. Нажмите, чтобы перепроверить.";
+  } else {
+    checkUpdatesBtn.classList.add("check-ok");
+    checkUpdatesBtn.innerHTML = `${ICON_CHECK}Актуально`;
+    checkUpdatesBtn.title = "Все установленные модели актуальны. Нажмите, чтобы перепроверить.";
+  }
+}
+
+// Сброс кнопки к исходному виду (при уходе со страницы); итог в сессии сохраняется.
+function resetCheckButton() {
+  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err");
+  checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
+}
+
+// Пересчитать итог в кнопке из текущих статусов (после установки/обновления модели).
+function recomputeLastCheck() {
+  if (!lastCheck) return; // проверки не было — кнопку не меняем
+  let current = 0;
+  let updates = 0;
+  let errors = 0;
+  for (const m of modelStates) {
+    const s = updateByTag.get(m.tag);
+    if (s === "current") current++;
+    else if (s === "update") updates++;
+    else if (s === "error") errors++;
+  }
+  lastCheck = { current, updates, errors };
+  applyCheckButton();
+}
+
+function renderModelList() {
+  modelListEl.innerHTML = "";
+  for (const m of modelStates) {
+    const row = document.createElement("div");
+    row.className = "model-row";
+
+    const icon = document.createElement("span");
+    icon.className = "model-row__icon";
+    icon.innerHTML = roleIcon(m.role);
+    row.appendChild(icon);
+
+    const info = document.createElement("div");
+    info.className = "model-row__info";
+    const title = document.createElement("div");
+    title.className = "model-row__title";
+    title.textContent = m.title;
+    if (m.required) {
+      const req = document.createElement("span");
+      req.className = "model-row__req";
+      req.textContent = "обязательная";
+      title.appendChild(req);
+    }
+    const tag = document.createElement("div");
+    tag.className = "model-row__tag";
+    tag.textContent = `${m.tag}${fmtSize(m.size)}`;
+    info.append(title, tag);
+
+    const badge = document.createElement("span");
+    const b = modelBadge(m);
+    badge.className = `model-badge ${b.cls}`;
+    badge.textContent = b.text;
+
+    row.append(info, badge);
+
+    // действие: Установить (нет локально) / Обновить (есть обновление)
+    const upd = updateByTag.get(m.tag);
+    const needsAction = !m.installed || upd === "update";
+    if (needsAction) {
+      const btn = document.createElement("button");
+      btn.className = "ep-btn ep-btn--icon";
+      btn.innerHTML = m.installed
+        ? `${ICON_REFRESH_CW}Обновить`
+        : `${ICON_DOWNLOAD}Установить`;
+      btn.addEventListener("click", () => pullModelTag(m.tag, m.installed));
+      row.appendChild(btn);
+    }
+    modelListEl.appendChild(row);
+  }
+}
+
+// Проверка обновлений (онлайн, по кнопке): сравнение digest с реестром.
+// Итог пишется ПРЯМО В КНОПКУ (Актуально/Есть обновления/Нет сети) и держится
+// на странице; сохраняется в сессии и восстанавливается при возврате.
+async function checkModelUpdates() {
+  checkUpdatesBtn.disabled = true;
+  checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err");
+  checkUpdatesBtn.classList.add("checking"); // запускаем вращение стрелок
+  checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
+  try {
+    const res = await invoke<{ tag: string; status: string }[]>("check_model_updates");
+    updateByTag.clear();
+    let current = 0;
+    let updates = 0;
+    let errors = 0;
+    for (const r of res) {
+      updateByTag.set(r.tag, r.status);
+      if (r.status === "current") current++;
+      else if (r.status === "update") updates++;
+      else if (r.status === "error") errors++;
+    }
+    renderModelList();
+    lastCheck = { current, updates, errors };
+  } catch {
+    lastCheck = { current: 0, updates: 0, errors: 1 };
+  } finally {
+    applyCheckButton();
+  }
+}
+
+// Установка/обновление модели онлайн (один pull тега) с прогрессом и отменой.
+async function pullModelTag(tag: string, isUpdate: boolean) {
+  const verb = isUpdate ? "Обновление" : "Установка";
+  modelProgressEl.hidden = false;
+  modelPullCancelBtn.hidden = false;
+  modelPullCancelBtn.disabled = false;
+  modelProgressFill.style.width = "4%";
+  modelProgressLabel.textContent = `${verb} ${tag}…`;
+
+  const onEvent = new Channel<PullEvent>();
+  onEvent.onmessage = (e) => {
+    if (e.type !== "progress") return;
+    const frac = e.total > 0 ? e.completed / e.total : 0;
+    modelProgressFill.style.width = `${Math.round(frac * 100)}%`;
+    const pct = e.total > 0 ? ` ${Math.round(frac * 100)}%` : "";
+    modelProgressLabel.textContent = `${verb} ${tag}: ${ruPullStatus(e.status)}${pct}`;
+  };
+  try {
+    await invoke("pull_model", { name: tag, onEvent });
+    modelProgressEl.hidden = true;
+    updateByTag.set(tag, "current"); // только что подтянули — актуальна
+    await loadModelStates();
+    await loadModels(); // обновить выпадающий список моделей
+    await refreshDocuments(); // вдруг поставили bge-m3 — RAG ожил
+    recomputeLastCheck(); // итог в кнопке — с учётом установленного/обновлённого
+    modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, false);
+  } catch (e) {
+    modelProgressEl.hidden = true;
+    modelsStatus(`Не удалось ${isUpdate ? "обновить" : "установить"} ${tag}: ${e}`, true);
+  } finally {
+    modelPullCancelBtn.hidden = true;
+  }
+}
+
+// Источник «с диска»: указать локальный каталог моделей (переиспуем офлайн-поставку).
+async function installFromDiskForModels() {
+  const dir = await pickModelsDir();
+  if (!dir) return;
+  modelsStatus("Применение локального каталога…", false);
+  await applyModelsDir(dir, modelsStatus);
+  await loadModelStates();
 }
 
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
@@ -1840,6 +2094,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   epSetEngineBtn = document.querySelector("#ep-set-engine")!;
   epResetBtn = document.querySelector("#ep-reset")!;
   settingsStatusEl = document.querySelector("#settings-status")!;
+  modelListEl = document.querySelector("#model-list")!;
+  checkUpdatesBtn = document.querySelector("#check-updates-btn")!;
+  installFromDiskBtn = document.querySelector("#install-from-disk-btn")!;
+  modelsStatusEl = document.querySelector("#models-status")!;
+  modelProgressEl = document.querySelector("#model-progress")!;
+  modelProgressFill = document.querySelector("#model-progress-fill")!;
+  modelProgressLabel = document.querySelector("#model-progress-label")!;
+  modelPullCancelBtn = document.querySelector("#model-pull-cancel")!;
+  checkUpdatesBtn.addEventListener("click", checkModelUpdates);
+  installFromDiskBtn.addEventListener("click", installFromDiskForModels);
+  modelPullCancelBtn.addEventListener("click", () => invoke("cancel_pull").catch(() => {}));
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
