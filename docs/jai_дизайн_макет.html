@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>jai — прототип интерфейса</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ===================== ДИЗАЙН-ТОКЕНЫ ===================== */
+:root{
+  --font-ui:'Inter',system-ui,-apple-system,sans-serif;
+  --font-display:'Fraunces',Georgia,serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  --t-xs:11.5px; --t-sm:12.5px; --t-base:13.5px; --t-md:14px;
+  --t-lg:15px; --t-xl:16px; --t-brand:18px;
+  --lh-base:1.55; --lh-relaxed:1.65;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:24px; --s8:32px;
+  --r-sm:8px; --r:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+  --side-w:264px; --read-w:720px;
+}
+:root[data-theme="light"]{
+  --bg:#FAF8F4; --surface:#FFFFFF; --sidebar:#F4F1EB; --hover:#ECE8E0;
+  --text:#2A2825; --muted:#736F68; --faint:#A8A39A;
+  --border:#E8E4DB; --border-strong:#DAD5CB;
+  --accent:#2F6BE0; --accent-hover:#2659C2; --accent-soft:#EBF1FD; --accent-ring:rgba(47,107,224,.14);
+  --code-bg:#F6F3ED; --code-border:#E8E4DB;
+  --user-grad-a:#2F6BE0; --user-grad-b:#3D78EA; --user-text:#fff;
+  --green:#3E9B6B; --green-soft:#E7F3EB;
+  --shadow-sm:0 1px 2px rgba(60,50,30,.05);
+  --shadow:0 1px 3px rgba(60,50,30,.05),0 8px 24px rgba(60,50,30,.07);
+  --syn-k:#A626A4; --syn-s:#3E9B6B; --syn-f:#2F6BE0; --syn-n:#B25C00;
+}
+:root[data-theme="dark"]{
+  --bg:#1A1916; --surface:#222019; --sidebar:#1E1C19; --hover:#2A2723;
+  --text:#ECE8E0; --muted:#A09A8E; --faint:#6E6960;
+  --border:#312E29; --border-strong:#403B34;
+  --accent:#6293F2; --accent-hover:#79A2F4; --accent-soft:#1E293C; --accent-ring:rgba(98,147,242,.18);
+  --code-bg:#15140F; --code-border:#312E29;
+  --user-grad-a:#3A6FD8; --user-grad-b:#4A7CE6; --user-text:#fff;
+  --green:#5FB98A; --green-soft:#1B2A21;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.25);
+  --shadow:0 1px 3px rgba(0,0,0,.3),0 10px 28px rgba(0,0,0,.34);
+  --syn-k:#C678DD; --syn-s:#98C379; --syn-f:#61AFEF; --syn-n:#D19A66;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--font-ui);background:var(--bg);color:var(--text);
+  font-size:var(--t-base);-webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;line-height:var(--lh-base)}
+.app{display:flex;height:100vh;overflow:hidden}
+
+/* ===================== БОКОВАЯ ПАНЕЛЬ ===================== */
+.sidebar{width:var(--side-w);flex-shrink:0;background:var(--sidebar);
+  border-right:1px solid var(--border);display:flex;flex-direction:column}
+.side-top{padding:var(--s4) var(--s3) var(--s2)}
+.newchat{width:100%;display:flex;align-items:center;justify-content:center;gap:var(--s2);
+  padding:10px var(--s3);border:1px solid var(--border-strong);border-radius:var(--r);
+  background:var(--surface);color:var(--text);font-family:inherit;font-size:var(--t-md);
+  font-weight:500;cursor:pointer;box-shadow:var(--shadow-sm);transition:.15s}
+.newchat:hover{border-color:var(--accent);color:var(--accent)}
+.newchat svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
+.search{margin:var(--s2) var(--s3) var(--s3);position:relative}
+.search input{width:100%;padding:9px 12px 9px 34px;border:1px solid var(--border);
+  border-radius:var(--r);background:var(--bg);color:var(--text);font-family:inherit;
+  font-size:var(--t-base);transition:.15s}
+.search input::placeholder{color:var(--faint)}
+.search input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring)}
+.search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
+  width:15px;height:15px;stroke:var(--faint);fill:none;stroke-width:2}
+.conv-list{flex:1;overflow-y:auto;padding:0 var(--s3) var(--s3)}
+.conv-label{font-size:var(--t-xs);font-weight:600;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--faint);padding:var(--s4) var(--s2) var(--s2)}
+.conv-label:first-child{padding-top:var(--s2)}
+.conv{display:flex;align-items:center;gap:var(--s2);padding:9px 10px;
+  border-radius:var(--r-sm);cursor:pointer;font-size:var(--t-base);color:var(--muted);
+  transition:.12s;margin-bottom:1px}
+.conv:hover{background:var(--hover);color:var(--text)}
+.conv.active{background:var(--accent-soft);color:var(--accent);font-weight:500}
+:root[data-theme="dark"] .conv.active{color:var(--text)}
+.conv svg{width:15px;height:15px;flex-shrink:0;opacity:.65;stroke:currentColor;fill:none;stroke-width:2}
+.conv .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-foot{border-top:1px solid var(--border);padding:var(--s3);
+  display:flex;flex-direction:column;gap:var(--s2)}
+.hwchip{display:flex;align-items:center;gap:var(--s2);font-size:var(--t-sm);
+  color:var(--muted);padding:8px 10px;border-radius:var(--r-sm);background:var(--green-soft)}
+.hwchip .led{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 20%,transparent)}
+.hwchip b{color:var(--text);font-weight:600}
+.side-actions{display:flex;gap:var(--s2)}
+.sbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:8px;border:1px solid var(--border);border-radius:var(--r-sm);background:transparent;
+  color:var(--muted);font-family:inherit;font-size:var(--t-sm);cursor:pointer;transition:.12s}
+.sbtn:hover{color:var(--text);border-color:var(--border-strong);background:var(--surface)}
+.sbtn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2}
+
+/* ===================== ОСНОВНАЯ ОБЛАСТЬ ===================== */
+.main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.topbar{height:60px;flex-shrink:0;display:flex;align-items:center;gap:var(--s3);
+  padding:0 var(--s6);border-bottom:1px solid var(--border)}
+.brand{font-family:var(--font-display);font-size:var(--t-brand);font-weight:600;
+  letter-spacing:-.01em;line-height:1}
+.model-pick{display:flex;align-items:center;gap:7px;padding:7px 13px;
+  border:1px solid var(--border);border-radius:var(--r-pill);background:var(--surface);
+  color:var(--text);font-family:inherit;font-size:var(--t-base);font-weight:500;
+  cursor:pointer;box-shadow:var(--shadow-sm);transition:.12s}
+.model-pick:hover{border-color:var(--border-strong)}
+.model-pick svg{width:13px;height:13px;stroke:var(--muted);fill:none;stroke-width:2}
+.spacer{margin-left:auto}
+.engine{display:flex;align-items:center;gap:7px;font-size:var(--t-sm);color:var(--muted)}
+.engine .led{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.iconbtn{width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-sm);
+  border:1px solid transparent;background:transparent;cursor:pointer;color:var(--muted);transition:.12s}
+.iconbtn:hover{background:var(--surface);color:var(--text);border-color:var(--border)}
+.iconbtn svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2}
+.divider-v{width:1px;height:22px;background:var(--border)}
+
+/* ===================== ЛЕНТА ===================== */
+.feed{flex:1;overflow-y:auto}
+.thread{max-width:var(--read-w);margin:0 auto;padding:var(--s8) var(--s6) var(--s6);
+  display:flex;flex-direction:column;gap:var(--s6)}
+.turn{display:flex;flex-direction:column;gap:var(--s2)}
+
+/* сообщение пользователя — СПРАВА, не на всю ширину */
+.turn.me{align-items:flex-end}
+.user-msg{max-width:78%;background:linear-gradient(135deg,var(--user-grad-a),var(--user-grad-b));
+  color:var(--user-text);border-radius:var(--r-xl) var(--r-xl) 6px var(--r-xl);
+  padding:var(--s3) var(--s4);font-size:var(--t-lg);line-height:1.5;
+  box-shadow:0 2px 10px var(--accent-ring)}
+
+/* ответ ассистента — слева, чисто на фоне */
+.turn.ai{align-items:flex-start}
+.ai-head{display:flex;align-items:center;gap:var(--s2);font-size:var(--t-base);
+  font-weight:600;margin-bottom:var(--s1)}
+.avatar{width:27px;height:27px;border-radius:8px;display:grid;place-items:center;
+  font-size:var(--t-sm);font-weight:700;flex-shrink:0;
+  background:linear-gradient(135deg,var(--user-grad-a),var(--user-grad-b));
+  color:#fff;font-family:var(--font-display)}
+.msg{font-size:var(--t-lg);line-height:var(--lh-relaxed);color:var(--text);max-width:100%}
+.msg p{margin:0 0 var(--s3)}.msg p:last-child{margin-bottom:0}
+.msg h3{font-size:var(--t-xl);font-weight:600;margin:var(--s5) 0 var(--s3);letter-spacing:-.01em}
+.msg h3:first-child{margin-top:0}
+.msg ul,.msg ol{margin:0 0 var(--s3);padding-left:22px}
+.msg li{margin-bottom:6px}.msg strong{font-weight:600}
+.msg a{color:var(--accent);text-decoration:none;
+  border-bottom:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
+.msg code.inl{font-family:var(--font-mono);font-size:.86em;background:var(--code-bg);
+  border:1px solid var(--code-border);padding:1px 6px;border-radius:6px}
+.code{margin:var(--s3) 0;border:1px solid var(--code-border);border-radius:var(--r);
+  overflow:hidden;background:var(--code-bg)}
+.code-head{display:flex;align-items:center;justify-content:space-between;padding:8px 13px;
+  border-bottom:1px solid var(--code-border);font-size:var(--t-sm);color:var(--muted);font-family:var(--font-mono)}
+.copy{display:flex;align-items:center;gap:5px;background:transparent;border:none;
+  color:var(--muted);font-family:inherit;font-size:var(--t-sm);cursor:pointer;transition:.12s}
+.copy:hover{color:var(--text)}
+.copy svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2}
+.code pre{margin:0;padding:14px 16px;overflow-x:auto;font-family:var(--font-mono);
+  font-size:var(--t-base);line-height:1.6}
+.k{color:var(--syn-k)}.s{color:var(--syn-s)}.f{color:var(--syn-f)}.n{color:var(--syn-n)}.c{color:var(--faint)}
+
+/* "думает" + раскрытие рассуждения */
+.thinking{display:flex;align-items:center;gap:var(--s2);color:var(--muted);font-size:var(--t-md)}
+.dots{display:inline-flex;gap:5px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:blink 1.4s infinite both}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:.25;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+.reason{margin-bottom:var(--s2);border:1px solid var(--border);border-radius:var(--r);
+  background:color-mix(in srgb,var(--accent) 4%,var(--surface));overflow:hidden}
+.reason summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:7px;
+  padding:9px 12px;font-size:var(--t-sm);color:var(--muted);font-weight:500}
+.reason summary::-webkit-details-marker{display:none}
+.reason summary svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;transition:.2s}
+.reason[open] summary svg{transform:rotate(90deg)}
+.reason .rbody{padding:0 12px 11px 33px;font-size:var(--t-base);color:var(--muted);line-height:1.55}
+
+/* ===================== ПОЛЕ ВВОДА ===================== */
+.composer-wrap{flex-shrink:0;padding:var(--s4) var(--s6) var(--s5)}
+.composer{max-width:var(--read-w);margin:0 auto;background:var(--surface);
+  border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow);
+  padding:var(--s3) var(--s3) 10px;display:flex;flex-direction:column;gap:10px;
+  transition:border-color .15s,box-shadow .15s}
+.composer:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring),var(--shadow)}
+.composer textarea{border:none;background:transparent;resize:none;outline:none;
+  font-family:inherit;font-size:var(--t-lg);line-height:1.5;color:var(--text);
+  padding:6px 8px 0;max-height:160px}
+.composer textarea::placeholder{color:var(--faint)}
+.composer-bar{display:flex;align-items:center;gap:var(--s2)}
+.tool{width:34px;height:34px;display:grid;place-items:center;border-radius:var(--r-sm);
+  border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:.12s}
+.tool:hover{color:var(--text);border-color:var(--border-strong)}
+.tool svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
+
+/* переключатель Thinking (как в ChatGPT) */
+.think-toggle{display:flex;align-items:center;gap:7px;padding:7px 13px 7px 11px;
+  border:1px solid var(--border);border-radius:var(--r-pill);background:transparent;
+  color:var(--muted);font-family:inherit;font-size:var(--t-base);font-weight:500;
+  cursor:pointer;transition:.15s;user-select:none}
+.think-toggle:hover{border-color:var(--border-strong);color:var(--text)}
+.think-toggle svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
+.think-toggle.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 40%,transparent);
+  color:var(--accent)}
+:root[data-theme="dark"] .think-toggle.on{color:#fff}
+.send{margin-left:auto;width:36px;height:36px;display:grid;place-items:center;
+  border-radius:var(--r-sm);border:none;background:var(--accent);color:#fff;cursor:pointer;transition:.12s}
+.send:hover{background:var(--accent-hover)}
+.send svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2.2}
+.hint{max-width:var(--read-w);margin:var(--s2) auto 0;text-align:center;
+  font-size:var(--t-xs);color:var(--faint)}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- БОКОВАЯ ПАНЕЛЬ -->
+  <aside class="sidebar">
+    <div class="side-top">
+      <button class="newchat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg> Новый диалог</button>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input placeholder="Поиск по диалогам">
+    </div>
+    <div class="conv-list">
+      <div class="conv-label">Сегодня</div>
+      <div class="conv active"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="name">Письмо клиенту о задержке</span></div>
+      <div class="conv"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="name">Выборка клиентов по региону</span></div>
+      <div class="conv"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="name">Анализ договора поставки</span></div>
+      <div class="conv-label">Вчера</div>
+      <div class="conv"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="name">Сводка по выручке за квартал</span></div>
+      <div class="conv"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="name">Шаблон ответа на претензию</span></div>
+    </div>
+    <div class="side-foot">
+      <div class="hwchip"><span class="led"></span><span>Железо: <b>зелёный</b> · 64 ГБ · 16 ядер</span></div>
+      <div class="side-actions">
+        <button class="sbtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg> Проверка</button>
+        <button class="sbtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.2A1.6 1.6 0 0 0 7 19.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H3a2 2 0 1 1 0-4h.2A1.6 1.6 0 0 0 4.7 7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9.4A1.6 1.6 0 0 0 11 3.2V3a2 2 0 1 1 4 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9.4a1.6 1.6 0 0 0 1.8 1.6H21a2 2 0 1 1 0 4h-.2a1.6 1.6 0 0 0-1.4 1z"/></svg> Настройки</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ОСНОВНАЯ ОБЛАСТЬ -->
+  <main class="main">
+    <div class="topbar">
+      <span class="brand">jai</span>
+      <button class="model-pick">qwen3.5:9b <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+      <div class="spacer"></div>
+      <div class="engine"><span class="led"></span> Ollama 0.30.8</div>
+      <button class="iconbtn" title="Обновить"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+      <div class="divider-v"></div>
+      <button class="iconbtn" id="themeBtn" title="Сменить тему" onclick="toggleT()">
+        <svg id="themeIcon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+
+    <div class="feed">
+      <div class="thread">
+
+        <!-- пользователь: СПРАВА -->
+        <div class="turn me">
+          <div class="user-msg">Составь короткое деловое письмо клиенту о задержке поставки на 3 дня. Тон — вежливый, с извинением и новой датой.</div>
+        </div>
+
+        <!-- ассистент: слева -->
+        <div class="turn ai">
+          <div class="ai-head"><span class="avatar">j</span> jai</div>
+          <div class="msg">
+            <p>Конечно. Вот вариант письма — вежливый, по делу, с конкретной новой датой:</p>
+            <h3>Уведомление о переносе срока поставки</h3>
+            <p>Уважаемый Иван Петрович,</p>
+            <p>сообщаем, что отгрузка по заказу <strong>№ 1408</strong> задерживается на 3 рабочих дня по причине задержки у поставщика комплектующих. Приносим извинения за возможные неудобства.</p>
+            <p>Новая дата отгрузки — <strong>27 июня</strong>. Все остальные условия договора остаются без изменений.</p>
+            <p>С уважением,<br>отдел продаж</p>
+          </div>
+        </div>
+
+        <!-- пользователь: СПРАВА -->
+        <div class="turn me">
+          <div class="user-msg">Спасибо. Покажи SQL-запрос: выбрать клиентов из Москвы с заказами за последний месяц.</div>
+        </div>
+
+        <!-- ассистент с режимом Thinking: раскрываемое рассуждение + код -->
+        <div class="turn ai">
+          <div class="ai-head"><span class="avatar">j</span> jai</div>
+          <div class="msg">
+            <details class="reason">
+              <summary><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg> Рассуждение · 4 сек</summary>
+              <div class="rbody">Нужно соединить таблицы клиентов и заказов, отфильтровать по городу «Москва» и по дате за последние 30 дней. Чтобы клиент не повторялся при нескольких заказах — DISTINCT. Сортировка по имени для удобства чтения.</div>
+            </details>
+            <p>Вот запрос — уникальные клиенты из Москвы с заказом за последние 30 дней:</p>
+            <div class="code">
+              <div class="code-head"><span>sql</span>
+                <button class="copy"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg> Копировать</button>
+              </div>
+<pre><span class="k">SELECT DISTINCT</span> c.id, c.name, c.city
+<span class="k">FROM</span> clients c
+<span class="k">JOIN</span> orders o <span class="k">ON</span> o.client_id = c.id
+<span class="k">WHERE</span> c.city = <span class="s">'Москва'</span>
+  <span class="k">AND</span> o.created_at &gt;= <span class="f">date</span>(<span class="s">'now'</span>, <span class="s">'-30 days'</span>)
+<span class="k">ORDER BY</span> c.name;</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- "думает" сейчас -->
+        <div class="turn ai">
+          <div class="ai-head"><span class="avatar">j</span> jai</div>
+          <div class="thinking"><span class="dots"><i></i><i></i><i></i></span><span>Думаю над ответом…</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ПОЛЕ ВВОДА -->
+    <div class="composer-wrap">
+      <div class="composer">
+        <textarea rows="1" placeholder="Спросите что-нибудь…"></textarea>
+        <div class="composer-bar">
+          <button class="tool" title="Прикрепить документ"><svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.2 20.3a5 5 0 0 1-7.1-7.1l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4l8.5-8.5"/></svg></button>
+          <button class="tool" title="Изображение"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg></button>
+          <button class="think-toggle on" id="thinkBtn" onclick="this.classList.toggle('on')" title="Режим размышления">
+            <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2z"/><path d="M9 21h6"/></svg>
+            Thinking
+          </button>
+          <button class="send" title="Отправить"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+        </div>
+      </div>
+      <div class="hint">jai работает офлайн на вашем компьютере · Enter — отправить, Shift+Enter — перенос</div>
+    </div>
+  </main>
+</div>
+
+<script>
+function toggleT(){
+  const r=document.documentElement, dark=r.getAttribute('data-theme')==='dark';
+  r.setAttribute('data-theme',dark?'light':'dark');
+  document.getElementById('themeIcon').innerHTML = dark
+    ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>'
+    : '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
+}
+document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>{
+  const o=b.innerHTML;b.innerHTML='✓ Скопировано';setTimeout(()=>b.innerHTML=o,1500);
+}));
+</script>
+</body>
+</html>
