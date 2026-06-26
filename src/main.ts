@@ -1078,10 +1078,23 @@ async function loadModels() {
   }
   // Предпочитаем целевую базовую модель, если она установлена; иначе — первую.
   const names = models.map((m) => m.name);
-  // Сохраняем текущий выбор пользователя при «Обновить»; иначе целевая, иначе первая.
+  // Сохраняем текущий выбор пользователя при «Обновить»; при старте (selectedModel
+  // пуст) восстанавливаем сохранённую модель из settings.json; иначе целевая/первая.
   if (!selectedModel || !names.includes(selectedModel)) {
-    const preferred = "qwen3.5:9b";
-    selectedModel = names.includes(preferred) ? preferred : names[0];
+    let saved: string | null = null;
+    if (!selectedModel) {
+      try {
+        saved = await invoke<string | null>("get_setting", { key: "selected_model" });
+      } catch {
+        saved = null;
+      }
+    }
+    if (saved && names.includes(saved)) {
+      selectedModel = saved; // сохранённая модель ещё установлена
+    } else {
+      const preferred = "qwen3.5:9b"; // откат: целевая, иначе первая в списке
+      selectedModel = names.includes(preferred) ? preferred : names[0];
+    }
   }
   modelSelectEl.value = selectedModel;
   modelSelectEl.disabled = false;
@@ -1238,6 +1251,38 @@ function toggleTheme() {
   );
 }
 
+// Восстановление тумблера «Размышления» из settings.json (единый источник истины).
+// По умолчанию ВЫКЛ: с reasoning-моделью даже простые вопросы думаются по ~20 секунд.
+// Одноразовая миграция из прежнего хранилища localStorage("jai.think"), чтобы выбор
+// пользователя не потерялся; затем localStorage для этой настройки не используется.
+async function initThinking() {
+  let saved: string | null = null;
+  try {
+    saved = await invoke<string | null>("get_setting", { key: "thinking_enabled" });
+  } catch {
+    saved = null;
+  }
+  if (saved === null) {
+    const legacy = localStorage.getItem("jai.think"); // прежнее хранилище
+    if (legacy !== null) {
+      saved = legacy; // "true"/"false"
+      invoke("set_setting", { key: "thinking_enabled", value: saved }).catch((e) =>
+        console.error("set_setting thinking_enabled (миграция):", e),
+      );
+      localStorage.removeItem("jai.think"); // дальше — только settings.json
+    }
+  }
+  thinkEnabled = saved === "true"; // null/"false" → ВЫКЛ
+  thinkToggleEl.classList.toggle("on", thinkEnabled);
+  thinkToggleEl.addEventListener("click", () => {
+    thinkEnabled = !thinkEnabled;
+    thinkToggleEl.classList.toggle("on", thinkEnabled);
+    invoke("set_setting", { key: "thinking_enabled", value: String(thinkEnabled) }).catch((e) =>
+      console.error("set_setting thinking_enabled:", e),
+    );
+  });
+}
+
 // Авто-высота поля ввода под текст.
 function autoGrow() {
   inputEl.style.height = "auto";
@@ -1285,6 +1330,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   modelSelectEl.addEventListener("change", () => {
     selectedModel = modelSelectEl.value;
     updateThinkAvailability(); // у новой модели могут быть другие возможности
+    // запоминаем выбор между запусками (settings.json — единый источник истины)
+    invoke("set_setting", { key: "selected_model", value: selectedModel }).catch((e) =>
+      console.error("set_setting selected_model:", e),
+    );
   });
   refreshBtn.addEventListener("click", refreshAll);
   newChatBtn.addEventListener("click", newDialog);
@@ -1330,17 +1379,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   initTheme(); // применяем сохранённую/системную тему как можно раньше
-
-  // Восстанавливаем тумблер «Размышления» (по умолчанию ВЫКЛ: с reasoning-моделью
-  // даже простые вопросы думаются по ~20 секунд — для ассистента это непрактично).
-  const savedThink = localStorage.getItem("jai.think");
-  thinkEnabled = savedThink === null ? false : savedThink === "true";
-  thinkToggleEl.classList.toggle("on", thinkEnabled);
-  thinkToggleEl.addEventListener("click", () => {
-    thinkEnabled = !thinkEnabled;
-    thinkToggleEl.classList.toggle("on", thinkEnabled);
-    localStorage.setItem("jai.think", String(thinkEnabled));
-  });
+  initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {
     e.preventDefault();

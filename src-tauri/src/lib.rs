@@ -11,6 +11,11 @@ use tauri::Manager;
 /// Флаг отмены текущего стрима (нажата «Стоп»). Управляется через состояние Tauri.
 struct CancelFlag(AtomicBool);
 
+/// Сериализует доступ к settings.json. set_setting делает read-modify-write всего
+/// файла; без этого лока две близкие записи (тема/модель/Thinking) могли бы прочитать
+/// старое состояние и затереть ключи друг друга. Лок держим на время чтения+записи.
+struct SettingsLock(std::sync::Mutex<()>);
+
 /// Документ, прикреплённый к сообщению пользователя (для сохранения в истории).
 /// Текст уже усечён фронтендом под бюджет контекста. В Ollama НЕ уходит —
 /// при отправке фронт собирает чистые {role, content}, поэтому здесь doc = None.
@@ -798,7 +803,17 @@ fn get_setting(app: tauri::AppHandle, key: String) -> Result<Option<String>, Str
 }
 
 #[tauri::command]
-fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+fn set_setting(
+    app: tauri::AppHandle,
+    lock: tauri::State<'_, SettingsLock>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    // Лок на весь read-modify-write: исключаем гонку, при которой параллельная
+    // запись другого ключа затёрла бы наш (и наоборот). into_inner — на случай,
+    // если поток с локом паниковал: данные настроек целостны (read_settings
+    // переживает битый файл), продолжаем работу, а не «отравляем» лок навсегда.
+    let _guard = lock.0.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = read_settings(&app);
     map.insert(key, serde_json::Value::String(value));
     let path = settings_path(&app)?;
@@ -814,6 +829,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CancelFlag(AtomicBool::new(false)))
+        .manage(SettingsLock(std::sync::Mutex::new(())))
         .invoke_handler(tauri::generate_handler![
             chat_stream,
             cancel_stream,
