@@ -1074,6 +1074,86 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 :root[data-theme="dark"] .think-toggle.on { color: #fff; }
 
+/* ── Онлайн-режим (агентный): тумблер, индикатор, поля, журнал ──
+   Янтарный акцент (как у статуса обновления) — отличается от синих «Размышлений»,
+   чтобы выход в сеть был визуально заметен (152-ФЗ: онлайн не должен быть незаметным). */
+.online-toggle.on {
+  background: color-mix(in srgb, #d9a441 16%, var(--surface));
+  border-color: color-mix(in srgb, #d9a441 45%, transparent);
+  color: #b9831f;
+}
+:root[data-theme="dark"] .online-toggle.on { color: #e7b357; }
+
+/* Постоянный индикатор в шапке — виден, только пока онлайн активен. */
+.online-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, #d9a441 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, #d9a441 40%, transparent);
+  color: #b9831f;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+:root[data-theme="dark"] .online-badge { color: #e7b357; }
+.online-badge__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d9a441;
+  animation: online-pulse 2s ease-out infinite;
+}
+@keyframes online-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(217, 164, 65, 0.5); }
+  70% { box-shadow: 0 0 0 6px rgba(217, 164, 65, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 164, 65, 0); }
+}
+
+/* Поля настроек онлайн-режима. */
+.online-field { display: flex; flex-direction: column; gap: var(--s1); margin-top: var(--s3); }
+.online-field__label { font-size: var(--t-sm); color: var(--muted); font-weight: 500; }
+.online-input {
+  padding: 9px var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--t-base);
+}
+.online-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.online-hint { margin: var(--s2) 0 0; font-size: var(--t-xs); color: var(--faint); line-height: 1.5; }
+
+/* Журнал обращений в интернет (прозрачность постфактум). */
+.online-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-top: var(--s4);
+}
+.online-log-title { font-size: var(--t-md); font-weight: 600; color: var(--text); margin: 0; }
+.online-log-actions { display: flex; gap: var(--s2); }
+.online-log {
+  margin-top: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.online-log__empty { padding: var(--s3); color: var(--faint); font-size: var(--t-sm); text-align: center; }
+.online-log__row { padding: var(--s2) var(--s3); border-top: 1px solid var(--border); }
+.online-log__row:first-child { border-top: none; }
+.online-log__meta { font-size: var(--t-xs); color: var(--muted); }
+.online-log__query { font-size: var(--t-sm); color: var(--text); margin-top: 2px; word-break: break-word; }
+
+/* Источники из интернета под ответом — кликабельные ссылки. */
+.sources--web .source-link { color: var(--accent); text-decoration: none; }
+.sources--web .source-link:hover { text-decoration: underline; }
+
 .send {
   margin-left: auto;
   width: 36px;
