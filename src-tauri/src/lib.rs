@@ -3,6 +3,7 @@ mod chunk; // Чанкинг (Фаза B): резка текста на фраг
 mod docstore; // База документов (Фаза B): векторное хранилище SQLite + sqlite-vec
 mod embed; // Эмбеддинги (Фаза B): bge-m3 через Ollama, батчем
 mod engine; // Операционный слой: управление процессом движка Ollama
+mod tools; // Онлайн-слой (агентный режим): исходящий клиент + инструменты (веб-поиск)
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,11 +70,15 @@ struct ChatMessage {
 
 /// Кусочки, которые Rust шлёт обратно в окно по мере генерации ответа.
 /// В TS придут как { type: "chunk", content: "..." } и { type: "done" }.
+/// Status/Sources — только для онлайн-слоя (агентный цикл): статус «Ищу в интернете…»
+/// и источники из веб-поиска. Офлайн-чат шлёт лишь Chunk/Thinking/Done — без изменений.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ChatEvent {
     Chunk { content: String },
     Thinking { content: String },
+    Status { content: String },
+    Sources { items: Vec<tools::WebSource> },
     Done,
 }
 
@@ -92,7 +97,6 @@ async fn chat_stream(
     cancel.0.store(false, Ordering::Relaxed); // новый запрос — сбрасываем «Стоп»
     // Контекст — рычаг смягчения (S2): меньше num_ctx → меньше KV-кэш → меньше памяти.
     let ctx = num_ctx.unwrap_or(8192);
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -106,7 +110,21 @@ async fn chat_stream(
             "num_ctx": ctx
         },
     });
+    // Стриминг вынесен в общий помощник: его же переиспользует агентный цикл
+    // (онлайн-режим) для финального ответа — поведение офлайн-чата неизменно.
+    stream_chat_response(body, &on_event, &cancel.0).await
+}
 
+/// Стриминг ответа Ollama по NDJSON в окно через Channel + watchdog по свопу (S3).
+/// Возвращает полный текст ответа. Используется и обычным чатом (chat_stream), и
+/// финальной репликой агентного цикла (онлайн-режим) — единый механизм стрима/отмены.
+/// `cancel` уже взведён вызывающим при «Стоп»; здесь его только читаем.
+async fn stream_chat_response(
+    body: serde_json::Value,
+    on_event: &Channel<ChatEvent>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
     let mut resp = client
         .post("http://127.0.0.1:11434/api/chat")
         .json(&body)
@@ -123,7 +141,7 @@ async fn chat_stream(
     // Watchdog (S3): лёгкая задача следит за РОСТОМ свопа во время генерации (своп —
     // триггер зависания). При опасном пороге взводит тот же CancelFlag (как «Стоп»),
     // чтобы прервать запрос ДО неотзывчивости, и записывает причину.
-    let wd_flag = cancel.0.clone();
+    let wd_flag = cancel.clone();
     let wd_reason: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let wd_reason_task = wd_reason.clone();
     let watchdog = tauri::async_runtime::spawn(async move {
@@ -183,7 +201,7 @@ async fn chat_stream(
     // разбираем только целые строки; остаток без \n дочитываем после конца потока.
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        if cancel.0.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) {
             break; // нажали «Стоп» — перестаём читать, соединение закроется и Ollama остановит генерацию
         }
         buf.extend_from_slice(&chunk);
@@ -217,9 +235,275 @@ async fn chat_stream(
 
 /// «Стоп»: помечаем текущий стрим на отмену. chat_stream увидит флаг и прервёт
 /// чтение — соединение с Ollama закроется, генерация остановится (не жжём GPU).
+/// Тот же флаг прерывает и агентный цикл (онлайн-режим): между раундами, перед
+/// вызовом инструмента и в финальном стриме.
 #[tauri::command]
 fn cancel_stream(cancel: tauri::State<'_, CancelFlag>) {
     cancel.0.store(true, Ordering::Relaxed);
+}
+
+// ── Онлайн-слой (агентный режим): цикл tool calling вокруг чата ───────────────
+// Включается ТОЛЬКО при явном онлайн-режиме и модели с возможностью `tools`. Офлайн-
+// чат сюда не заходит (фронт идёт прежним путём chat_stream). 152-ФЗ: наружу данные
+// уходят лишь здесь, видимо (индикатор) и под запись (лог исходящих обращений).
+
+/// Предел раундов инструментов — защита от бесконечного цикла агента. При превышении
+/// корректно завершаем финальным ответом по уже собранным данным.
+const MAX_TOOL_ROUNDS: usize = 4;
+
+/// Предел числа РЕАЛЬНЫХ веб-поисков на один вопрос. Каждый возвращает до 20 источников
+/// (≈2200 токенов), поэтому объём суммарно ограничиваем, чтобы всё уместилось в num_ctx
+/// и обрабатывалось «за раз». После лимита инструменты не передаём — модель обязана
+/// дать ответ с анализом по уже собранному (до 2×20 = 40 источников).
+const MAX_SEARCHES: usize = 2;
+
+/// Дефолты веб-поиска (бэкенд конфигурируемый — это лишь значения по умолчанию).
+const DEFAULT_SEARCH_PROVIDER: &str = "tavily";
+const DEFAULT_SEARCH_URL: &str = "https://api.tavily.com/search";
+
+/// Прочитать конфиг веб-поиска из settings.json (провайдер/эндпоинт/ключ). Пустые
+/// ключи → дефолты Tavily; API-ключ по умолчанию пуст (без него инструмент честно
+/// недоступен). Чтение строго локальное.
+fn read_web_search_config(app: &tauri::AppHandle) -> tools::WebSearchConfig {
+    let map = read_settings(app);
+    let get = |k: &str| map.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let provider = {
+        let p = get("web_search_provider");
+        if p.is_empty() { DEFAULT_SEARCH_PROVIDER.to_string() } else { p }
+    };
+    let url = {
+        let u = get("web_search_url");
+        if u.is_empty() { DEFAULT_SEARCH_URL.to_string() } else { u }
+    };
+    tools::WebSearchConfig {
+        provider,
+        url,
+        api_key: get("web_search_api_key"),
+    }
+}
+
+/// Агентный цикл tool calling вокруг чата. Делает «решающие» ходы к Ollama без
+/// стриминга (с массивом `tools`), исполняет инструменты в Rust, а ФИНАЛЬНЫЙ ответ
+/// стримит тем же механизмом, что и обычный чат (stream_chat_response). Уважает
+/// CancelFlag на всех стадиях. `messages` — сырые {role, content, images?} с фронта;
+/// по ходу дополняются ассистентскими tool_calls и результатами роли `tool`.
+#[tauri::command]
+async fn agentic_chat(
+    app: tauri::AppHandle,
+    model: String,
+    messages: Vec<serde_json::Value>,
+    think: bool,
+    num_ctx: Option<u64>,
+    on_event: Channel<ChatEvent>,
+    cancel: tauri::State<'_, CancelFlag>,
+) -> Result<String, String> {
+    cancel.0.store(false, Ordering::Relaxed); // новый запрос — сбрасываем «Стоп»
+    let ctx = num_ctx.unwrap_or(8192);
+    let cfg = read_web_search_config(&app);
+    let tool_specs = tools::tool_specs();
+    let client = reqwest::Client::new(); // localhost: «решающие» ходы к Ollama
+
+    let mut msgs = messages;
+    let mut searches_done: usize = 0; // сколько реальных веб-поисков уже выполнено
+
+    // Раунды инструментов: пока модель просит вызовы — исполняем и продолжаем.
+    for round in 0..MAX_TOOL_ROUNDS {
+        if cancel.0.load(Ordering::Relaxed) {
+            return Ok(String::new()); // «Стоп» — выходим тихо (фронт игнорирует хвост)
+        }
+        let _ = on_event.send(ChatEvent::Status {
+            content: if round == 0 { "Думаю…".into() } else { "Ищу в интернете…".into() },
+        });
+
+        // Решающий ход: без стриминга, рассуждения выключены (быстрее). Инструменты
+        // передаём, пока не исчерпан лимит поисков; после — без tools, чтобы модель
+        // обработала собранное и дала ответ (защита контекста и от лишних обращений).
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": msgs,
+            "stream": false,
+            "think": false,
+            "options": { "num_ctx": ctx },
+        });
+        if searches_done < MAX_SEARCHES {
+            body["tools"] = serde_json::json!(tool_specs);
+        }
+        let resp = client
+            .post("http://127.0.0.1:11434/api/chat")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Ollama вернул ошибку {status}: {text}"));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let message = json.get("message").cloned().unwrap_or(serde_json::Value::Null);
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if tool_calls.is_empty() {
+            break; // модель готова отвечать → выходим на финальный стрим
+        }
+
+        // Добавляем ход ассистента (с tool_calls) дословно — Ollama ждёт его в истории.
+        msgs.push(message.clone());
+
+        // Исполняем каждый запрошенный инструмент в Rust.
+        for tc in &tool_calls {
+            if cancel.0.load(Ordering::Relaxed) {
+                return Ok(String::new());
+            }
+            let fname = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fargs = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+
+            // Бюджет поисков исчерпан (в т. ч. если модель запросила несколько вызовов
+            // в одном раунде) — лишние не исполняем, честно помечаем, чтобы модель
+            // перешла к анализу и выводу по уже собранным источникам.
+            if searches_done >= MAX_SEARCHES {
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_name": fname,
+                    "content": "Достигнут предел числа поисков. Больше не ищи — проанализируй \
+                                уже найденные источники и дай итоговый ответ.",
+                }));
+                continue;
+            }
+
+            let _ = on_event.send(ChatEvent::Status { content: "Ищу в интернете…".into() });
+
+            let result = tools::execute_tool(&fname, &fargs, &cfg).await;
+            searches_done += 1;
+
+            // Журнал исходящих обращений (152-ФЗ: что и на какой хост ушло) — пишем
+            // ТОЛЬКО при реальном выходе в сеть (went_online). Короткое замыкание без
+            // ключа/сети наружу ничего не отправляет и в журнал не попадает.
+            if result.went_online {
+                let query = fargs.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                log_outbound(&app, &cfg.url, &fname, &query);
+            }
+            if !result.sources.is_empty() {
+                let _ = on_event.send(ChatEvent::Sources { items: result.sources.clone() });
+            }
+            // Результат — сообщением роли `tool` (модель на него опирается).
+            msgs.push(serde_json::json!({
+                "role": "tool",
+                "tool_name": fname,
+                "content": result.content,
+            }));
+        }
+        // Если это был последний разрешённый раунд — дальше финал по собранному.
+        if round + 1 == MAX_TOOL_ROUNDS {
+            let _ = on_event.send(ChatEvent::Status {
+                content: "Готовлю ответ по найденному…".into(),
+            });
+        }
+    }
+
+    if cancel.0.load(Ordering::Relaxed) {
+        return Ok(String::new());
+    }
+
+    // Финальный ответ — СТРИМИМ существующим механизмом (без инструментов, чтобы
+    // модель дала текст), с рассуждениями по тумблеру пользователя.
+    let final_body = serde_json::json!({
+        "model": model,
+        "messages": msgs,
+        "stream": true,
+        "think": think,
+        "options": { "num_ctx": ctx },
+    });
+    stream_chat_response(final_body, &on_event, &cancel.0).await
+}
+
+// ── Лог исходящих обращений (152-ФЗ): прозрачность постфактум ─────────────────
+
+/// Запись лога: время, хост, инструмент, запрос. Хранится локально в appDataDir.
+#[derive(Clone, Serialize, Deserialize)]
+struct OutboundLogEntry {
+    ts: i64,
+    host: String,
+    tool: String,
+    query: String,
+}
+
+/// Путь файла лога исходящих обращений (JSON-массив) в appDataDir.
+fn outbound_log_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Не удалось получить appDataDir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать каталог: {e}"))?;
+    Ok(dir.join("outbound_log.json"))
+}
+
+/// Прочитать лог (новые в конце файла). Сбой чтения → пустой (лог не критичен).
+fn read_outbound_log(app: &tauri::AppHandle) -> Vec<OutboundLogEntry> {
+    if let Ok(path) = outbound_log_path(app) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<Vec<OutboundLogEntry>>(&text) {
+                return v;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Дописать обращение в лог (хост из URL). Ограничиваем последними 200 записями,
+/// чтобы файл не рос бесконечно. Ошибки записи гасим — лог не должен ломать чат.
+fn log_outbound(app: &tauri::AppHandle, url: &str, tool: &str, query: &str) {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| url.to_string());
+    let mut log = read_outbound_log(app);
+    log.push(OutboundLogEntry {
+        ts: now_ms(),
+        host,
+        tool: tool.to_string(),
+        query: query.chars().take(300).collect(), // не храним гигантские запросы
+    });
+    let len = log.len();
+    if len > 200 {
+        log.drain(0..len - 200);
+    }
+    if let Ok(path) = outbound_log_path(app) {
+        if let Ok(text) = serde_json::to_string_pretty(&log) {
+            let _ = write_atomic(&path, &text);
+        }
+    }
+}
+
+/// Лог исходящих обращений для интерфейса (новые сверху).
+#[tauri::command]
+fn get_outbound_log(app: tauri::AppHandle) -> Vec<OutboundLogEntry> {
+    let mut log = read_outbound_log(&app);
+    log.reverse();
+    log
+}
+
+/// Очистить лог исходящих обращений.
+#[tauri::command]
+fn clear_outbound_log(app: tauri::AppHandle) -> Result<(), String> {
+    let path = outbound_log_path(&app)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("Не удалось очистить лог: {e}"))?;
+    }
+    Ok(())
 }
 
 // ── Установка моделей (операционный слой): /api/pull с прогрессом ─────────────
@@ -328,12 +612,15 @@ fn cancel_pull(cancel: tauri::State<'_, PullCancelFlag>) {
     cancel.0.store(true, Ordering::Relaxed);
 }
 
-/// Модель + поддержка рассуждений ("thinking") и зрения ("vision") из capabilities.
+/// Модель + поддержка рассуждений ("thinking"), зрения ("vision") и вызова
+/// инструментов ("tools") из capabilities. `tools` гейтит онлайн-режим: без неё
+/// модель не умеет возвращать tool_calls, поэтому агентный веб-поиск недоступен.
 #[derive(Serialize)]
 struct ModelInfo {
     name: String,
     thinking: bool,
     vision: bool,
+    tools: bool,
 }
 
 /// Список установленных моделей из Ollama: GET 127.0.0.1:11434/api/tags.
@@ -368,6 +655,7 @@ async fn list_models() -> Result<Vec<ModelInfo>, String> {
                         name,
                         thinking: has("thinking"),
                         vision: has("vision"),
+                        tools: has("tools"),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1059,6 +1347,180 @@ fn detect_vram() -> (Option<f64>, String) {
     (None, "unknown".to_string())
 }
 
+// ── Диагностика («проверка системы»): самопроверка для установки под ключ ────
+// Агрегирует уже существующие проверки (движок, модели, база, железо) + место на
+// диске и доступность хранилища. Всё локально, без интернета; команда не падает —
+// каждая проверка честно отчитывается сама за себя.
+
+/// Минимальная версия Ollama — наибольшее из требований (безопасность ≥ 0.17.1;
+/// зрение qwen3-vl ≥ 0.12.7). Ориентир актуальной ветки — 0.30.x (см. CLAUDE.md).
+const MIN_OLLAMA_VERSION: [u64; 3] = [0, 17, 1];
+/// Пороги свободного места на томе с данными: одна модель 8–9B (Q4_K_M) — ~5–6 ГБ,
+/// поэтому < 15 ГБ — «впритык» (обновление модели может не пролезть), < 3 ГБ — беда.
+const DISK_WARN_GB: f64 = 15.0;
+const DISK_FAIL_GB: f64 = 3.0;
+
+/// Итог одной проверки. status: "ok" | "warn" | "fail".
+#[derive(Serialize)]
+struct DiagCheck {
+    id: &'static str,
+    title: &'static str,
+    status: &'static str,
+    detail: String,
+}
+
+fn diag(id: &'static str, title: &'static str, status: &'static str, detail: String) -> DiagCheck {
+    DiagCheck { id, title, status, detail }
+}
+
+/// "0.30.1" → [0, 30, 1]. Нечисловые хвосты компонентов ("1-rc2") отбрасываются,
+/// недостающие компоненты = 0 — сравнение с минимумом не падает на экзотике.
+fn parse_version(v: &str) -> [u64; 3] {
+    let mut out = [0u64; 3];
+    for (i, part) in v.trim().split('.').take(3).enumerate() {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        out[i] = digits.parse().unwrap_or(0);
+    }
+    out
+}
+
+/// Полная самопроверка системы: движок, модели набора, база документов, место на
+/// диске, железо, хранилище данных. Порядок фиксированный — фронт рисует как есть.
+#[tauri::command]
+async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
+    let mut out = Vec::new();
+
+    // 1. Движок: отвечает ли, и не старше ли минимально поддерживаемой версии.
+    let engine_alive = match ollama_version().await {
+        Ok(v) => {
+            if parse_version(&v) < MIN_OLLAMA_VERSION {
+                let min = MIN_OLLAMA_VERSION.map(|n| n.to_string()).join(".");
+                out.push(diag("engine", "Движок Ollama", "warn",
+                    format!("Работает, но версия {v} устарела — нужна не ниже {min}")));
+            } else {
+                out.push(diag("engine", "Движок Ollama", "ok", format!("Работает, версия {v}")));
+            }
+            true
+        }
+        Err(e) => {
+            out.push(diag("engine", "Движок Ollama", "fail", format!("Не отвечает: {e}")));
+            false
+        }
+    };
+
+    // 2. Модели набора: обязательные должны стоять (список — без движка не получить).
+    if engine_alive {
+        match model_states().await {
+            Ok(st) => {
+                let missing: Vec<&str> = st.models.iter()
+                    .filter(|m| m.required && !m.installed)
+                    .map(|m| m.tag.as_str())
+                    .collect();
+                let installed = st.models.iter().filter(|m| m.installed).count();
+                if missing.is_empty() {
+                    out.push(diag("models", "Модели", "ok",
+                        format!("Обязательные установлены; всего из набора: {installed}")));
+                } else {
+                    out.push(diag("models", "Модели", "fail",
+                        format!("Не хватает обязательных: {}", missing.join(", "))));
+                }
+            }
+            Err(e) => out.push(diag("models", "Модели", "fail", e)),
+        }
+    } else {
+        out.push(diag("models", "Модели", "fail",
+            "Движок недоступен — состояние моделей не проверить".into()));
+    }
+
+    // 3. База документов: открывается ли, сколько в ней всего.
+    let db_check = docstore::db_path(&app).and_then(|p| {
+        let conn = docstore::open(&p)?;
+        let docs = docstore::list_documents(&conn)?;
+        Ok((p, docs))
+    });
+    match db_check {
+        Ok((path, docs)) => {
+            if docs.is_empty() {
+                out.push(diag("documents", "База документов", "ok",
+                    "Работает, пока пуста (документы добавляются во вкладке «Документы»)".into()));
+            } else {
+                let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
+                let size_mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64
+                    / 1024.0 / 1024.0;
+                out.push(diag("documents", "База документов", "ok",
+                    format!("Документов: {}, фрагментов: {chunks} ({size_mb:.1} МБ)", docs.len())));
+            }
+        }
+        Err(e) => out.push(diag("documents", "База документов", "fail", e)),
+    }
+
+    // 4. Место на томе с данными приложения (модели/база/история растут именно там).
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            let disks = sysinfo::Disks::new_with_refreshed_list();
+            // Том, которому принадлежит каталог данных: самая длинная точка
+            // монтирования, являющаяся префиксом пути.
+            let disk = disks.list().iter()
+                .filter(|d| dir.starts_with(d.mount_point()))
+                .max_by_key(|d| d.mount_point().as_os_str().len());
+            match disk {
+                Some(d) => {
+                    let free = d.available_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+                    let total = d.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+                    let detail = format!("Свободно {free:.0} ГБ из {total:.0} ГБ");
+                    let status = if free < DISK_FAIL_GB { "fail" }
+                        else if free < DISK_WARN_GB { "warn" } else { "ok" };
+                    out.push(diag("disk", "Место на диске", status, detail));
+                }
+                None => out.push(diag("disk", "Место на диске", "warn",
+                    "Не удалось определить том с данными приложения".into())),
+            }
+        }
+        Err(e) => out.push(diag("disk", "Место на диске", "fail",
+            format!("Не удалось получить каталог данных: {e}"))),
+    }
+
+    // 5. Железо: тот же детект, что у «светофора» в шапке.
+    match detect_hardware() {
+        Ok(hw) => {
+            let status = match hw.tier.as_str() {
+                "green" => "ok",
+                "yellow" => "warn",
+                _ => "fail",
+            };
+            let vram = match hw.vram_gb {
+                Some(v) => format!("видеопамять {v:.0} ГБ"),
+                None if hw.vram_source == "unified" => "общая память (Apple)".to_string(),
+                None => "видеопамять неизвестна".to_string(),
+            };
+            out.push(diag("hardware", "Железо", status,
+                format!("ОЗУ {:.0} ГБ · ядер CPU: {} · {vram}", hw.ram_gb, hw.cpu_cores)));
+        }
+        Err(e) => out.push(diag("hardware", "Железо", "fail", e)),
+    }
+
+    // 6. Хранилище: каталог данных существует и доступен на запись (пробный файл).
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            let probe = dir.join(".diag-probe.tmp");
+            let writable = std::fs::create_dir_all(&dir).is_ok()
+                && std::fs::write(&probe, b"ok").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            if writable {
+                out.push(diag("storage", "Хранилище данных", "ok",
+                    format!("Доступно на запись: {}", dir.display())));
+            } else {
+                out.push(diag("storage", "Хранилище данных", "fail",
+                    format!("Каталог недоступен на запись: {}", dir.display())));
+            }
+        }
+        Err(e) => out.push(diag("storage", "Хранилище данных", "fail",
+            format!("Не удалось получить каталог данных: {e}"))),
+    }
+
+    out
+}
+
 // ── Документы (Фаза A): извлечение текста из одного файла ────────────────────
 
 /// Результат извлечения текста из документа.
@@ -1611,6 +2073,9 @@ pub fn run() {
         .manage(engine::EngineState::new())
         .invoke_handler(tauri::generate_handler![
             chat_stream,
+            agentic_chat,
+            get_outbound_log,
+            clear_outbound_log,
             cancel_stream,
             pull_model,
             cancel_pull,
@@ -1627,6 +2092,7 @@ pub fn run() {
             check_model_updates,
             estimate_memory,
             plan_inference,
+            run_diagnostics,
             ollama_version,
             embedding_status,
             detect_hardware,
@@ -1652,4 +2118,21 @@ pub fn run() {
                 engine::stop_if_ours(&state);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version;
+
+    #[test]
+    fn version_parsing_and_ordering() {
+        assert_eq!(parse_version("0.30.1"), [0, 30, 1]);
+        assert_eq!(parse_version("0.17"), [0, 17, 0]); // недостающий компонент = 0
+        assert_eq!(parse_version("1.2.3-rc1"), [1, 2, 3]); // нечисловой хвост отброшен
+        assert_eq!(parse_version("мусор"), [0, 0, 0]); // экзотика не роняет проверку
+        // сравнение с минимумом — обычный порядок массивов
+        assert!(parse_version("0.16.9") < [0, 17, 1]);
+        assert!(parse_version("0.17.1") >= [0, 17, 1]);
+        assert!(parse_version("0.30.0") >= [0, 17, 1]);
+    }
 }

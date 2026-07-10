@@ -100,10 +100,18 @@ let pullCancelled = false;
 // Каждый документ упоминаем один раз — дальше не повторяем заметку под ответами.
 const shownSourceFiles = new Set<string>();
 
-// События из Rust (см. ChatEvent в lib.rs).
+// Источник из веб-поиска (онлайн-режим): заголовок + ссылка (см. WebSource в tools.rs).
+interface WebSource {
+  title: string;
+  url: string;
+}
+
+// События из Rust (см. ChatEvent в lib.rs). status/sources — только онлайн-слой.
 type ChatEvent =
   | { type: "chunk"; content: string }
   | { type: "thinking"; content: string }
+  | { type: "status"; content: string }
+  | { type: "sources"; items: WebSource[] }
   | { type: "done" };
 
 type Role = "user" | "assistant";
@@ -112,21 +120,24 @@ interface Message {
   content: string;
   doc?: DocAttachment; // только у реплик пользователя, к которым приложен файл
   sources?: SourceRef[]; // только у ответов ассистента на основе базы документов
+  webSources?: WebSource[]; // источники из веб-поиска (онлайн-режим)
   images?: string[]; // base64 прикреплённых изображений (зрение, qwen3-vl)
 }
 
 // Сообщение для Ollama: role/content (+ опц. images у vision-запросов).
 type ApiMsg = { role: string; content: string; images?: string[] };
 
-// Модель + поддержка рассуждений и зрения (из list_models).
+// Модель + поддержка рассуждений, зрения и вызова инструментов (из list_models).
 interface ModelInfo {
   name: string;
   thinking: boolean;
   vision: boolean;
+  tools: boolean;
 }
-// Какие модели поддерживают «Размышления» / «Зрение» (имя → bool).
+// Какие модели поддерживают «Размышления» / «Зрение» / «Инструменты» (имя → bool).
 const thinkingByModel = new Map<string, boolean>();
 const visionByModel = new Map<string, boolean>();
+const toolsByModel = new Map<string, boolean>();
 
 // Управление моделями (M1–M4): локальное состояние модели набора.
 interface ModelState {
@@ -175,6 +186,10 @@ let autoScroll = true;
 // Режим рассуждений (тумблер). По умолчанию включён; выбор хранится в localStorage.
 let thinkEnabled = true;
 
+// Онлайн-режим (агентный, tool calling). По умолчанию ВЫКЛЮЧЕН (офлайн-первичность,
+// 152-ФЗ). Включается явным тумблером; состояние хранится в settings.json (online_mode).
+let onlineMode = false;
+
 let messagesEl: HTMLElement;
 let feedEl: HTMLElement;
 let emptyStateEl: HTMLElement;
@@ -188,6 +203,18 @@ let hwBarEl: HTMLElement;
 let convListEl: HTMLElement;
 let newChatBtn: HTMLButtonElement;
 let thinkToggleEl: HTMLButtonElement;
+// Онлайн-режим (агентный): тумблер в композере, индикатор в шапке, поля и журнал в настройках.
+let onlineToggleEl: HTMLButtonElement;
+let onlineBadgeEl: HTMLElement;
+let onlineStateTextEl: HTMLElement;
+let onlineMasterToggleEl: HTMLButtonElement;
+let wsProviderEl: HTMLInputElement;
+let wsUrlEl: HTMLInputElement;
+let wsKeyEl: HTMLInputElement;
+let outboundLogEl: HTMLElement;
+let outboundRefreshBtn: HTMLButtonElement;
+let outboundClearBtn: HTMLButtonElement;
+let onlineStatusEl: HTMLElement;
 let themeBtn: HTMLButtonElement;
 let settingsBtn: HTMLButtonElement;
 let settingsView: HTMLElement;
@@ -234,6 +261,8 @@ let modelProgressEl: HTMLElement;
 let modelProgressFill: HTMLElement;
 let modelProgressLabel: HTMLElement;
 let modelPullCancelBtn: HTMLButtonElement;
+let diagRunBtn: HTMLButtonElement;
+let diagListEl: HTMLElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -295,6 +324,7 @@ function addBubble(
   doc?: DocAttachment,
   sources?: SourceRef[],
   images?: string[],
+  webSources?: WebSource[],
 ): HTMLElement {
   const turn = document.createElement("div");
   let body: HTMLElement;
@@ -321,6 +351,7 @@ function addBubble(
     body.innerHTML = renderMarkdown(text); // ответ — как Markdown/формулы, без аватара/подписи
     turn.appendChild(body);
     if (sources && sources.length) renderSources(turn, sources); // источники из базы
+    if (webSources && webSources.length) renderWebSources(turn, webSources); // из интернета
   }
   messagesEl.appendChild(turn);
   refreshEmptyState();
@@ -524,10 +555,20 @@ async function send() {
     }
   };
 
+  const webSources: WebSource[] = []; // источники из веб-поиска (онлайн-режим)
   const onEvent = new Channel<ChatEvent>();
   onEvent.onmessage = (msg) => {
     if (myGen !== generation) return; // нажали «Стоп» — игнорируем хвост
-    if (msg.type === "thinking") {
+    if (msg.type === "status") {
+      // Агентный цикл сообщает стадию («Ищу в интернете…») — показываем в индикаторе.
+      const lbl = ui.thinking.querySelector("span:last-child");
+      if (lbl) lbl.textContent = msg.content;
+    } else if (msg.type === "sources") {
+      // Источники веб-поиска: копим без дублей по URL, рисуем под финальным ответом.
+      for (const s of msg.items) {
+        if (!webSources.some((x) => x.url === s.url)) webSources.push(s);
+      }
+    } else if (msg.type === "thinking") {
       reasoning += msg.content;
       ui.thinking.remove(); // индикатор теперь — переливающееся «Рассуждение»
       ui.reason.hidden = false;
@@ -610,9 +651,44 @@ async function send() {
     // оценка недоступна (нет Ollama и т.п.) — не блокируем, идём как есть
   }
 
+  // Онлайн-режим: при включённом тумблере и модели с поддержкой инструментов идём
+  // агентным путём (tool calling: веб-поиск). Иначе — обычный офлайн-стрим, как и
+  // раньше. Модель без `tools` в онлайне → честное уведомление, чат работает обычным.
+  const useTools = onlineMode && (toolsByModel.get(useModel) ?? false);
+  if (onlineMode && !useTools) {
+    addNotice(
+      `Модель «${useModel}» не умеет вызывать инструменты — веб-поиск недоступен. ` +
+        `Отвечаю офлайн. Для онлайн-инструментов выберите модель с поддержкой инструментов (например, qwen3.5:9b).`,
+    );
+  }
+  // Онлайн: усиливаем поиск — подмешиваем системную подсказку с текущей датой, чтобы
+  // модель искала, когда вопрос требует данных, и строила вывод на основе найденного.
+  // Вставка ТОЛЬКО при агентном пути — офлайн-промпт остаётся без изменений.
+  if (useTools) {
+    const today = new Date().toLocaleDateString("ru-RU", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+    messages.splice(1, 0, {
+      role: "system",
+      content:
+        `Сегодня ${today}. Онлайн-режим включён, доступен инструмент web_search (поиск в интернете). ` +
+        `ВАЖНО: твои внутренние знания устарели и не содержат текущих данных реального мира. Поэтому для ` +
+        `любого вопроса, ответ на который зависит от фактов — цены, курсы валют, новости, законы, даты, ` +
+        `характеристики товаров и оборудования, статистика, события, «что/как/сколько/где/когда сейчас» — ` +
+        `сначала обязательно вызови web_search по сути запроса. Один поиск возвращает до 20 источников — ` +
+        `этого обычно достаточно для полного охвата; при необходимости охватить другой аспект сделай ещё ` +
+        `один поиск (не больше двух всего). Затем обработай и сопоставь ВСЕ найденные источники вместе и ` +
+        `дай развёрнутый ответ с анализом и обоснованным выводом (а не перечень ссылок), опираясь на источники ` +
+        `и отмечая расхождения, если они есть. Не отвечай по памяти на фактические вопросы. Без поиска отвечай ` +
+        `только на просьбы написать или переформулировать текст, посчитать, либо объяснить общее устойчивое понятие.`,
+    });
+  }
+
   try {
     // Возвращённое значение — ПОЛНЫЙ текст ответа (без гонок с доставкой канала).
-    const full = await invoke<string>("chat_stream", {
+    const full = await invoke<string>(useTools ? "agentic_chat" : "chat_stream", {
       model: useModel,
       messages,
       // think:true шлём ТОЛЬКО моделям, которые это поддерживают (иначе Ollama
@@ -629,10 +705,12 @@ async function send() {
       if (answer.trim()) {
         renderAnswer(answer); // финальное форматирование один раз
         if (sources.length) renderSources(ui.turn, sources); // из каких документов взято
+        if (webSources.length) renderWebSources(ui.turn, webSources); // из интернета
         history.push({
           role: "assistant",
           content: answer,
           ...(sources.length ? { sources } : {}),
+          ...(webSources.length ? { webSources } : {}),
         });
         persist();
       } else if (!reasoning.trim()) {
@@ -1183,6 +1261,8 @@ function openSettings() {
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
   resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
+  refreshOutboundLog(); // актуальный журнал обращений в интернет
+  runDiagnostics(); // самопроверка при каждом открытии (локально, дёшево)
 }
 
 // Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
@@ -1538,6 +1618,82 @@ async function installFromDiskForModels() {
   await loadModelStates();
 }
 
+// ── Проверка системы (диагностика): раздел настроек ──────────────────────────
+
+interface DiagCheck {
+  id: string;
+  title: string;
+  status: string; // "ok" | "warn" | "fail"
+  detail: string;
+}
+
+// Иконки проверок — в стиле roleIcon (контурные, 24×24).
+function diagIcon(id: string): string {
+  const paths: Record<string, string> = {
+    engine: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M4.9 19.1l2.2-2.2M16.9 7.1l2.2-2.2"/>',
+    models: '<path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>',
+    documents: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+    disk: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>',
+    hardware: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>',
+    storage: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  };
+  return `<svg viewBox="0 0 24 24">${paths[id] ?? paths.engine}</svg>`;
+}
+
+// Бейдж по статусу проверки (переиспользуем стили бейджей моделей).
+function diagBadge(status: string): { cls: string; text: string } {
+  if (status === "ok") return { cls: "model-badge--ok", text: "ОК" };
+  if (status === "warn") return { cls: "model-badge--update", text: "Внимание" };
+  return { cls: "model-badge--err", text: "Проблема" };
+}
+
+// Запустить самопроверку и нарисовать результат (строки — как список моделей).
+async function runDiagnostics() {
+  diagRunBtn.disabled = true;
+  diagRunBtn.classList.add("checking");
+  diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
+  try {
+    const checks = await invoke<DiagCheck[]>("run_diagnostics");
+    diagListEl.innerHTML = "";
+    for (const c of checks) {
+      const row = document.createElement("div");
+      row.className = "model-row";
+
+      const icon = document.createElement("span");
+      icon.className = "model-row__icon";
+      icon.innerHTML = diagIcon(c.id);
+
+      const info = document.createElement("div");
+      info.className = "model-row__info";
+      const title = document.createElement("div");
+      title.className = "model-row__title";
+      title.textContent = c.title;
+      const detail = document.createElement("div");
+      detail.className = "model-row__tag";
+      detail.textContent = c.detail;
+      info.append(title, detail);
+
+      const badge = document.createElement("span");
+      const b = diagBadge(c.status);
+      badge.className = `model-badge ${b.cls}`;
+      badge.textContent = b.text;
+
+      row.append(icon, info, badge);
+      diagListEl.appendChild(row);
+    }
+  } catch (e) {
+    diagListEl.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "model-row__tag";
+    err.textContent = `Не удалось выполнить проверку: ${e}`;
+    diagListEl.appendChild(err);
+  } finally {
+    diagRunBtn.disabled = false;
+    diagRunBtn.classList.remove("checking");
+    diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверить`;
+  }
+}
+
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
 
 // Пакует найденные фрагменты в одно system-сообщение в рамках бюджета символов.
@@ -1592,6 +1748,30 @@ function renderSources(turn: HTMLElement, sources: SourceRef[]) {
   turn.appendChild(row);
 }
 
+// Рисует источники из веб-поиска (онлайн-режим) под ответом — кликабельные ссылки,
+// чтобы пользователь видел, откуда взята информация из интернета (152-ФЗ: прозрачность).
+function renderWebSources(turn: HTMLElement, items: WebSource[]) {
+  if (!items.length) return;
+  const row = document.createElement("div");
+  row.className = "sources sources--web";
+  const label = document.createElement("span");
+  label.className = "sources__label";
+  label.textContent = "Источники из интернета: ";
+  row.appendChild(label);
+  items.forEach((s, i) => {
+    if (i) row.appendChild(document.createTextNode("; "));
+    const a = document.createElement("a");
+    a.className = "source-link";
+    a.href = s.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = s.title || s.url;
+    a.title = s.url;
+    row.appendChild(a);
+  });
+  turn.appendChild(row);
+}
+
 // ── Диалоги: сохранение/загрузка/переключение/удаление ──────────────────────
 
 // Заголовок диалога — из первого вопроса пользователя (обрезанный).
@@ -1624,7 +1804,8 @@ function renderHistory() {
   messagesEl.innerHTML = "";
   shownSourceFiles.clear(); // заново считаем «первое упоминание» источников в этом диалоге
   autoScroll = true; // открыли диалог — показываем низ (последние сообщения)
-  for (const m of history) addBubble(m.role, m.content, m.doc, m.sources, m.images);
+  for (const m of history)
+    addBubble(m.role, m.content, m.doc, m.sources, m.images, m.webSources);
   refreshEmptyState(); // пустой диалог → приветствие; иначе скрыто
 }
 
@@ -1838,10 +2019,12 @@ async function loadModels() {
 
   thinkingByModel.clear();
   visionByModel.clear();
+  toolsByModel.clear();
   modelSelectEl.innerHTML = "";
   for (const m of models) {
     thinkingByModel.set(m.name, m.thinking);
     visionByModel.set(m.name, m.vision);
+    toolsByModel.set(m.name, m.tools);
     const opt = document.createElement("option");
     opt.value = m.name;
     opt.textContent = m.name;
@@ -2083,6 +2266,122 @@ async function initThinking() {
   });
 }
 
+// ── Онлайн-режим (агентный, tool calling) ────────────────────────────────────
+
+// Применяет состояние онлайн-режима ко всему UI: тумблер в композере, индикатор в
+// шапке (виден только в онлайне — в офлайне обычная работа), подпись и кнопка в
+// настройках. `persist` — записать выбор в settings.json (по умолчанию да).
+function setOnlineMode(on: boolean, persist = true) {
+  onlineMode = on;
+  onlineToggleEl.classList.toggle("on", on);
+  onlineBadgeEl.hidden = !on; // индикатор «данные могут уходить наружу» только в онлайне
+  onlineStateTextEl.textContent = on ? "включён" : "выключен";
+  onlineMasterToggleEl.textContent = on ? "Выключить" : "Включить";
+  if (persist) {
+    invoke("set_setting", { key: "online_mode", value: on ? "1" : "0" }).catch((e) =>
+      console.error("set_setting online_mode:", e),
+    );
+  }
+}
+
+// Восстанавливает онлайн-режим и настройки веб-поиска из settings.json и навешивает
+// обработчики. Онлайн ВЫКЛЮЧЕН, пока пользователь явно не включал (152-ФЗ).
+async function initOnline() {
+  // Состояние режима (по умолчанию выкл).
+  let onlineSaved: string | null = null;
+  try {
+    onlineSaved = await invoke<string | null>("get_setting", { key: "online_mode" });
+  } catch {
+    onlineSaved = null;
+  }
+  setOnlineMode(onlineSaved === "1", false); // только "1" = включён; иначе офлайн
+
+  // Поля провайдера/эндпоинта/ключа (дефолты — Tavily; пустой ключ = поиск недоступен).
+  const load = async (key: string) => {
+    try {
+      return (await invoke<string | null>("get_setting", { key })) ?? "";
+    } catch {
+      return "";
+    }
+  };
+  wsProviderEl.value = (await load("web_search_provider")) || "tavily";
+  wsUrlEl.value = (await load("web_search_url")) || "https://api.tavily.com/search";
+  wsKeyEl.value = await load("web_search_api_key");
+
+  // Сохраняем поля по уходу фокуса (как другие настройки — единый источник settings.json).
+  const saveField = (el: HTMLInputElement, key: string) => {
+    el.addEventListener("change", () => {
+      invoke("set_setting", { key, value: el.value.trim() }).catch((e) =>
+        console.error(`set_setting ${key}:`, e),
+      );
+    });
+  };
+  saveField(wsProviderEl, "web_search_provider");
+  saveField(wsUrlEl, "web_search_url");
+  saveField(wsKeyEl, "web_search_api_key");
+
+  // Тумблеры (композер + мастер в настройках) переключают один и тот же режим.
+  onlineToggleEl.addEventListener("click", () => setOnlineMode(!onlineMode));
+  onlineMasterToggleEl.addEventListener("click", () => setOnlineMode(!onlineMode));
+
+  // Журнал исходящих обращений.
+  outboundRefreshBtn.addEventListener("click", refreshOutboundLog);
+  outboundClearBtn.addEventListener("click", async () => {
+    try {
+      await invoke("clear_outbound_log");
+      await refreshOutboundLog();
+    } catch (e) {
+      showOnlineStatus(`Не удалось очистить журнал: ${e}`);
+    }
+  });
+}
+
+// Запись журнала исходящих обращений (зеркало OutboundLogEntry в lib.rs).
+interface OutboundLogEntry {
+  ts: number;
+  host: string;
+  tool: string;
+  query: string;
+}
+
+// Подтягивает журнал обращений в интернет и рисует его (новые сверху). Прозрачность
+// постфактум: что и на какой хост ушло (152-ФЗ при отсутствии пер-запросного запроса).
+async function refreshOutboundLog() {
+  let entries: OutboundLogEntry[] = [];
+  try {
+    entries = await invoke<OutboundLogEntry[]>("get_outbound_log");
+  } catch (e) {
+    outboundLogEl.textContent = `Не удалось загрузить журнал: ${e}`;
+    return;
+  }
+  outboundLogEl.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "online-log__empty";
+    empty.textContent = "Обращений в интернет пока не было.";
+    outboundLogEl.appendChild(empty);
+    return;
+  }
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "online-log__row";
+    const when = new Date(e.ts).toLocaleString();
+    const meta = document.createElement("div");
+    meta.className = "online-log__meta";
+    meta.textContent = `${when} · ${e.host} · ${e.tool}`;
+    const q = document.createElement("div");
+    q.className = "online-log__query";
+    q.textContent = e.query ? `«${e.query}»` : "";
+    row.append(meta, q);
+    outboundLogEl.appendChild(row);
+  }
+}
+
+function showOnlineStatus(text: string) {
+  onlineStatusEl.textContent = text;
+  onlineStatusEl.hidden = false;
+}
+
 // Авто-высота поля ввода под текст.
 function autoGrow() {
   inputEl.style.height = "auto";
@@ -2103,6 +2402,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   convListEl = document.querySelector("#conv-list")!;
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
+  onlineToggleEl = document.querySelector("#online-toggle")!;
+  onlineBadgeEl = document.querySelector("#online-badge")!;
+  onlineStateTextEl = document.querySelector("#online-state-text")!;
+  onlineMasterToggleEl = document.querySelector("#online-master-toggle")!;
+  wsProviderEl = document.querySelector("#ws-provider")!;
+  wsUrlEl = document.querySelector("#ws-url")!;
+  wsKeyEl = document.querySelector("#ws-key")!;
+  outboundLogEl = document.querySelector("#outbound-log")!;
+  outboundRefreshBtn = document.querySelector("#outbound-refresh")!;
+  outboundClearBtn = document.querySelector("#outbound-clear")!;
+  onlineStatusEl = document.querySelector("#online-status")!;
   themeBtn = document.querySelector("#theme-btn")!;
   settingsBtn = document.querySelector("#settings-btn")!;
   settingsView = document.querySelector("#settings-view")!;
@@ -2157,6 +2467,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   checkUpdatesBtn.addEventListener("click", checkModelUpdates);
   installFromDiskBtn.addEventListener("click", installFromDiskForModels);
   modelPullCancelBtn.addEventListener("click", () => invoke("cancel_pull").catch(() => {}));
+  diagRunBtn = document.querySelector("#diag-run-btn")!;
+  diagListEl = document.querySelector("#diag-list")!;
+  diagRunBtn.addEventListener("click", runDiagnostics);
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
@@ -2226,6 +2539,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   initTheme(); // применяем сохранённую/системную тему как можно раньше
   initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
+  initOnline(); // восстанавливаем онлайн-режим и настройки веб-поиска (по умолчанию офлайн)
   initSidebar(); // восстанавливаем ширину и состояние левой панели
 
   document.querySelector("#chat-form")?.addEventListener("submit", (e) => {

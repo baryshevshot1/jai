@@ -101,6 +101,10 @@
           </button>
           <span class="brand">Jarvis AI</span>
           <select class="model-pick" id="model-select" aria-label="Выбор модели"></select>
+          <div class="online-badge" id="online-badge" hidden title="Онлайн-режим включён. При веб-поиске текст запроса уходит на внешний поисковый сервер. Выключите тумблер «Онлайн» в строке ввода, чтобы работать полностью офлайн.">
+            <span class="online-badge__dot"></span>
+            <span class="online-badge__text">Онлайн · данные могут уходить наружу</span>
+          </div>
           <div class="spacer"></div>
           <div class="engine" id="engine">
             <span class="led"></span>
@@ -158,6 +162,10 @@
                 <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2z" /><path d="M9 21h6" /></svg>
                 Размышления
               </button>
+              <button type="button" class="think-toggle online-toggle" id="online-toggle" title="Онлайн-режим: разрешить модели искать в интернете. Данные запроса при поиске уходят на внешний сервер. По умолчанию выключено.">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18" /></svg>
+                Онлайн
+              </button>
               <button type="submit" class="send" id="send-btn" title="Отправить">
                 <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
               </button>
@@ -206,6 +214,57 @@
 
             <section class="settings-card">
               <div class="settings-card__head">
+                <h2 class="settings-card__title">Онлайн-режим и инструменты</h2>
+                <p class="settings-card__desc">
+                  По умолчанию приложение работает полностью офлайн — данные не покидают компьютер.
+                  Онлайн-режим разрешает модели искать в интернете (инструмент «веб-поиск»): при этом
+                  текст поискового запроса уходит на внешний поисковый сервер. Включается только вручную.
+                  Пока он активен, в шапке виден индикатор, а каждое обращение наружу попадает в журнал ниже.
+                </p>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Онлайн-режим (веб-поиск)</div>
+                  <div class="settings-field__value" id="online-state-text">выключен</div>
+                </div>
+                <button type="button" class="ep-btn" id="online-master-toggle">Включить</button>
+              </div>
+
+              <div class="online-field">
+                <label class="online-field__label" for="ws-provider">Провайдер поиска</label>
+                <input class="online-input" id="ws-provider" type="text" placeholder="tavily" spellcheck="false" autocapitalize="off" />
+              </div>
+              <div class="online-field">
+                <label class="online-field__label" for="ws-url">Адрес провайдера (эндпоинт)</label>
+                <input class="online-input" id="ws-url" type="text" placeholder="https://api.tavily.com/search" spellcheck="false" autocapitalize="off" />
+              </div>
+              <div class="online-field">
+                <label class="online-field__label" for="ws-key">API-ключ (хранится локально, не в проекте)</label>
+                <input class="online-input" id="ws-key" type="password" placeholder="tvly-…" autocomplete="off" spellcheck="false" />
+              </div>
+              <p class="online-hint">
+                Tavily — бесплатный ключ на app.tavily.com. Без ключа веб-поиск недоступен;
+                офлайн-чат при этом работает как обычно. Бэкенд можно сменить, указав другого провайдера и эндпоинт.
+              </p>
+
+              <div class="online-log-head">
+                <h3 class="online-log-title">Журнал обращений в интернет</h3>
+                <div class="online-log-actions">
+                  <button type="button" class="ep-btn ep-btn--icon" id="outbound-refresh">Обновить</button>
+                  <button type="button" class="ep-btn ep-btn--ghost" id="outbound-clear">Очистить</button>
+                </div>
+              </div>
+              <div class="online-log" id="outbound-log"></div>
+
+              <div class="settings-status" id="online-status" hidden></div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-card__head">
                 <h2 class="settings-card__title">Движок и модели</h2>
                 <p class="settings-card__desc">
                   Для работы без интернета укажите предзагруженный каталог моделей Ollama и, при
@@ -240,6 +299,22 @@
               </div>
 
               <div class="settings-status" id="settings-status" hidden></div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-card__head models-head">
+                <h2 class="settings-card__title">Проверка системы</h2>
+                <button type="button" class="ep-btn ep-btn--icon" id="diag-run-btn">
+                  <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" /></svg>
+                  Проверить
+                </button>
+              </div>
+              <p class="settings-card__desc models-desc">
+                Самопроверка приложения: движок, модели, база документов, место на диске,
+                железо и хранилище данных. Выполняется на этом компьютере, без интернета.
+              </p>
+
+              <div class="model-list" id="diag-list"></div>
             </section>
           </div>
         </section>
