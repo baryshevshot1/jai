@@ -1264,9 +1264,7 @@ fn detect_vram() -> (Option<f64>, String) {
 // (он режет видеопамять до 4 ГБ). Берём максимум по адаптерам.
 #[cfg(target_os = "windows")]
 fn detect_vram() -> (Option<f64>, String) {
-    use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC, DXGI_ERROR_NOT_FOUND,
-    };
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ERROR_NOT_FOUND};
     unsafe {
         let factory: IDXGIFactory1 = match CreateDXGIFactory1() {
             Ok(f) => f,
@@ -1277,8 +1275,8 @@ fn detect_vram() -> (Option<f64>, String) {
         loop {
             match factory.EnumAdapters(i) {
                 Ok(adapter) => {
-                    let mut desc = DXGI_ADAPTER_DESC::default();
-                    if adapter.GetDesc(&mut desc).is_ok() {
+                    // windows 0.58: GetDesc() возвращает дескриптор (не out-параметр)
+                    if let Ok(desc) = adapter.GetDesc() {
                         best = best.max(desc.DedicatedVideoMemory as u64);
                     }
                     i += 1;
