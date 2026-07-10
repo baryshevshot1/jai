@@ -1347,6 +1347,180 @@ fn detect_vram() -> (Option<f64>, String) {
     (None, "unknown".to_string())
 }
 
+// ── Диагностика («проверка системы»): самопроверка для установки под ключ ────
+// Агрегирует уже существующие проверки (движок, модели, база, железо) + место на
+// диске и доступность хранилища. Всё локально, без интернета; команда не падает —
+// каждая проверка честно отчитывается сама за себя.
+
+/// Минимальная версия Ollama — наибольшее из требований (безопасность ≥ 0.17.1;
+/// зрение qwen3-vl ≥ 0.12.7). Ориентир актуальной ветки — 0.30.x (см. CLAUDE.md).
+const MIN_OLLAMA_VERSION: [u64; 3] = [0, 17, 1];
+/// Пороги свободного места на томе с данными: одна модель 8–9B (Q4_K_M) — ~5–6 ГБ,
+/// поэтому < 15 ГБ — «впритык» (обновление модели может не пролезть), < 3 ГБ — беда.
+const DISK_WARN_GB: f64 = 15.0;
+const DISK_FAIL_GB: f64 = 3.0;
+
+/// Итог одной проверки. status: "ok" | "warn" | "fail".
+#[derive(Serialize)]
+struct DiagCheck {
+    id: &'static str,
+    title: &'static str,
+    status: &'static str,
+    detail: String,
+}
+
+fn diag(id: &'static str, title: &'static str, status: &'static str, detail: String) -> DiagCheck {
+    DiagCheck { id, title, status, detail }
+}
+
+/// "0.30.1" → [0, 30, 1]. Нечисловые хвосты компонентов ("1-rc2") отбрасываются,
+/// недостающие компоненты = 0 — сравнение с минимумом не падает на экзотике.
+fn parse_version(v: &str) -> [u64; 3] {
+    let mut out = [0u64; 3];
+    for (i, part) in v.trim().split('.').take(3).enumerate() {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        out[i] = digits.parse().unwrap_or(0);
+    }
+    out
+}
+
+/// Полная самопроверка системы: движок, модели набора, база документов, место на
+/// диске, железо, хранилище данных. Порядок фиксированный — фронт рисует как есть.
+#[tauri::command]
+async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
+    let mut out = Vec::new();
+
+    // 1. Движок: отвечает ли, и не старше ли минимально поддерживаемой версии.
+    let engine_alive = match ollama_version().await {
+        Ok(v) => {
+            if parse_version(&v) < MIN_OLLAMA_VERSION {
+                let min = MIN_OLLAMA_VERSION.map(|n| n.to_string()).join(".");
+                out.push(diag("engine", "Движок Ollama", "warn",
+                    format!("Работает, но версия {v} устарела — нужна не ниже {min}")));
+            } else {
+                out.push(diag("engine", "Движок Ollama", "ok", format!("Работает, версия {v}")));
+            }
+            true
+        }
+        Err(e) => {
+            out.push(diag("engine", "Движок Ollama", "fail", format!("Не отвечает: {e}")));
+            false
+        }
+    };
+
+    // 2. Модели набора: обязательные должны стоять (список — без движка не получить).
+    if engine_alive {
+        match model_states().await {
+            Ok(st) => {
+                let missing: Vec<&str> = st.models.iter()
+                    .filter(|m| m.required && !m.installed)
+                    .map(|m| m.tag.as_str())
+                    .collect();
+                let installed = st.models.iter().filter(|m| m.installed).count();
+                if missing.is_empty() {
+                    out.push(diag("models", "Модели", "ok",
+                        format!("Обязательные установлены; всего из набора: {installed}")));
+                } else {
+                    out.push(diag("models", "Модели", "fail",
+                        format!("Не хватает обязательных: {}", missing.join(", "))));
+                }
+            }
+            Err(e) => out.push(diag("models", "Модели", "fail", e)),
+        }
+    } else {
+        out.push(diag("models", "Модели", "fail",
+            "Движок недоступен — состояние моделей не проверить".into()));
+    }
+
+    // 3. База документов: открывается ли, сколько в ней всего.
+    let db_check = docstore::db_path(&app).and_then(|p| {
+        let conn = docstore::open(&p)?;
+        let docs = docstore::list_documents(&conn)?;
+        Ok((p, docs))
+    });
+    match db_check {
+        Ok((path, docs)) => {
+            if docs.is_empty() {
+                out.push(diag("documents", "База документов", "ok",
+                    "Работает, пока пуста (документы добавляются во вкладке «Документы»)".into()));
+            } else {
+                let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
+                let size_mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64
+                    / 1024.0 / 1024.0;
+                out.push(diag("documents", "База документов", "ok",
+                    format!("Документов: {}, фрагментов: {chunks} ({size_mb:.1} МБ)", docs.len())));
+            }
+        }
+        Err(e) => out.push(diag("documents", "База документов", "fail", e)),
+    }
+
+    // 4. Место на томе с данными приложения (модели/база/история растут именно там).
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            let disks = sysinfo::Disks::new_with_refreshed_list();
+            // Том, которому принадлежит каталог данных: самая длинная точка
+            // монтирования, являющаяся префиксом пути.
+            let disk = disks.list().iter()
+                .filter(|d| dir.starts_with(d.mount_point()))
+                .max_by_key(|d| d.mount_point().as_os_str().len());
+            match disk {
+                Some(d) => {
+                    let free = d.available_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+                    let total = d.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+                    let detail = format!("Свободно {free:.0} ГБ из {total:.0} ГБ");
+                    let status = if free < DISK_FAIL_GB { "fail" }
+                        else if free < DISK_WARN_GB { "warn" } else { "ok" };
+                    out.push(diag("disk", "Место на диске", status, detail));
+                }
+                None => out.push(diag("disk", "Место на диске", "warn",
+                    "Не удалось определить том с данными приложения".into())),
+            }
+        }
+        Err(e) => out.push(diag("disk", "Место на диске", "fail",
+            format!("Не удалось получить каталог данных: {e}"))),
+    }
+
+    // 5. Железо: тот же детект, что у «светофора» в шапке.
+    match detect_hardware() {
+        Ok(hw) => {
+            let status = match hw.tier.as_str() {
+                "green" => "ok",
+                "yellow" => "warn",
+                _ => "fail",
+            };
+            let vram = match hw.vram_gb {
+                Some(v) => format!("видеопамять {v:.0} ГБ"),
+                None if hw.vram_source == "unified" => "общая память (Apple)".to_string(),
+                None => "видеопамять неизвестна".to_string(),
+            };
+            out.push(diag("hardware", "Железо", status,
+                format!("ОЗУ {:.0} ГБ · ядер CPU: {} · {vram}", hw.ram_gb, hw.cpu_cores)));
+        }
+        Err(e) => out.push(diag("hardware", "Железо", "fail", e)),
+    }
+
+    // 6. Хранилище: каталог данных существует и доступен на запись (пробный файл).
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            let probe = dir.join(".diag-probe.tmp");
+            let writable = std::fs::create_dir_all(&dir).is_ok()
+                && std::fs::write(&probe, b"ok").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            if writable {
+                out.push(diag("storage", "Хранилище данных", "ok",
+                    format!("Доступно на запись: {}", dir.display())));
+            } else {
+                out.push(diag("storage", "Хранилище данных", "fail",
+                    format!("Каталог недоступен на запись: {}", dir.display())));
+            }
+        }
+        Err(e) => out.push(diag("storage", "Хранилище данных", "fail",
+            format!("Не удалось получить каталог данных: {e}"))),
+    }
+
+    out
+}
+
 // ── Документы (Фаза A): извлечение текста из одного файла ────────────────────
 
 /// Результат извлечения текста из документа.
@@ -1918,6 +2092,7 @@ pub fn run() {
             check_model_updates,
             estimate_memory,
             plan_inference,
+            run_diagnostics,
             ollama_version,
             embedding_status,
             detect_hardware,
@@ -1943,4 +2118,21 @@ pub fn run() {
                 engine::stop_if_ours(&state);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version;
+
+    #[test]
+    fn version_parsing_and_ordering() {
+        assert_eq!(parse_version("0.30.1"), [0, 30, 1]);
+        assert_eq!(parse_version("0.17"), [0, 17, 0]); // недостающий компонент = 0
+        assert_eq!(parse_version("1.2.3-rc1"), [1, 2, 3]); // нечисловой хвост отброшен
+        assert_eq!(parse_version("мусор"), [0, 0, 0]); // экзотика не роняет проверку
+        // сравнение с минимумом — обычный порядок массивов
+        assert!(parse_version("0.16.9") < [0, 17, 1]);
+        assert!(parse_version("0.17.1") >= [0, 17, 1]);
+        assert!(parse_version("0.30.0") >= [0, 17, 1]);
+    }
 }

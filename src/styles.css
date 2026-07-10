@@ -458,6 +458,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .model-badge--ok { background: var(--green-soft); color: var(--green); }
 .model-badge--update { background: color-mix(in srgb, #d9a441 16%, var(--surface)); color: #b9831f; }
 .model-badge--missing { background: var(--hover); color: var(--muted); }
+.model-badge--err { background: var(--danger-soft); color: var(--danger); }
 :root[data-theme="dark"] .model-badge--ok { color: var(--text); }
 .model-row .ep-btn { flex-shrink: 0; padding: 5px 11px; }
 

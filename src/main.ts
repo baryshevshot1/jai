@@ -261,6 +261,8 @@ let modelProgressEl: HTMLElement;
 let modelProgressFill: HTMLElement;
 let modelProgressLabel: HTMLElement;
 let modelPullCancelBtn: HTMLButtonElement;
+let diagRunBtn: HTMLButtonElement;
+let diagListEl: HTMLElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -1260,6 +1262,7 @@ function openSettings() {
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
   resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
   refreshOutboundLog(); // актуальный журнал обращений в интернет
+  runDiagnostics(); // самопроверка при каждом открытии (локально, дёшево)
 }
 
 // Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
@@ -1613,6 +1616,82 @@ async function installFromDiskForModels() {
   modelsStatus("Применение локального каталога…", false);
   await applyModelsDir(dir, modelsStatus);
   await loadModelStates();
+}
+
+// ── Проверка системы (диагностика): раздел настроек ──────────────────────────
+
+interface DiagCheck {
+  id: string;
+  title: string;
+  status: string; // "ok" | "warn" | "fail"
+  detail: string;
+}
+
+// Иконки проверок — в стиле roleIcon (контурные, 24×24).
+function diagIcon(id: string): string {
+  const paths: Record<string, string> = {
+    engine: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M4.9 19.1l2.2-2.2M16.9 7.1l2.2-2.2"/>',
+    models: '<path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>',
+    documents: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+    disk: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>',
+    hardware: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>',
+    storage: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  };
+  return `<svg viewBox="0 0 24 24">${paths[id] ?? paths.engine}</svg>`;
+}
+
+// Бейдж по статусу проверки (переиспользуем стили бейджей моделей).
+function diagBadge(status: string): { cls: string; text: string } {
+  if (status === "ok") return { cls: "model-badge--ok", text: "ОК" };
+  if (status === "warn") return { cls: "model-badge--update", text: "Внимание" };
+  return { cls: "model-badge--err", text: "Проблема" };
+}
+
+// Запустить самопроверку и нарисовать результат (строки — как список моделей).
+async function runDiagnostics() {
+  diagRunBtn.disabled = true;
+  diagRunBtn.classList.add("checking");
+  diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
+  try {
+    const checks = await invoke<DiagCheck[]>("run_diagnostics");
+    diagListEl.innerHTML = "";
+    for (const c of checks) {
+      const row = document.createElement("div");
+      row.className = "model-row";
+
+      const icon = document.createElement("span");
+      icon.className = "model-row__icon";
+      icon.innerHTML = diagIcon(c.id);
+
+      const info = document.createElement("div");
+      info.className = "model-row__info";
+      const title = document.createElement("div");
+      title.className = "model-row__title";
+      title.textContent = c.title;
+      const detail = document.createElement("div");
+      detail.className = "model-row__tag";
+      detail.textContent = c.detail;
+      info.append(title, detail);
+
+      const badge = document.createElement("span");
+      const b = diagBadge(c.status);
+      badge.className = `model-badge ${b.cls}`;
+      badge.textContent = b.text;
+
+      row.append(icon, info, badge);
+      diagListEl.appendChild(row);
+    }
+  } catch (e) {
+    diagListEl.innerHTML = "";
+    const err = document.createElement("div");
+    err.className = "model-row__tag";
+    err.textContent = `Не удалось выполнить проверку: ${e}`;
+    diagListEl.appendChild(err);
+  } finally {
+    diagRunBtn.disabled = false;
+    diagRunBtn.classList.remove("checking");
+    diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверить`;
+  }
 }
 
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
@@ -2388,6 +2467,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   checkUpdatesBtn.addEventListener("click", checkModelUpdates);
   installFromDiskBtn.addEventListener("click", installFromDiskForModels);
   modelPullCancelBtn.addEventListener("click", () => invoke("cancel_pull").catch(() => {}));
+  diagRunBtn = document.querySelector("#diag-run-btn")!;
+  diagListEl = document.querySelector("#diag-list")!;
+  diagRunBtn.addEventListener("click", runDiagnostics);
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
