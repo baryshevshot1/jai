@@ -36,6 +36,10 @@ pdf-extract = "0.12"
 quick-xml = "0.40"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
+# Обновления приложения: онлайн-проверка выпусков GitHub (только по явной кнопке
+# пользователя, без автопроверок) + перезапуск после установки обновления.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 sqlite-vec = "0.1.9"
 zerocopy = "0.8.52"

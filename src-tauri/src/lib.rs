@@ -2061,12 +2061,83 @@ async fn reload_engine(
     Ok(engine::ensure(&state, exe_override, models_override, resource_dir).await)
 }
 
+/// Обновление с диска (офлайн-путь): пользователь выбирает файл установщика новой
+/// версии (принесён на флешке и т.п.), мы запускаем его штатным для ОС способом и
+/// закрываем приложение, чтобы установщик мог заменить файлы. Сеть не используется.
+#[tauri::command]
+fn install_update_from_disk(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err("Файл установщика не найден.".into());
+    }
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    #[cfg(target_os = "windows")]
+    match ext.as_str() {
+        "msi" => {
+            std::process::Command::new("msiexec")
+                .arg("/i")
+                .arg(&p)
+                .spawn()
+                .map_err(|e| format!("Не удалось запустить установщик: {e}"))?;
+        }
+        "exe" => {
+            std::process::Command::new(&p)
+                .spawn()
+                .map_err(|e| format!("Не удалось запустить установщик: {e}"))?;
+        }
+        _ => return Err("Ожидается установщик Windows: файл .msi или .exe.".into()),
+    }
+
+    #[cfg(target_os = "linux")]
+    match ext.as_str() {
+        // Открываем пакет системным обработчиком (центр приложений / установщик пакетов):
+        // так не нужны права root внутри нашего процесса.
+        "deb" | "rpm" => {
+            std::process::Command::new("xdg-open")
+                .arg(&p)
+                .spawn()
+                .map_err(|e| format!("Не удалось открыть пакет: {e}"))?;
+        }
+        "appimage" => {
+            return Err("AppImage обновляется заменой файла: закройте приложение и \
+                        скопируйте новый AppImage поверх старого."
+                .into());
+        }
+        _ => return Err("Ожидается пакет Linux: файл .deb или .rpm.".into()),
+    }
+
+    #[cfg(target_os = "macos")]
+    match ext.as_str() {
+        "dmg" | "app" => {
+            std::process::Command::new("open")
+                .arg(&p)
+                .spawn()
+                .map_err(|e| format!("Не удалось открыть образ: {e}"))?;
+        }
+        _ => return Err("Ожидается образ macOS: файл .dmg.".into()),
+    }
+
+    // Дать установщику стартовать и выйти самим — иначе он не сможет заменить файлы.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        app.exit(0);
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     docstore::register_vec(); // зарегистрировать sqlite-vec до открытия любых соединений
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(CancelFlag(Arc::new(AtomicBool::new(false))))
         .manage(PullCancelFlag(AtomicBool::new(false)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
@@ -2106,7 +2177,8 @@ pub fn run() {
             set_engine_path,
             set_models_dir,
             clear_engine_overrides,
-            reload_engine
+            reload_engine,
+            install_update_from_disk
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

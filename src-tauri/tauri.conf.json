@@ -25,9 +25,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/baryshevshot1/jai/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4RjRFNjBGNkZFNjFDOTQKUldTVUhPWnZEK2IwT0pkZTJvMUZZa2l4a1ZFc2VqSTVKa3Q5NkVJZkRpYVBJRFB4VXdteW5IN3oK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
