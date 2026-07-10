@@ -1,5 +1,10 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+// Обновления приложения: проверка выпуска на GitHub — ТОЛЬКО по явной кнопке
+// пользователя (автопроверок нет, офлайн-ядро не трогает сеть).
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 import { renderMarkdown } from "./markdown";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/atom-one-dark.css";
@@ -263,6 +268,14 @@ let modelProgressLabel: HTMLElement;
 let modelPullCancelBtn: HTMLButtonElement;
 let diagRunBtn: HTMLButtonElement;
 let diagListEl: HTMLElement;
+let appUpdateCheckBtn: HTMLButtonElement;
+let appUpdateDiskBtn: HTMLButtonElement;
+let appUpdateInfoEl: HTMLElement;
+let appUpdateProgressEl: HTMLElement;
+let appUpdateProgressFill: HTMLElement;
+let appUpdateProgressLabel: HTMLElement;
+let appUpdateStatusEl: HTMLElement;
+let appVersionEl: HTMLElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
@@ -1694,6 +1707,122 @@ async function runDiagnostics() {
   }
 }
 
+// ── Обновления приложения: онлайн-проверка (по кнопке) и установка с диска ────
+
+// Статус-сообщение карточки обновлений.
+function appUpdateStatus(text: string, isError: boolean) {
+  appUpdateStatusEl.hidden = false;
+  appUpdateStatusEl.textContent = text;
+  appUpdateStatusEl.classList.toggle("settings-status--error", isError);
+}
+
+// Проверить наличие новой версии на сервере выпусков (GitHub Releases).
+// Единственное сетевое обращение офлайн-продукта — и только по явному нажатию.
+async function checkAppUpdate() {
+  appUpdateCheckBtn.disabled = true;
+  appUpdateCheckBtn.classList.add("checking");
+  appUpdateCheckBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
+  appUpdateStatusEl.hidden = true;
+  appUpdateInfoEl.innerHTML = "";
+  try {
+    const update = await check();
+    if (update) renderAppUpdateRow(update);
+    else appUpdateStatus("У вас последняя версия.", false);
+  } catch (e) {
+    appUpdateStatus(`Не удалось проверить обновления (нужен доступ в интернет): ${e}`, true);
+  } finally {
+    appUpdateCheckBtn.disabled = false;
+    appUpdateCheckBtn.classList.remove("checking");
+    appUpdateCheckBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
+  }
+}
+
+// Строка «доступна версия X» с кнопкой установки — в стиле списка моделей.
+function renderAppUpdateRow(update: Update) {
+  appUpdateInfoEl.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "model-row";
+
+  const icon = document.createElement("span");
+  icon.className = "model-row__icon";
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+
+  const info = document.createElement("div");
+  info.className = "model-row__info";
+  const title = document.createElement("div");
+  title.className = "model-row__title";
+  title.textContent = `Доступна версия ${update.version}`;
+  const detail = document.createElement("div");
+  detail.className = "model-row__tag";
+  detail.textContent = update.body?.trim() || `Установлена ${update.currentVersion}`;
+  info.append(title, detail);
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ep-btn";
+  btn.textContent = "Установить";
+  btn.addEventListener("click", () => installAppUpdate(update, btn));
+
+  row.append(icon, info, btn);
+  appUpdateInfoEl.appendChild(row);
+}
+
+// Скачать и установить обновление; подпись проверяется плагином (публичный ключ
+// зашит в приложение). После установки — перезапуск (на Windows установщик сам
+// закрывает и перезапускает приложение).
+async function installAppUpdate(update: Update, btn: HTMLButtonElement) {
+  btn.disabled = true;
+  appUpdateProgressEl.hidden = false;
+  appUpdateProgressFill.style.width = "2%";
+  appUpdateProgressLabel.textContent = `Загрузка ${update.version}…`;
+  let total = 0;
+  let got = 0;
+  try {
+    await update.downloadAndInstall((e) => {
+      if (e.event === "Started") {
+        total = e.data.contentLength ?? 0;
+      } else if (e.event === "Progress") {
+        got += e.data.chunkLength;
+        if (total > 0) {
+          const pct = Math.round((got / total) * 100);
+          appUpdateProgressFill.style.width = `${pct}%`;
+          appUpdateProgressLabel.textContent = `Загрузка ${update.version}: ${pct}%`;
+        }
+      } else if (e.event === "Finished") {
+        appUpdateProgressFill.style.width = "100%";
+        appUpdateProgressLabel.textContent = "Установка…";
+      }
+    });
+    appUpdateProgressEl.hidden = true;
+    appUpdateStatus("Обновление установлено — приложение перезапустится.", false);
+    await relaunch();
+  } catch (e) {
+    appUpdateProgressEl.hidden = true;
+    appUpdateStatus(`Не удалось установить обновление: ${e}`, true);
+    btn.disabled = false;
+  }
+}
+
+// Обновление с диска (без интернета): выбрать файл установщика новой версии —
+// бэкенд запустит его штатным для ОС способом и закроет приложение.
+async function installAppUpdateFromDisk() {
+  const sel = await open({
+    multiple: false,
+    title: "Файл установщика новой версии",
+    filters: [
+      { name: "Установщик", extensions: ["msi", "exe", "deb", "rpm", "AppImage", "dmg"] },
+    ],
+  }).catch(() => null);
+  if (typeof sel !== "string") return;
+  try {
+    await invoke("install_update_from_disk", { path: sel });
+    appUpdateStatus("Установщик запущен — приложение сейчас закроется.", false);
+  } catch (e) {
+    appUpdateStatus(`${e}`, true);
+  }
+}
+
 // ── RAG: поиск фрагментов и сборка контекстного сообщения ────────────────────
 
 // Пакует найденные фрагменты в одно system-сообщение в рамках бюджета символов.
@@ -2470,6 +2599,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   diagRunBtn = document.querySelector("#diag-run-btn")!;
   diagListEl = document.querySelector("#diag-list")!;
   diagRunBtn.addEventListener("click", runDiagnostics);
+  appUpdateCheckBtn = document.querySelector("#app-update-check")!;
+  appUpdateDiskBtn = document.querySelector("#app-update-disk")!;
+  appUpdateInfoEl = document.querySelector("#app-update-info")!;
+  appUpdateProgressEl = document.querySelector("#app-update-progress")!;
+  appUpdateProgressFill = document.querySelector("#app-update-progress-fill")!;
+  appUpdateProgressLabel = document.querySelector("#app-update-progress-label")!;
+  appUpdateStatusEl = document.querySelector("#app-update-status")!;
+  appVersionEl = document.querySelector("#app-version")!;
+  appUpdateCheckBtn.addEventListener("click", checkAppUpdate);
+  appUpdateDiskBtn.addEventListener("click", installAppUpdateFromDisk);
+  getVersion()
+    .then((v) => (appVersionEl.textContent = v))
+    .catch(() => (appVersionEl.textContent = "—"));
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
