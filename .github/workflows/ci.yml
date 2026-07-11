@@ -1,0 +1,78 @@
+# Быстрая сетка безопасности на каждый PR и push в main: тесты Rust, строгий tsc,
+# и — главное — компиляция Windows-веток (#[cfg(windows)]: DXGI и пр.), которые
+# на Mac разработчика не собираются вовсе. Установщики здесь НЕ собираются —
+# это делает release.yml по тегу app-v*.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Новый пуш в ту же ветку отменяет уже идущую проверку (экономим минуты CI).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Тесты (Ubuntu) + фронтенд
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Фронтенд — tsc strict + vite build
+        # Также создаёт dist/: generate_context! в Tauri требует frontendDist
+        # уже на этапе КОМПИЛЯЦИИ Rust, иначе cargo test не соберётся.
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Системные зависимости Tauri (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Тесты Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  windows:
+    name: Тесты (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Фронтенд — tsc strict + vite build
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Тесты Rust (включая Windows-ветки cfg)
+        # Именно тесты, не только check: восстановление повреждённой documents.db
+        # завязано на семантику файловой системы Windows (rename при открытом
+        # хендле) — тест recovers_from_corrupt_db проверяет её по-настоящему.
+        run: cargo test --manifest-path src-tauri/Cargo.toml
