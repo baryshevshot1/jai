@@ -6,7 +6,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type { HardwareInfo, ModelInfo, ModelState } from "./types";
 import { state, thinkingByModel, toolsByModel, updateByTag, visionByModel } from "./state";
 import {
-  checkBtn,
   checkUpdatesBtn,
   engineEl,
   hwBarEl,
@@ -423,30 +422,19 @@ export async function checkOllama() {
   }
 }
 
-// Кнопка «обновить»: заново проверяем движок и перечитываем список моделей,
-// чтобы подхватить только что скачанные модели без перезапуска приложения.
+// Кнопка «обновить» в шапке: полная перепроверка — движок, железо и список моделей
+// (подхватывает только что скачанные модели и смену железа без перезапуска).
 async function refreshAll() {
   refreshBtn.disabled = true;
   try {
     await checkOllama();
-    await loadModels();
+    await Promise.all([loadHardware(), loadModels()]);
   } finally {
     refreshBtn.disabled = false;
   }
 }
 
-// «Проверка»: полная перепроверка движка, железа и списка моделей.
-async function recheck() {
-  checkBtn.disabled = true;
-  try {
-    await checkOllama();
-    await Promise.all([loadHardware(), loadModels()]);
-  } finally {
-    checkBtn.disabled = false;
-  }
-}
-
-// Обработчики: выбор модели, «обновить», «Проверка», проверка обновлений, отмена pull.
+// Обработчики: выбор модели, «обновить», проверка обновлений, отмена pull.
 export function wireModels() {
   modelSelectEl.addEventListener("change", () => {
     state.selectedModel = modelSelectEl.value;
@@ -457,7 +445,6 @@ export function wireModels() {
     );
   });
   refreshBtn.addEventListener("click", refreshAll);
-  checkBtn.addEventListener("click", recheck);
   checkUpdatesBtn.addEventListener("click", checkModelUpdates);
   modelPullCancelBtn.addEventListener("click", cancelActivePull);
 }

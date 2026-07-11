@@ -1716,7 +1716,7 @@ async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
             };
             if docs.is_empty() {
                 out.push(diag("documents", "База документов", status,
-                    format!("Работает, пока пуста (документы добавляются во вкладке «Документы»){note}")));
+                    format!("Работает, пока пуста (документы добавляются в настройках и на экранах проектов){note}")));
             } else {
                 let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
                 let size_mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64

@@ -8,7 +8,7 @@ import { history, shownSourceFiles, state } from "./state";
 import {
   chatProjectChip,
   chatProjectChipName,
-  clearBtn,
+  clearChatsBtn,
   convListEl,
   convSearchEl,
   inputEl,
@@ -285,5 +285,5 @@ export function wireConversations() {
     convFilter = convSearchEl.value;
     renderConvList();
   });
-  clearBtn.addEventListener("click", clearAllConversations);
+  clearChatsBtn.addEventListener("click", clearAllConversations); // кнопка в настройках («История диалогов»)
 }
