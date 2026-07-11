@@ -382,6 +382,12 @@ const MAX_TOOL_ROUNDS: usize = 4;
 /// дать ответ с анализом по уже собранному (до 2×20 = 40 источников).
 const MAX_SEARCHES: usize = 2;
 
+/// Предел числа прочитанных страниц (read_url) на один вопрос. Каждая — до ~4000
+/// символов (≈2000 токенов, см. PAGE_TEXT_MAX_CHARS в tools.rs); две страницы плюс
+/// поиски — потолок разумного объёма для num_ctx 8k. Бюджет отдельный от поисков:
+/// «дал ссылку — прочитай» не должен тратить лимит поисков и наоборот.
+const MAX_READS: usize = 2;
+
 /// Дефолты веб-поиска (бэкенд конфигурируемый — это лишь значения по умолчанию).
 const DEFAULT_SEARCH_PROVIDER: &str = "tavily";
 const DEFAULT_SEARCH_URL: &str = "https://api.tavily.com/search";
@@ -428,7 +434,8 @@ async fn agentic_chat(
     let tool_specs = tools::tool_specs();
 
     let mut msgs = messages;
-    let mut searches_done: usize = 0; // сколько реальных веб-поисков уже выполнено
+    let mut searches_done: usize = 0; // сколько веб-поисков уже выполнено
+    let mut reads_done: usize = 0; // сколько страниц уже прочитано (read_url)
 
     // Раунды инструментов: пока модель просит вызовы — исполняем и продолжаем.
     for round in 0..MAX_TOOL_ROUNDS {
@@ -436,7 +443,7 @@ async fn agentic_chat(
             return Ok(String::new()); // «Стоп» — выходим тихо (фронт игнорирует хвост)
         }
         let _ = on_event.send(ChatEvent::Status {
-            content: if round == 0 { "Думаю…".into() } else { "Ищу в интернете…".into() },
+            content: if round == 0 { "Думаю…".into() } else { "Обрабатываю найденное…".into() },
         });
 
         // Решающий ход: без стриминга, рассуждения выключены (быстрее). Инструменты
@@ -449,7 +456,7 @@ async fn agentic_chat(
             "think": false,
             "options": { "num_ctx": ctx },
         });
-        if searches_done < MAX_SEARCHES {
+        if searches_done < MAX_SEARCHES || reads_done < MAX_READS {
             body["tools"] = serde_json::json!(tool_specs);
         }
         // Решающий ход без стриминга может думать долго — ждём с опросом отмены,
@@ -500,33 +507,82 @@ async fn agentic_chat(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
 
-            // Бюджет поисков исчерпан (в т. ч. если модель запросила несколько вызовов
-            // в одном раунде) — лишние не исполняем, честно помечаем, чтобы модель
-            // перешла к анализу и выводу по уже собранным источникам.
-            if searches_done >= MAX_SEARCHES {
+            // Бюджет СВОЕГО инструмента исчерпан (в т. ч. если модель запросила
+            // несколько вызовов в одном раунде) — лишние не исполняем, честно помечаем,
+            // чтобы модель перешла к анализу и выводу по уже собранным данным.
+            let exhausted = match fname.as_str() {
+                "web_search" => searches_done >= MAX_SEARCHES,
+                "read_url" => reads_done >= MAX_READS,
+                _ => false, // неизвестный инструмент бюджета не имеет (execute_tool честно откажет)
+            };
+            if exhausted {
                 msgs.push(serde_json::json!({
                     "role": "tool",
                     "tool_name": fname,
-                    "content": "Достигнут предел числа поисков. Больше не ищи — проанализируй \
-                                уже найденные источники и дай итоговый ответ.",
+                    "content": "Достигнут предел обращений этого инструмента. Больше не вызывай \
+                                его — проанализируй уже собранное и дай итоговый ответ.",
                 }));
                 continue;
             }
 
-            let _ = on_event.send(ChatEvent::Status { content: "Ищу в интернете…".into() });
+            // Статус — с деталью, что именно уходит наружу (прозрачность в интерфейсе).
+            let _ = on_event.send(ChatEvent::Status {
+                content: match fname.as_str() {
+                    "read_url" => {
+                        let host = fargs
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .and_then(|u| reqwest::Url::parse(u.trim()).ok())
+                            .and_then(|u| u.host_str().map(str::to_string))
+                            .unwrap_or_default();
+                        if host.is_empty() {
+                            "Читаю страницу…".into()
+                        } else {
+                            format!("Читаю страницу {host}…")
+                        }
+                    }
+                    _ => {
+                        let q = fargs.get("query").and_then(|q| q.as_str()).unwrap_or("").trim();
+                        let short: String = q.chars().take(60).collect();
+                        let ell = if q.chars().count() > 60 { "…" } else { "" };
+                        if short.is_empty() {
+                            "Ищу в интернете…".into()
+                        } else {
+                            format!("Ищу в интернете: «{short}{ell}»")
+                        }
+                    }
+                },
+            });
 
             // НЕ оборачиваем в with_cancel: журнал исходящих (152-ФЗ) пишется ПОСЛЕ
             // вызова — обрыв посередине оставил бы уход в сеть без записи в журнал.
             // Сам вызов ограничен таймаутами web_client (8 с подключение / 20 с всего).
             let result = tools::execute_tool(&fname, &fargs, &cfg).await;
-            searches_done += 1;
+            match fname.as_str() {
+                "web_search" => searches_done += 1,
+                "read_url" => reads_done += 1,
+                _ => {}
+            }
 
             // Журнал исходящих обращений (152-ФЗ: что и на какой хост ушло) — пишем
             // ТОЛЬКО при реальном выходе в сеть (went_online). Короткое замыкание без
             // ключа/сети наружу ничего не отправляет и в журнал не попадает.
             if result.went_online {
-                let query = fargs.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-                log_outbound(&app, &cfg.url, &fname, &query);
+                let (host, query) = if fname == "read_url" {
+                    // Для чтения страницы «хост» и «запрос» — адрес самой страницы:
+                    // в журнале видно, куда именно ходили.
+                    let u = fargs.get("url").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                    let host = reqwest::Url::parse(u.trim())
+                        .ok()
+                        .and_then(|p| p.host_str().map(str::to_string))
+                        .unwrap_or_else(|| u.clone());
+                    (host, u)
+                } else {
+                    let q =
+                        fargs.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+                    (cfg.url.clone(), q)
+                };
+                log_outbound(&app, &host, &fname, &query);
             }
             if !result.sources.is_empty() {
                 let _ = on_event.send(ChatEvent::Sources { items: result.sources.clone() });
