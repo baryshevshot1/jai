@@ -1,6 +1,6 @@
 [package]
 name = "jai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Боксовый офлайн ИИ-ассистент (jai)"
 authors = ["baryshevshot1"]
 edition = "2021"
