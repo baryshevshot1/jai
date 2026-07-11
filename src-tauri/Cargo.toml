@@ -46,6 +46,10 @@ zerocopy = "0.8.52"
 sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["time"] }
 base64 = "0.22.1"
+# Перекодирование изображений при прикреплении: движок Ollama не понимает WebP
+# («Failed to load image or audio file») — конвертируем в PNG/JPEG на нашей стороне.
+# Чистый Rust, только нужные кодеки, без системных библиотек (кроссплатформенно).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 # Определение видеопамяти на Windows через DXGI (DedicatedVideoMemory).
 # Только под Windows — на Mac/Linux этот крейт не собирается.
