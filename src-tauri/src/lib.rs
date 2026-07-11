@@ -91,6 +91,7 @@ enum ChatEvent {
     Thinking { content: String },
     Status { content: String },
     Sources { items: Vec<tools::WebSource> },
+    Notice { content: String },
     Done,
 }
 
@@ -124,7 +125,7 @@ async fn chat_stream(
     });
     // Стриминг вынесен в общий помощник: его же переиспользует агентный цикл
     // (онлайн-режим) для финального ответа — поведение офлайн-чата неизменно.
-    stream_chat_response(body, &on_event, &my_cancel).await
+    stream_chat_response(body, &on_event, &my_cancel, ctx).await
 }
 
 /// Стриминг ответа Ollama по NDJSON в окно через Channel + watchdog по свопу (S3).
@@ -135,6 +136,7 @@ async fn stream_chat_response(
     body: serde_json::Value,
     on_event: &Channel<ChatEvent>,
     cancel: &Arc<AtomicBool>,
+    num_ctx: u64,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
     let mut resp = client
@@ -211,6 +213,22 @@ async fn stream_chat_response(
             }
             if json.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
                 let _ = on_event.send(ChatEvent::Done);
+                // Признаки переполнения контекста: Ollama обрезала ответ по длине
+                // (done_reason=="length") или промпт занял почти весь num_ctx — тогда
+                // старая история/документ молча отброшены сервером. Честно сообщаем.
+                let reason = json.get("done_reason").and_then(|r| r.as_str()).unwrap_or("");
+                let peval = json
+                    .get("prompt_eval_count")
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0);
+                if reason == "length" || (num_ctx > 0 && peval >= num_ctx * 95 / 100) {
+                    let _ = on_event.send(ChatEvent::Notice {
+                        content: "Контекст переполнен — модель могла не увидеть начало \
+                                  диалога или часть документа. Начните новый диалог или \
+                                  сократите приложенный текст."
+                            .to_string(),
+                    });
+                }
             }
         }
     };
@@ -478,7 +496,7 @@ async fn agentic_chat(
         "think": think,
         "options": { "num_ctx": ctx },
     });
-    stream_chat_response(final_body, &on_event, &my_cancel).await
+    stream_chat_response(final_body, &on_event, &my_cancel, ctx).await
 }
 
 // ── Лог исходящих обращений (152-ФЗ): прозрачность постфактум ─────────────────
@@ -730,11 +748,13 @@ struct ModelSpec {
 /// Теги — реальные (фактически устанавливаемые), не абстрактные.
 const MODEL_SET: &[ModelSpec] = &[
     ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true },
-    ModelSpec { tag: "qwen3:8b", role: "text", title: "Текстовая (лёгкая)", required: false },
+    ModelSpec { tag: "qwen3.5:4b", role: "text", title: "Текстовая (лёгкая, для слабого железа)", required: false },
+    // Русский профиль — на Hugging Face (в реестре Ollama под t-tech/ его нет).
+    ModelSpec { tag: "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M", role: "text", title: "Русский профиль (T-lite)", required: false },
     ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true },
-    ModelSpec { tag: "qwen2.5vl:7b", role: "vision", title: "Зрение и OCR", required: false },
-    ModelSpec { tag: "moondream:latest", role: "vision", title: "Зрение (лёгкая)", required: false },
-    ModelSpec { tag: "qwen2.5-coder:7b-instruct", role: "code", title: "Код", required: false },
+    ModelSpec { tag: "qwen3-vl:8b", role: "vision", title: "Зрение и OCR", required: false },
+    ModelSpec { tag: "qwen3-vl:4b", role: "vision", title: "Зрение (лёгкая)", required: false },
+    ModelSpec { tag: "qwen3-coder:latest", role: "code", title: "Код", required: false },
 ];
 
 /// Локальное состояние одной модели набора (без сети). digest/size/date — если установлена.

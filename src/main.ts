@@ -30,9 +30,24 @@ const SYSTEM = {
     "Не используй эмодзи и смайлики.",
 };
 
-// Прикреплённый документ (Фаза A). text уже усечён под бюджет контекста.
-// ~50% от num_ctx 8192 (≈3 симв/токен) — остаётся место под систему/историю/ответ.
-const DOC_CHAR_BUDGET = 12000;
+// Калибровка контекста. На токенайзере Qwen русский текст — это ~2 символа/токен
+// (раньше в коде было заложено оптимистичное «3», из-за чего бюджеты завышались и
+// со второго-третьего хода Ollama молча отбрасывала начало истории). Считаем по 2.
+const NUM_CTX_DEFAULT = 8192; // потолок контекста (CLAUDE.md); при нехватке памяти снижается
+const CHARS_PER_TOKEN = 2; // русский, консервативно
+const ANSWER_RESERVE_CHARS = 3000; // ~1500 токенов оставляем под сам ответ модели
+// Полный бюджет промпта в символах: система + история + контекст из базы + вопрос.
+// Всё, что сверх — отбрасываем сами (управляемо), не отдавая на молчаливую обрезку Ollama.
+const PROMPT_CHAR_BUDGET = NUM_CTX_DEFAULT * CHARS_PER_TOKEN - ANSWER_RESERVE_CHARS;
+
+// Прикреплённый документ (Фаза A). text уже усечён под бюджет контекста
+// (≈2 симв/токен: 8000 симв ≈ 4000 токенов — половина num_ctx, остаток под систему/вопрос/ответ).
+const DOC_CHAR_BUDGET = 8000;
+
+// Картинки (base64) огромны и быстро переполняют num_ctx. В контекст берём изображения
+// только у последних N ходов пользователя — свежий вопрос про картинку работает,
+// а старые кадры не копятся в каждом запросе.
+const IMAGE_HISTORY_TURNS = 2;
 
 // Документ, привязанный к сообщению пользователя. text — уже усечённый под бюджет
 // фрагмент (его «видит» модель); chars — полный размер исходника (для подписи).
@@ -57,8 +72,11 @@ let pendingImage: string | null = null;
 // эволюция Фазы A: место в num_ctx 8192 теперь занимают найденные фрагменты, плюс
 // при активном поиске урезаем глубину истории, чтобы ответ не обрывался.
 const RAG_TOP_K = 6;
-const CONTEXT_CHAR_BUDGET = 7000; // ~2300 токенов — с запасом под систему/вопрос/ответ
-const RAG_HISTORY_LIMIT = 6; // последних сообщений истории при активном поиске
+const CONTEXT_CHAR_BUDGET = 5000; // ~2500 токенов (2 симв/ток) — с запасом под систему/вопрос/ответ
+// Порог релевантности: vec0 отдаёт косинусную дистанцию (1 − cos), меньше = ближе.
+// Фрагменты дальше порога считаем нерелевантными и в контекст не берём — иначе на
+// любой вопрос (даже «привет») подмешивались бы top-6 и без нужды резалась история.
+const RAG_MAX_DISTANCE = 0.6;
 
 // Источник ответа (документ + № фрагмента) — для показа под ответом и истории.
 interface SourceRef {
@@ -117,6 +135,7 @@ type ChatEvent =
   | { type: "thinking"; content: string }
   | { type: "status"; content: string }
   | { type: "sources"; items: WebSource[] }
+  | { type: "notice"; content: string }
   | { type: "done" };
 
 type Role = "user" | "assistant";
@@ -486,41 +505,67 @@ function setStreaming(on: boolean) {
   if (!on && selectedModel) inputEl.focus(); // вернуть фокус в поле после ответа
 }
 
-// Собирает массив сообщений для Ollama: система + история (+ контекст из базы).
-// Реплику с приложенным документом разворачиваем в текст «документ + вопрос»; сам
-// объект doc/sources в запрос не попадает — только чистые {role, content}.
-// contextMsg (если есть) — фрагменты из базы, вставляются ПЕРЕД текущим вопросом;
-// при активном поиске историю урезаем — место в num_ctx занимают фрагменты.
+// Собирает массив сообщений для Ollama: система + история (+ контекст из базы),
+// уложенная в бюджет символов PROMPT_CHAR_BUDGET. Всегда сохраняем систему, контекст
+// из базы и ТЕКУЩИЙ ход; предыдущие ходы добавляем от новых к старым, пока помещаются
+// (старые отбрасываем сами — управляемо, а не отдаём на молчаливую обрезку Ollama, из-за
+// которой модель «забывала» начало диалога и приложенные файлы). Реплику с документом
+// разворачиваем в текст «документ + вопрос»; объекты doc/sources в запрос не уходят.
 function buildApiMessages(contextMsg: Message | null): ApiMsg[] {
-  const out: ApiMsg[] = [SYSTEM];
-  const msgs = contextMsg ? history.slice(-RAG_HISTORY_LIMIT) : history;
-  for (let i = 0; i < msgs.length; i++) {
-    const m = msgs[i];
-    if (contextMsg && i === msgs.length - 1 && m.role === "user") {
-      out.push({ role: contextMsg.role, content: contextMsg.content });
+  const n = history.length;
+
+  // Картинки оставляем только у последних IMAGE_HISTORY_TURNS ходов с изображениями.
+  const keepImages = new Set<number>();
+  for (let i = n - 1, kept = 0; i >= 0 && kept < IMAGE_HISTORY_TURNS; i--) {
+    if (history[i].images && history[i].images!.length) {
+      keepImages.add(i);
+      kept++;
     }
-    let item: ApiMsg;
+  }
+
+  // Превращает сообщение истории в сообщение для Ollama (с разворотом документа).
+  const materialize = (m: Message, i: number): ApiMsg => {
+    let content: string;
     if (m.role === "user" && m.doc) {
-      // Документ — справочный материал к этому ходу. НЕ приказываем «отвечай только
-      // по нему» и не просим упоминать его в каждом ответе: модель обращается к файлу,
-      // когда это относится к вопросу, и не пересказывает его постоянно (как делают
-      // другие ассистенты). Содержимое остаётся в контексте диалога для follow-up.
-      item = {
-        role: "user",
-        content:
-          `[Прикреплён документ «${m.doc.name}» — справочный материал, ` +
-          `обращайся к нему, когда это относится к вопросу]\n\n` +
-          `${m.doc.text}\n\n———\n\n${m.content}`,
-      };
+      // Документ — справочный материал к ходу. Не приказываем «отвечай только по нему»
+      // и не просим упоминать в каждом ответе: модель обращается к файлу по релевантности.
+      content =
+        `[Прикреплён документ «${m.doc.name}» — справочный материал, ` +
+        `обращайся к нему, когда это относится к вопросу]\n\n` +
+        `${m.doc.text}\n\n———\n\n${m.content}`;
     } else {
-      item = { role: m.role, content: m.content };
+      content = m.content;
     }
-    // Изображения (зрение) — сырой base64 в поле images; остаются в контексте для follow-up.
-    if (m.role === "user" && m.images && m.images.length) {
+    const item: ApiMsg = { role: m.role, content };
+    if (m.role === "user" && m.images && m.images.length && keepImages.has(i)) {
       item.images = m.images;
     }
-    out.push(item);
+    return item;
+  };
+
+  const lastIdx = n - 1;
+  const current = lastIdx >= 0 ? materialize(history[lastIdx], lastIdx) : null;
+  const ctxItem: ApiMsg | null = contextMsg
+    ? { role: contextMsg.role, content: contextMsg.content }
+    : null;
+
+  // Остаток бюджета под предыдущие ходы: вычитаем систему, контекст и текущий ход
+  // (их сохраняем всегда). Картинки в бюджет символов не считаем — они в поле images.
+  let budget = PROMPT_CHAR_BUDGET - SYSTEM.content.length;
+  if (ctxItem) budget -= ctxItem.content.length;
+  if (current) budget -= current.content.length;
+
+  const older: ApiMsg[] = [];
+  for (let i = lastIdx - 1; i >= 0; i--) {
+    const item = materialize(history[i], i);
+    if (item.content.length > budget) break; // дальше не помещается — старое отбрасываем
+    budget -= item.content.length;
+    older.unshift(item);
   }
+
+  const out: ApiMsg[] = [SYSTEM, ...older];
+  if (ctxItem) out.push(ctxItem); // фрагменты из базы — прямо перед текущим вопросом
+  if (current) out.push(current);
   return out;
 }
 
@@ -618,6 +663,9 @@ async function send() {
       for (const s of msg.items) {
         if (!webSources.some((x) => x.url === s.url)) webSources.push(s);
       }
+    } else if (msg.type === "notice") {
+      // Служебное уведомление от бэкенда (например, переполнение контекста).
+      addNotice(msg.content);
     } else if (msg.type === "thinking") {
       reasoning += msg.content;
       ui.thinking.remove(); // индикатор теперь — переливающееся «Рассуждение»
@@ -675,8 +723,11 @@ async function send() {
         projectId: currentProjectId,
       });
       if (myGen !== generation) return; // остановили во время поиска
-      if (retrieved.length) {
-        const built = buildContext(retrieved);
+      // Берём только релевантные фрагменты (порог по косинусной дистанции). Если ни один
+      // не прошёл — вопрос не про документы: идём обычным путём, историю не режем.
+      const relevant = retrieved.filter((r) => r.distance <= RAG_MAX_DISTANCE);
+      if (relevant.length) {
+        const built = buildContext(relevant);
         contextMsg = built.contextMsg;
         sources = built.sources;
       }
@@ -1016,11 +1067,12 @@ function ocrImage() {
 }
 
 // Нет vision-модели → предложить установить qwen3-vl через существующий pull_model.
-const VISION_MODEL = "qwen3-vl:2b"; // лёгкий вариант для зрения/OCR
+// Лёгкий документированный вариант (см. CLAUDE.md и набор моделей на странице настроек).
+const VISION_MODEL = "qwen3-vl:4b"; // лёгкий вариант для зрения/OCR
 
 async function offerInstallVision() {
   const ok = await confirmModal(
-    `Для работы с изображениями нужна модель зрения. Установить ${VISION_MODEL} (~2 ГБ)? Потребуется интернет.`,
+    `Для работы с изображениями нужна модель зрения. Установить ${VISION_MODEL} (~3–4 ГБ)? Потребуется интернет.`,
     "Установить",
   );
   if (!ok) {
