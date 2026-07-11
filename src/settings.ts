@@ -29,10 +29,14 @@ import {
   epSetModelsBtn,
   feedEl,
   inputEl,
-  installEmbedBtn,
   installFromDiskBtn,
   installLocalBtn,
+  modelProgressEl,
+  modelProgressFill,
+  modelProgressLabel,
+  modelPullCancelBtn,
   projectView,
+  pullCancelBtn,
   settingsBackBtn,
   settingsBtn,
   settingsStatusEl,
@@ -54,6 +58,7 @@ import {
 import { loadModelStates, loadModels, modelsStatus, resetCheckButton } from "./models";
 import { closeProjectView } from "./projects";
 import { refreshOutboundLog } from "./online";
+import { runImport } from "./pull";
 
 // ── Страница настроек (на месте ленты диалогов) ──────────────────────────────
 
@@ -135,21 +140,61 @@ async function applyModelsDir(dir: string, report: (t: string, err: boolean) => 
   }
 }
 
-// «Указать локально» из карточки в «Документах» — обратная связь в прогресс-панель.
-async function installFromLocalDir() {
-  const dir = await pickModelsDir();
-  if (!dir) return;
-  installEmbedBtn.disabled = true;
-  installLocalBtn.disabled = true;
-  showIndexProgress("Применение локального каталога…", 0.4, sidebarDocCtx);
-  await applyModelsDir(dir, (t, err) => flashIndexLabel(t, err, sidebarDocCtx));
-  await refreshDocuments(sidebarDocCtx);
-  await loadModels();
-  installEmbedBtn.disabled = false;
-  installLocalBtn.disabled = false;
+// Источник для импорта: сначала ищем носитель с каталогом моделей автоматически
+// (флешка «под ключ»); нашли — предлагаем; отказ/не нашли — обычный выбор папки.
+async function pickImportSource(): Promise<string | null> {
+  try {
+    const sources = await invoke<
+      { path: string; removable: boolean; models: number; total_gb: number }[]
+    >("find_model_sources");
+    if (sources.length) {
+      const s = sources[0];
+      const ok = await confirmModal(
+        `Найден носитель с моделями: ${s.path} (моделей: ${s.models}, ${s.total_gb.toFixed(1)} ГБ). Импортировать с него?`,
+        "Импортировать",
+      );
+      if (ok) return s.path;
+    }
+  } catch {
+    /* поиск источников не критичен — выберем вручную */
+  }
+  return pickModelsDir();
 }
 
-// «Указать…» каталог моделей со страницы настроек — обратная связь там же.
+// «Импорт с флешки/диска» из карточки в «Документах»: копирование моделей на
+// компьютер с прогрессом в панели вкладки (после импорта носитель можно вынуть).
+async function installFromLocalDir() {
+  const dir = await pickImportSource();
+  if (!dir) return;
+  const ctx = sidebarDocCtx;
+  const myOp = ++ctx.opGen; // виджет прогресса принадлежит этой операции
+  pullCancelBtn.hidden = false;
+  pullCancelBtn.disabled = false;
+  const outcome = await runImport(dir, {
+    progress: (t, f) => {
+      if (myOp === ctx.opGen) showIndexProgress(t, f, ctx);
+    },
+    done: () => {
+      if (myOp === ctx.opGen) flashIndexLabel("Модели импортированы — носитель можно извлечь", false, ctx);
+    },
+    cancelled: () => {
+      if (myOp === ctx.opGen)
+        flashIndexLabel("Импорт отменён — уже скопированное сохранено, повтор продолжит с места", false, ctx);
+    },
+    error: (m) => {
+      if (myOp === ctx.opGen) flashIndexLabel(m, true, ctx);
+    },
+  });
+  pullCancelBtn.hidden = true;
+  if (outcome === "done") {
+    await refreshDocuments(sidebarDocCtx);
+    await loadModels();
+  }
+}
+
+// «Указать…» каталог моделей со страницы настроек («Движок и модели») — это
+// ПЕРЕКЛЮЧЕНИЕ хранилища без копирования (продвинутый случай: большой внешний
+// диск, общий каталог). Для флешки правильный путь — импорт (кнопки выше).
 async function settingsPickModels() {
   const dir = await pickModelsDir();
   if (!dir) return;
@@ -159,15 +204,32 @@ async function settingsPickModels() {
   await loadModels();
 }
 
-// Источник «с диска» из раздела «Модели»: указать локальный каталог моделей.
+// «С диска…» из раздела «Модели»: импорт моделей с носителя с прогрессом в строке.
 async function installFromDiskForModels() {
-  const dir = await pickModelsDir();
+  const dir = await pickImportSource();
   if (!dir) return;
-  modelsStatus("Применение локального каталога…", false);
-  await applyModelsDir(dir, modelsStatus);
-  await refreshDocuments(sidebarDocCtx);
-  await loadModels();
-  await loadModelStates();
+  modelProgressEl.hidden = false;
+  modelPullCancelBtn.hidden = false;
+  modelPullCancelBtn.disabled = false;
+  modelProgressFill.style.width = "2%";
+  modelProgressLabel.textContent = "Импорт моделей с диска…";
+  const outcome = await runImport(dir, {
+    progress: (t, f) => {
+      modelProgressFill.style.width = `${Math.max(2, Math.round(f * 100))}%`;
+      modelProgressLabel.textContent = t;
+    },
+    done: () => modelsStatus("Модели импортированы — носитель можно извлечь.", false),
+    cancelled: () =>
+      modelsStatus("Импорт отменён — уже скопированное сохранено, повтор продолжит с места.", false),
+    error: (m) => modelsStatus(`Не удалось импортировать: ${m}`, true),
+  });
+  modelProgressEl.hidden = true;
+  modelPullCancelBtn.hidden = true;
+  if (outcome === "done") {
+    await loadModelStates();
+    await loadModels();
+    await refreshDocuments(sidebarDocCtx);
+  }
 }
 
 // «Указать…» исполняемый файл движка (air-gapped, когда Ollama нет в PATH).

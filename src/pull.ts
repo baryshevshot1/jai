@@ -37,12 +37,18 @@ function setPullButtonsEnabled(on: boolean): void {
 }
 
 // Единый поток установки модели.
-export async function runPull(tag: string, ui: PullUi): Promise<PullOutcome | "error"> {
+// Общее ядро операций установки (скачивание из интернета / импорт с носителя):
+// гейт от параллельных операций, канал прогресса, честный итог done/cancelled.
+async function runInstallOp(
+  label: string,
+  exec: (onEvent: Channel<PullEvent>) => Promise<PullOutcome>,
+  ui: PullUi,
+): Promise<PullOutcome | "error"> {
   if (state.pullingTag) {
     ui.error(`Уже идёт установка «${state.pullingTag}» — дождитесь завершения или отмените её.`);
     return "error";
   }
-  state.pullingTag = tag;
+  state.pullingTag = label;
   setPullButtonsEnabled(false);
   // Канал и результат команды — разные пути доставки IPC: после итога гасим
   // запоздавшие progress-сообщения, чтобы они не затирали финальную надпись.
@@ -56,7 +62,7 @@ export async function runPull(tag: string, ui: PullUi): Promise<PullOutcome | "e
     ui.progress(`${ruPullStatus(e.status)}${tail}`, frac);
   };
   try {
-    const outcome = await invoke<PullOutcome>("pull_model", { name: tag, onEvent });
+    const outcome = await exec(onEvent);
     settled = true;
     if (outcome === "cancelled") ui.cancelled();
     else ui.done();
@@ -69,6 +75,25 @@ export async function runPull(tag: string, ui: PullUi): Promise<PullOutcome | "e
     state.pullingTag = null;
     setPullButtonsEnabled(true);
   }
+}
+
+// Скачивание модели из интернета (Ollama /api/pull).
+export async function runPull(tag: string, ui: PullUi): Promise<PullOutcome | "error"> {
+  return runInstallOp(
+    tag,
+    (onEvent) => invoke<PullOutcome>("pull_model", { name: tag, onEvent }),
+    ui,
+  );
+}
+
+// Импорт моделей с флешки/диска: копирование в каталог Ollama на компьютере
+// (после импорта носитель можно вынуть). Отмена — тем же cancel_pull.
+export async function runImport(dir: string, ui: PullUi): Promise<PullOutcome | "error"> {
+  return runInstallOp(
+    "импорт моделей с диска",
+    (onEvent) => invoke<PullOutcome>("import_models_from_dir", { path: dir, onEvent }),
+    ui,
+  );
 }
 
 // Отмена активной установки — кнопки всех поверхностей ведут сюда. Итог придёт

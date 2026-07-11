@@ -3,6 +3,7 @@ mod chunk; // Чанкинг (Фаза B): резка текста на фраг
 mod docstore; // База документов (Фаза B): векторное хранилище SQLite + sqlite-vec
 mod embed; // Эмбеддинги (Фаза B): bge-m3 через Ollama, батчем
 mod engine; // Операционный слой: управление процессом движка Ollama
+mod provision; // Поставка моделей: импорт с флешки/диска, оценка посильности, поиск носителей
 mod tools; // Онлайн-слой (агентный режим): исходящий клиент + инструменты (веб-поиск)
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -65,15 +66,16 @@ async fn with_cancel<F: std::future::Future>(fut: F, cancel: &AtomicBool) -> Opt
 /// задачи. Отдельно от CancelFlag чата (отмена скачивания не гасит идущий чат).
 /// Параллельные установки запрещены: раньше общий флаг давал гонку — старт второго
 /// pull сбрасывал отмену первого, и тот молча продолжал качать после «Отмены».
-struct PullJob {
-    name: String,
-    cancel: Arc<AtomicBool>,
+pub(crate) struct PullJob {
+    pub(crate) name: String,
+    pub(crate) cancel: Arc<AtomicBool>,
 }
-struct PullState(std::sync::Mutex<Option<PullJob>>);
+pub(crate) struct PullState(pub(crate) std::sync::Mutex<Option<PullJob>>);
 
-/// Гард регистрации установки: снимает задачу при ЛЮБОМ выходе из pull_model
-/// (успех, ошибка, отмена, сброс future) — «залипшая» регистрация невозможна.
-struct PullJobGuard<'a>(&'a PullState);
+/// Гард регистрации установки: снимает задачу при ЛЮБОМ выходе (успех, ошибка,
+/// отмена, сброс future) — «залипшая» регистрация невозможна. Общий для скачивания
+/// (pull_model) и импорта с диска (provision) — они взаимоисключаемы.
+pub(crate) struct PullJobGuard<'a>(pub(crate) &'a PullState);
 impl Drop for PullJobGuard<'_> {
     fn drop(&mut self) {
         let state = self.0;
@@ -643,7 +645,7 @@ fn clear_outbound_log(app: tauri::AppHandle) -> Result<(), String> {
 /// Итог (успех/отмена) идёт НЕ событием, а результатом команды — см. PullOutcome.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-enum PullEvent {
+pub(crate) enum PullEvent {
     Progress {
         status: String,
         completed: u64,
@@ -656,7 +658,7 @@ enum PullEvent {
 /// после отменённой закачки. На проводе — строки "done" | "cancelled".
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
-enum PullOutcome {
+pub(crate) enum PullOutcome {
     Done,
     Cancelled,
 }
@@ -849,24 +851,27 @@ async fn list_models() -> Result<Vec<ModelInfo>, String> {
 
 /// Описание модели из нужного набора. Список ниже — единственное место правки,
 /// чтобы добавлять/менять модели (теги/роли) без переписывания логики.
-struct ModelSpec {
-    tag: &'static str,    // точный тег Ollama (по нему идут pull и сравнение digest)
-    role: &'static str,   // "text" | "embed" | "vision" | "code"
-    title: &'static str,  // человекочитаемое название
-    required: bool,       // обязательная (без неё ломается сценарий) или опциональная
+pub(crate) struct ModelSpec {
+    pub(crate) tag: &'static str,   // точный тег Ollama (по нему идут pull и сравнение digest)
+    pub(crate) role: &'static str,  // "text" | "embed" | "vision" | "code"
+    pub(crate) title: &'static str, // человекочитаемое название
+    pub(crate) required: bool, // обязательная (без неё ломается сценарий) или опциональная
+    /// Приблизительный вес на диске, ГБ — для оценки посильности и места ДО установки
+    /// (после установки берётся точный размер из /api/tags). Источник: реестр Ollama.
+    pub(crate) approx_gb: f64,
 }
 
 /// Нужный набор моделей приложения. Расширяется правкой ОДНОГО этого списка.
 /// Теги — реальные (фактически устанавливаемые), не абстрактные.
-const MODEL_SET: &[ModelSpec] = &[
-    ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true },
-    ModelSpec { tag: "qwen3.5:4b", role: "text", title: "Текстовая (лёгкая, для слабого железа)", required: false },
+pub(crate) const MODEL_SET: &[ModelSpec] = &[
+    ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true, approx_gb: 6.6 },
+    ModelSpec { tag: "qwen3.5:4b", role: "text", title: "Текстовая (лёгкая, для слабого железа)", required: false, approx_gb: 3.0 },
     // Русский профиль — на Hugging Face (в реестре Ollama под t-tech/ его нет).
-    ModelSpec { tag: "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M", role: "text", title: "Русский профиль (T-lite)", required: false },
-    ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true },
-    ModelSpec { tag: "qwen3-vl:8b", role: "vision", title: "Зрение и OCR", required: false },
-    ModelSpec { tag: "qwen3-vl:4b", role: "vision", title: "Зрение (лёгкая)", required: false },
-    ModelSpec { tag: "qwen3-coder:latest", role: "code", title: "Код", required: false },
+    ModelSpec { tag: "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M", role: "text", title: "Русский профиль (T-lite)", required: false, approx_gb: 5.1 },
+    ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true, approx_gb: 1.2 },
+    ModelSpec { tag: "qwen3-vl:8b", role: "vision", title: "Зрение и OCR", required: false, approx_gb: 6.5 },
+    ModelSpec { tag: "qwen3-vl:4b", role: "vision", title: "Зрение (лёгкая)", required: false, approx_gb: 3.5 },
+    ModelSpec { tag: "qwen3-coder:latest", role: "code", title: "Код", required: false, approx_gb: 19.0 },
 ];
 
 /// Локальное состояние одной модели набора (без сети). digest/size/date — если установлена.
@@ -1022,16 +1027,16 @@ async fn check_model_updates() -> Result<Vec<UpdateStatus>, String> {
 
 // ── Стабильность (S1): оценка памяти по формуле (вес + KV + буфер + запас) ─────
 
-const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+pub(crate) const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// Запас под ОС и прочие процессы — отделяет «помещается» от «впритык». Консервативно.
-const MEM_SAFETY_GB: f64 = 1.5;
+pub(crate) const MEM_SAFETY_GB: f64 = 1.5;
 /// Байт на элемент KV-кэша при q8_0 — экономный режим НАШЕГО движка (engine.rs).
-const KV_BYTES_Q8: f64 = 1.1;
+pub(crate) const KV_BYTES_Q8: f64 = 1.1;
 /// Байт на элемент KV-кэша при f16 — так по умолчанию работает ВНЕШНИЙ движок:
 /// env-переменные экономного режима действуют только на процесс, поднятый нами.
-const KV_BYTES_F16: f64 = 2.0;
+pub(crate) const KV_BYTES_F16: f64 = 2.0;
 /// Compute-буфер (с flash attention почти не растёт с контекстом).
-const COMPUTE_BUF_GB: f64 = 0.6;
+pub(crate) const COMPUTE_BUF_GB: f64 = 0.6;
 
 /// Доступная сейчас оперативная память, ГБ (кроссплатформенно, sysinfo).
 fn available_ram_gb() -> f64 {
@@ -1050,7 +1055,7 @@ fn total_ram_gb() -> f64 {
 /// Реалистично доступная под модель память, ГБ. На macOS «available» резко
 /// недосчитывает (агрессивный файловый кэш реклеймится под новые аллокации), поэтому
 /// берём пол ~55% от total; на Linux/Windows доверяем точному available.
-fn usable_ram_gb() -> f64 {
+pub(crate) fn usable_ram_gb() -> f64 {
     #[cfg(target_os = "macos")]
     {
         available_ram_gb().max(total_ram_gb() * 0.55)
@@ -1059,6 +1064,29 @@ fn usable_ram_gb() -> f64 {
     {
         available_ram_gb()
     }
+}
+
+/// Общий вердикт «поместится ли»: сколько ляжет именно на RAM после вычета VRAM
+/// (своп — главный риск; на дискретном GPU часть до объёма VRAM не давит на RAM)
+/// против доступной памяти. Используется и в estimate() (установленные модели,
+/// точный KV из метаданных), и в оценке набора ДО установки (provision, эвристика).
+pub(crate) fn fit_verdict(
+    required_gb: f64,
+    vram_gb: Option<f64>,
+    available_gb: f64,
+) -> (&'static str, &'static str) {
+    let (ram_needed, limiting) = match vram_gb {
+        Some(vram) => ((required_gb - vram).max(0.0), "vram"),
+        None => (required_gb, "ram"),
+    };
+    let fits = if ram_needed <= available_gb {
+        "ok"
+    } else if ram_needed - MEM_SAFETY_GB <= available_gb {
+        "tight"
+    } else {
+        "no"
+    };
+    (fits, limiting)
 }
 
 /// Значение из model_info по суффиксу ключа (ключи префиксованы архитектурой,
@@ -1188,22 +1216,7 @@ async fn estimate(
     };
 
     let required_gb = weight_gb + kv_gb + COMPUTE_BUF_GB + MEM_SAFETY_GB;
-
-    // Сколько потребуется именно от RAM (своп — триггер зависания); на дискретном
-    // GPU часть до объёма VRAM не давит на RAM. /api/ps выше уже учтён: available_gb
-    // включает то, что освободит выгрузка прочих моделей (MAX_LOADED_MODELS=1).
-    let (ram_needed, limiting) = match vram_gb {
-        Some(vram) => ((required_gb - vram).max(0.0), "vram"),
-        None => (required_gb, "ram"),
-    };
-
-    let fits = if ram_needed <= available_gb {
-        "ok"
-    } else if ram_needed - MEM_SAFETY_GB <= available_gb {
-        "tight"
-    } else {
-        "no"
-    };
+    let (fits, limiting) = fit_verdict(required_gb, vram_gb, available_gb);
 
     // Отдельное честное наблюдение: помещаются ли вес+KV в СВОБОДНУЮ видеопамять.
     // Свободная = замер сейчас + то, что освободит выгрузка прочих моделей (size_vram
@@ -1238,8 +1251,9 @@ fn ru_resource(limiting: &str) -> &'static str {
     }
 }
 
-/// Размеры установленных моделей (имя → байты) из /api/tags — для подбора «полегче».
-async fn installed_sizes() -> std::collections::HashMap<String, u64> {
+/// Размеры установленных моделей (имя → байты) из /api/tags — для подбора «полегче»
+/// и оценки посильности набора (provision). Движок молчит → пустая карта.
+pub(crate) async fn installed_sizes() -> std::collections::HashMap<String, u64> {
     let mut out = std::collections::HashMap::new();
     if let Ok(resp) = HTTP
         .get("http://127.0.0.1:11434/api/tags")
@@ -1404,7 +1418,7 @@ async fn embedding_status() -> bool {
 
 /// Override-путь из настроек (для гибкого разрешения путей движка/моделей). Пустой
 /// или отсутствующий → None. Заполняется в будущем офлайн-инсталлером.
-fn read_setting_path(app: &tauri::AppHandle, key: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn read_setting_path(app: &tauri::AppHandle, key: &str) -> Option<std::path::PathBuf> {
     read_settings(app)
         .get(key)
         .and_then(|v| v.as_str())
@@ -1477,7 +1491,7 @@ fn detect_hardware() -> Result<HardwareInfo, String> {
 // macOS: общая (unified) память — отдельной VRAM нет, уровень считаем по RAM.
 // Возвращаемая тройка везде: (всего, свободно, источник).
 #[cfg(target_os = "macos")]
-fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     (None, None, "unified".to_string())
 }
 
@@ -1486,7 +1500,7 @@ fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 // дополнительно спрашиваем СВОБОДНУЮ видеопамять через IDXGIAdapter3 (budget минус
 // уже занятое) — честная доступность, а не паспортный объём.
 #[cfg(target_os = "windows")]
-fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
@@ -1538,7 +1552,7 @@ fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 // Linux: nvidia-smi → rocm-smi → неизвестно. Утилиты могут отсутствовать —
 // ошибки гасим (не паникуем), сети нет.
 #[cfg(target_os = "linux")]
-fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     use std::process::Command;
 
     // NVIDIA: одним вызовом total и free (МиБ), строка на GPU: "8192, 6144".
@@ -1594,7 +1608,7 @@ fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 
 // Прочие ОС: видеопамять неизвестна, ориентируемся на RAM.
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     (None, None, "unknown".to_string())
 }
 
@@ -2546,6 +2560,9 @@ pub fn run() {
             list_models,
             model_states,
             check_model_updates,
+            provision::import_models_from_dir,
+            provision::assess_models,
+            provision::find_model_sources,
             plan_inference,
             run_diagnostics,
             ollama_version,
@@ -2581,7 +2598,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::{fit_verdict, parse_version};
+
+    // Вердикт «поместится ли»: без GPU — против RAM; с GPU — на RAM давит только
+    // остаток сверх VRAM; зона «впритык» — в пределах MEM_SAFETY_GB.
+    #[test]
+    fn fit_verdict_ram_and_vram() {
+        assert_eq!(fit_verdict(6.0, None, 10.0), ("ok", "ram"));
+        assert_eq!(fit_verdict(11.0, None, 10.0), ("tight", "ram")); // 11−1.5 ≤ 10 < 11
+        assert_eq!(fit_verdict(20.0, None, 10.0), ("no", "ram"));
+        // GPU 6 ГБ: требуется 8 → на RAM ляжет 2 — свободно
+        assert_eq!(fit_verdict(8.0, Some(6.0), 10.0), ("ok", "vram"));
+        // требуется 20 → на RAM ляжет 14 при доступных 10 — не помещается
+        assert_eq!(fit_verdict(20.0, Some(6.0), 10.0), ("no", "vram"));
+    }
 
     #[test]
     fn version_parsing_and_ordering() {
