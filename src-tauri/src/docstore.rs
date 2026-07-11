@@ -43,25 +43,74 @@ pub fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Открывает (создаёт при необходимости) базу и гарантирует базовую схему.
+/// Повреждённый файл (сбой питания, битый диск) НЕ приговор: индекс — кэш поверх
+/// исходных файлов пользователя, поэтому убираем повреждённую базу в резервную
+/// копию и создаём чистую — приложение продолжает работать, диагностика предупредит.
 /// Векторная таблица создаётся отдельно (`ensure_vec_table`), когда известна
 /// размерность эмбеддинга.
 pub fn open(path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(path).map_err(|e| format!("Не удалось открыть базу: {e}"))?;
+    match try_open(path) {
+        Ok(conn) => Ok(conn),
+        Err(e) if is_corruption(&e) => {
+            eprintln!(
+                "[jai] база документов повреждена ({e}) — пересоздаю; копия: {}",
+                corrupt_backup_path(path).display()
+            );
+            backup_corrupt(path);
+            try_open(path).map_err(|e| format!("Не удалось пересоздать базу: {e}"))
+        }
+        Err(e) => Err(format!("Не удалось открыть базу: {e}")),
+    }
+}
+
+/// Открыть + busy_timeout + схема, с ТИПИЗИРОВАННОЙ ошибкой (для классификации
+/// повреждения). Владеет соединением: при Err оно уже закрыто — важно для Windows,
+/// где переименовать файл с открытым хендлом нельзя.
+fn try_open(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
     // Каждая команда открывает своё соединение. Без busy_timeout параллельная работа
     // (индексация документа + поиск во время чата) даёт «database is locked». Даём
     // писателю до 5 с дождаться освобождения вместо мгновенной ошибки.
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| format!("Не удалось задать busy_timeout: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     init(&conn)?;
     Ok(conn)
 }
 
+/// Повреждение файла базы по кодам SQLite. Строго ТОЛЬКО коды порчи: busy/права
+/// доступа/нет каталога повреждением не считаются — иначе можно снести живую базу.
+fn is_corruption(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(f, _)
+        if matches!(f.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))
+}
+
+/// Путь резервной копии повреждённой базы (рядом с оригиналом). Публичный: диагностика
+/// по наличию файла показывает «база пересоздавалась после повреждения».
+pub fn corrupt_backup_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_os_string();
+    name.push(".corrupt.bak");
+    PathBuf::from(name)
+}
+
+/// Убрать повреждённый файл с дороги: db → db.corrupt.bak (старую копию перезаписываем;
+/// на Windows rename поверх существующего не работает — сначала удаляем цель).
+/// Сайдкары WAL/SHM без своей базы бессмысленны и «отравили» бы новую (свежая база
+/// подхватила бы чужой -wal) — удаляем. Ошибки гасим: это уборка, не критичный путь.
+fn backup_corrupt(path: &Path) {
+    let backup = corrupt_backup_path(path);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
+    for suffix in ["-wal", "-shm"] {
+        let mut side = path.as_os_str().to_os_string();
+        side.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(side));
+    }
+}
+
 /// Базовая схема + контроль версии. При несовпадении версии — чистое пересоздание.
-fn init(conn: &Connection) -> Result<(), String> {
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| format!("Не удалось включить WAL: {e}"))?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| format!("Не удалось включить foreign_keys: {e}"))?;
+/// Ошибка типизированная (rusqlite): open() по ней отличает повреждение файла.
+fn init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -105,11 +154,9 @@ fn init(conn: &Connection) -> Result<(), String> {
             page        INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);",
-    )
-    .map_err(|e| format!("Не удалось создать схему: {e}"))?;
+    )?;
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(|e| format!("Не удалось записать версию схемы: {e}"))?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -163,14 +210,13 @@ fn migrate_documents_project_id(conn: &Connection) {
 }
 
 /// Полный сброс схемы (при смене версии или несовместимой размерности вектора).
-fn drop_all(conn: &Connection) -> Result<(), String> {
+fn drop_all(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DROP TABLE IF EXISTS vec_chunks;
          DROP TABLE IF EXISTS chunks;
          DROP TABLE IF EXISTS documents;
          DROP TABLE IF EXISTS meta;",
     )
-    .map_err(|e| format!("Не удалось пересоздать базу: {e}"))
 }
 
 /// Гарантирует наличие векторной таблицы нужной размерности. Если размерность в
@@ -190,8 +236,8 @@ pub fn ensure_vec_table(conn: &Connection, dim: usize) -> Result<bool, String> {
     if let Some(d) = stored {
         if d as usize != dim {
             // Несовместимая размерность — старый индекс непригоден.
-            drop_all(conn)?;
-            init(conn)?;
+            drop_all(conn).map_err(|e| format!("Не удалось пересоздать базу: {e}"))?;
+            init(conn).map_err(|e| format!("Не удалось пересоздать базу: {e}"))?;
             rebuilt = true;
         }
     }
@@ -629,5 +675,39 @@ mod tests {
         let docs = list_documents(&conn, None).unwrap();
         assert_eq!(docs.len(), 1, "старый документ сохранён и относится к «вне проектов»");
         assert_eq!(docs[0].filename, "old.txt");
+    }
+
+    // Повреждённый файл базы: open() убирает его в .corrupt.bak и создаёт чистую
+    // работоспособную базу (индекс — кэш, приложение не должно ломаться).
+    #[test]
+    fn recovers_from_corrupt_db() {
+        register_vec();
+        let dir = std::env::temp_dir().join(format!("jai-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("documents.db");
+        std::fs::write(&db, b"this is definitely not a sqlite database").unwrap();
+
+        let conn = open(&db).expect("повреждённая база должна пересоздаться");
+        assert!(
+            corrupt_backup_path(&db).exists(),
+            "копия повреждённого файла сохранена рядом"
+        );
+        // новая база работоспособна
+        insert_document(&conn, "a.txt", "txt", "sha", 1, 10, 1, None).unwrap();
+        assert_eq!(list_documents(&conn, None).unwrap().len(), 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // НЕ-повреждение (нет каталога → CannotOpen) не должно приводить к пересозданию:
+    // честная ошибка, никаких резервных копий и удалений.
+    #[test]
+    fn no_recovery_on_non_corruption() {
+        let db = std::env::temp_dir()
+            .join(format!("jai-noexist-{}", std::process::id()))
+            .join("nope")
+            .join("documents.db");
+        assert!(open(&db).is_err(), "путь без каталога — честная ошибка");
+        assert!(!corrupt_backup_path(&db).exists(), "резервная копия не создаётся");
     }
 }

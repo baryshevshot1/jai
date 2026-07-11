@@ -123,6 +123,10 @@ let pullCancelled = false;
 // Каждый документ упоминаем один раз — дальше не повторяем заметку под ответами.
 const shownSourceFiles = new Set<string>();
 
+// Модели, про которые уже показано примечание плана (напр., «тесно в свободной
+// видеопамяти») — раз на модель за сессию, чтобы плашка не спамила каждый запрос.
+const vramNotedModels = new Set<string>();
+
 // Источник из веб-поиска (онлайн-режим): заголовок + ссылка (см. WebSource в tools.rs).
 interface WebSource {
   title: string;
@@ -762,6 +766,7 @@ async function send() {
       num_ctx: number;
       reason: string | null;
       original_model: string;
+      note: string | null;
     }>("plan_inference", { model: selectedModel });
     if (myGen !== generation) return;
     if (plan.action === "refuse") {
@@ -777,6 +782,12 @@ async function send() {
     }
     useModel = plan.model;
     useCtx = plan.num_ctx;
+    // Честное примечание (напр., «тесно в свободной видеопамяти — будет медленнее»):
+    // показываем один раз на модель за сессию, чтобы не спамить каждый запрос.
+    if (plan.note && !vramNotedModels.has(plan.model)) {
+      vramNotedModels.add(plan.model);
+      addNotice(plan.note);
+    }
     if (plan.action === "downscale" && plan.reason) {
       const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
       downscaleNote =
@@ -2629,7 +2640,8 @@ function updateThinkAvailability() {
 interface HardwareInfo {
   ram_gb: number;
   cpu_cores: number;
-  vram_gb: number | null;
+  vram_gb: number | null; // всего (класс железа)
+  vram_free_gb: number | null; // свободно сейчас (честная доступность)
   vram_source: string;
   tier: "green" | "yellow" | "red";
 }
@@ -2671,7 +2683,11 @@ async function loadHardware() {
   const nb = " ";
   const specs: string[] = [];
   // GPU — только при наличии выделенной видеопамяти (на unified/Apple Silicon vram_gb == null).
-  if (hw.vram_gb != null) specs.push(`GPU${nb}${hw.vram_gb.toFixed(0)}${nb}ГБ`);
+  // Рядом — честная свободная сейчас (если ОС её сообщает), а не только паспортный объём.
+  if (hw.vram_gb != null) {
+    const free = hw.vram_free_gb != null ? ` (свободно${nb}${hw.vram_free_gb.toFixed(1)})` : "";
+    specs.push(`GPU${nb}${hw.vram_gb.toFixed(0)}${nb}ГБ${free}`);
+  }
   specs.push(`RAM${nb}${hw.ram_gb.toFixed(0)}${nb}ГБ`);
   specs.push(`CPU${nb}${hw.cpu_cores}${nb}${plural(hw.cpu_cores, "ядро", "ядра", "ядер")}`);
 
