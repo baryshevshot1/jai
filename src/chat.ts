@@ -548,11 +548,13 @@ async function generate() {
     }
   } catch (err) {
     if (myGen !== state.generation) return;
-    state.activeStopCleanup = null; // завершились с ошибкой — дочистка «Стоп» не нужна
-    stopLivePaint();
-    ui.thinking.remove();
-    if (!answer && !reasoning) ui.turn.remove();
-    addError(String(err));
+    // Финализируем тем же путём, что и «Стоп»: частичный ответ рисуется начисто и
+    // СОХРАНЯЕТСЯ в историю (иначе после ошибки сети/движка модель «не помнит» свою
+    // реплику), пустой ход убирается. Поверх — человеческое сообщение об ошибке.
+    const cleanup = state.activeStopCleanup;
+    state.activeStopCleanup = null;
+    cleanup?.();
+    addError(humanError(err));
     setStreaming(false);
   }
 }

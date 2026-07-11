@@ -278,7 +278,7 @@ export async function initConversations() {
   refreshEmptyState(); // история загружена — теперь решаем, показывать ли приветствие
 }
 
-// Обработчики: новый чат, поиск по списку, очистка истории.
+// Обработчики: новый чат, поиск по списку, очистка истории, горячие клавиши.
 export function wireConversations() {
   newChatBtn.addEventListener("click", () => newDialog(null));
   convSearchEl.addEventListener("input", () => {
@@ -286,4 +286,16 @@ export function wireConversations() {
     renderConvList();
   });
   clearChatsBtn.addEventListener("click", clearAllConversations); // кнопка в настройках («История диалогов»)
+
+  // Глобальные клавиши: Esc — «Стоп» во время генерации (в модальном окне Esc
+  // остаётся отменой окна); Ctrl/Cmd+N — новый быстрый чат. По e.code, чтобы
+  // работало и в русской раскладке.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.streaming && !document.querySelector(".modal-overlay")) {
+      stop();
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === "KeyN") {
+      e.preventDefault();
+      newDialog(null);
+    }
+  });
 }
