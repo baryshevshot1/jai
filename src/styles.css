@@ -1216,6 +1216,171 @@ body.resizing { cursor: col-resize; user-select: none; }
 .modal__btn:hover { border-color: var(--accent); }
 .modal__btn--danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .modal__btn--danger:hover { filter: brightness(0.92); border-color: var(--danger); }
+/* акцентная кнопка подтверждения (создать/сохранить) — в пару к --danger */
+.modal__btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.modal__btn--primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+/* текстовое поле в модалке — как остальные инпуты приложения */
+.modal__input {
+  width: 100%;
+  margin-top: var(--s4);
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--t-base);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.modal__input::placeholder { color: var(--faint); }
+.modal__input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* ===================== ПРОЕКТЫ ===================== */
+/* ----- Секции боковой панели (заголовок-метка + кнопка «+») ----- */
+.side-section { display: flex; flex-direction: column; min-height: 0; }
+.side-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  /* левый инсет = инсет списка (s3) + внутренний отступ метки (s2), как у .conv-label */
+  padding: var(--s4) var(--s3) var(--s2) calc(var(--s3) + var(--s2));
+}
+.side-section__title {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--faint);
+}
+.side-section__add {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.side-section__add:hover { background: var(--hover); color: var(--text); }
+.side-section__add svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+/* ----- Список проектов (строки по образцу .conv) ----- */
+.project-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--s3);
+  max-height: 32vh; /* длинный список не выдавливает чаты — прокручивается внутри себя */
+  overflow-y: auto;
+}
+.project {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 9px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: var(--t-base);
+  color: var(--muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.project:hover { background: var(--hover); color: var(--text); }
+.project.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+:root[data-theme="dark"] .project.active { color: var(--text); }
+.project svg { width: 15px; height: 15px; flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
+.project .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-empty {
+  padding: var(--s2) calc(var(--s2) + 2px) var(--s3);
+  color: var(--faint);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+}
+
+/* ----- Экран проекта (переиспользует .settings-view — полноэкранный) ----- */
+/* иконка проекта в шапке рядом с полем имени */
+.project-head__icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.project-head__icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* крупное поле имени — выглядит как заголовок; рамка/фон появляются в фокусе */
+.project-name-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--t-lg);
+  font-weight: 600;
+  transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.project-name-input::placeholder { color: var(--faint); font-weight: 500; }
+.project-name-input:hover { background: var(--hover); }
+.project-name-input:focus {
+  outline: none;
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+/* кнопка удаления справа в шапке — приглушённая, опасная при ховере (даёт .ep-btn--ghost) */
+.project-del-btn { flex-shrink: 0; white-space: nowrap; }
+/* textarea инструкций — на всю ширину карточки, ручное изменение высоты по вертикали */
+.project-instructions {
+  width: 100%;
+  min-height: 92px;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--t-base);
+  line-height: var(--lh-base);
+  resize: vertical;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.project-instructions::placeholder { color: var(--faint); }
+.project-instructions:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+/* список чатов проекта — строки .conv уже стилизованы */
+.project-chats { display: flex; flex-direction: column; }
+.project-chats .conv { color: var(--text); }
+
+/* ----- Чип проекта в шапке приложения (к какому проекту относится чат) ----- */
+.chat-project-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 220px;
+  padding: 5px 12px 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
+}
+.chat-project-chip:hover { color: var(--text); border-color: var(--border-strong); }
+.chat-project-chip svg { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.8; stroke: currentColor; fill: none; stroke-width: 2; }
+.chat-project-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ===================== ФОКУС-КОЛЬЦА (навигация с клавиатуры) ===================== */
 .newchat:focus-visible,
@@ -1231,6 +1396,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .copy:focus-visible,
 .chip:focus-visible,
 .search input:focus-visible,
+.side-section__add:focus-visible,
+.project:focus-visible,
+.chat-project-chip:focus-visible,
 .conv:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1264,6 +1432,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   #status { max-width: 120px; }
   .settings-body { padding: var(--s5) var(--s4); }
   .composer-wrap { padding: var(--s3) var(--s4) var(--s4); }
+  .settings-head { padding: var(--s3) var(--s4); }
+  .chat-project-chip { max-width: 150px; }
 }
 
 /* Узкое окно: ещё компактнее; статус движка — только индикатор. */
@@ -1273,5 +1443,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   #status { max-width: 0; padding: 0; } /* прячем текст, остаётся кружок-индикатор */
   .iconbtn { width: 32px; height: 32px; }
   .side-top { padding: var(--s3) var(--s2) var(--s2); }
-  .conv-list, .doc-list { padding-left: var(--s2); padding-right: var(--s2); }
+  .conv-list, .doc-list, .project-list { padding-left: var(--s2); padding-right: var(--s2); }
+  /* на очень узком окне чип проекта прячем — топбару и так тесно */
+  .chat-project-chip { display: none; }
+  .settings-head { padding: var(--s3); }
+  .project-name-input { font-size: var(--t-base); }
 }
