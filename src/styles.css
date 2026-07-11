@@ -859,6 +859,21 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 :root[data-theme="dark"] .notice { color: var(--text); }
 
+/* Кнопка «Отмена» внутри плашки установки (предложение vision-модели в чате) */
+.notice .notice-cancel {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.95em;
+  cursor: pointer;
+}
+.notice .notice-cancel:hover { background: var(--accent-soft); }
+.notice .notice-cancel:disabled { opacity: 0.5; cursor: default; }
+
 /* ===================== ПОЛЕ ВВОДА (composer) ===================== */
 .composer-wrap { flex-shrink: 0; padding: var(--s4) var(--s6) var(--s5); }
 .composer {

@@ -47,9 +47,10 @@ pub struct EngineStatus {
 }
 
 /// Жив ли движок: GET /api/version с коротким таймаутом (та же проверка, что в UI).
+/// Общий клиент процесса (crate::HTTP): опрос готовности зовёт alive() десятки раз —
+/// не пересоздаём клиент на каждый.
 async fn alive() -> bool {
-    let client = reqwest::Client::new();
-    client
+    crate::HTTP
         .get(format!("{OLLAMA_URL}/api/version"))
         .timeout(Duration::from_secs(2))
         .send()

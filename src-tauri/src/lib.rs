@@ -8,8 +8,25 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tauri::ipc::Channel;
 use tauri::Manager;
+
+/// Общий HTTP-клиент к локальному Ollama (один пул соединений на процесс — без
+/// пересоздания клиента на каждый вызов). connect_timeout защищает от зависания на
+/// подключении; общего таймаута НЕТ — стримы (чат, установка моделей) живут долго.
+/// Короткие метаданные-запросы задают свой .timeout(OLLAMA_META_TIMEOUT) на вызов.
+/// Наружу (интернет) этот клиент не ходит — только tools::web_client().
+pub(crate) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("не удалось создать HTTP-клиент")
+});
+
+/// Таймаут коротких метаданных-запросов к Ollama (/api/tags, /api/ps, /api/show,
+/// /api/version): зависший движок не должен вешать список моделей и диагностику.
+pub(crate) const OLLAMA_META_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Флаг отмены АКТИВНОГО стрима (нажата «Стоп» ИЛИ сработал watchdog). Внутри —
 /// `Mutex<Arc<AtomicBool>>`: каждый новый запрос кладёт сюда СВОЙ свежий флаг, а
@@ -27,9 +44,46 @@ impl CancelFlag {
     }
 }
 
-/// Отдельный флаг отмены установки модели (`/api/pull`). Отдельный от CancelFlag,
-/// чтобы отмена скачивания не гасила идущий чат и наоборот — они могут идти параллельно.
-struct PullCancelFlag(AtomicBool);
+/// Ждать future, периодически проверяя флаг отмены (каждые 200 мс — тот же приём,
+/// что 400-мс опрос чанков в стриме). None = отменено; сброшенный future реально
+/// обрывает HTTP-запрос reqwest (соединение закрывается). tokio::select! недоступен
+/// (фича `macros` не включена) — опрашиваем через timeout + pin.
+async fn with_cancel<F: std::future::Future>(fut: F, cancel: &AtomicBool) -> Option<F::Output> {
+    tokio::pin!(fut);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        match tokio::time::timeout(std::time::Duration::from_millis(200), &mut fut).await {
+            Ok(v) => return Some(v),
+            Err(_) => continue, // окно вышло без результата — перепроверяем отмену
+        }
+    }
+}
+
+/// Активная установка модели (одна на процесс): имя тега + флаг отмены ИМЕННО этой
+/// задачи. Отдельно от CancelFlag чата (отмена скачивания не гасит идущий чат).
+/// Параллельные установки запрещены: раньше общий флаг давал гонку — старт второго
+/// pull сбрасывал отмену первого, и тот молча продолжал качать после «Отмены».
+struct PullJob {
+    name: String,
+    cancel: Arc<AtomicBool>,
+}
+struct PullState(std::sync::Mutex<Option<PullJob>>);
+
+/// Гард регистрации установки: снимает задачу при ЛЮБОМ выходе из pull_model
+/// (успех, ошибка, отмена, сброс future) — «залипшая» регистрация невозможна.
+struct PullJobGuard<'a>(&'a PullState);
+impl Drop for PullJobGuard<'_> {
+    fn drop(&mut self) {
+        let state = self.0;
+        state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+/// Отсечка молчания сети при установке: столько подряд без единого байта — честная
+/// ошибка (докачка продолжится с места при повторе), а не вечный «прогресс».
+const PULL_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Watchdog (S3): период замеров и порог роста свопа, при котором прерываем запрос.
 /// Консервативно (≥512 МБ роста = модель реально сливается в своп), чтобы не рубить
@@ -138,13 +192,13 @@ async fn stream_chat_response(
     cancel: &Arc<AtomicBool>,
     num_ctx: u64,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let mut resp = client
-        .post("http://127.0.0.1:11434/api/chat")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+    // «Стоп» должен действовать уже НА ПОДКЛЮЧЕНИИ: холодная загрузка модели может
+    // длиться десятки секунд, заголовков ещё нет — ждём send() с опросом отмены.
+    let send_fut = HTTP.post("http://127.0.0.1:11434/api/chat").json(&body).send();
+    let mut resp = match with_cancel(send_fut, cancel).await {
+        Some(r) => r.map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?,
+        None => return Ok(String::new()), // отменено до ответа — как обычная отмена стрима
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -370,7 +424,6 @@ async fn agentic_chat(
     let ctx = num_ctx.unwrap_or(8192);
     let cfg = read_web_search_config(&app);
     let tool_specs = tools::tool_specs();
-    let client = reqwest::Client::new(); // localhost: «решающие» ходы к Ollama
 
     let mut msgs = messages;
     let mut searches_done: usize = 0; // сколько реальных веб-поисков уже выполнено
@@ -397,18 +450,23 @@ async fn agentic_chat(
         if searches_done < MAX_SEARCHES {
             body["tools"] = serde_json::json!(tool_specs);
         }
-        let resp = client
-            .post("http://127.0.0.1:11434/api/chat")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        // Решающий ход без стриминга может думать долго — ждём с опросом отмены,
+        // чтобы «Стоп» действовал и ПОСРЕДИ этого запроса, а не только между раундами.
+        let send_fut = HTTP.post("http://127.0.0.1:11434/api/chat").json(&body).send();
+        let resp = match with_cancel(send_fut, &my_cancel).await {
+            Some(r) => r.map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?,
+            None => return Ok(String::new()), // «Стоп» посреди решающего хода
+        };
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Ollama вернул ошибку {status}: {text}"));
         }
-        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let json: serde_json::Value =
+            match with_cancel(resp.json::<serde_json::Value>(), &my_cancel).await {
+                Some(r) => r.map_err(|e| e.to_string())?,
+                None => return Ok(String::new()),
+            };
         let message = json.get("message").cloned().unwrap_or(serde_json::Value::Null);
         let tool_calls = message
             .get("tool_calls")
@@ -455,6 +513,9 @@ async fn agentic_chat(
 
             let _ = on_event.send(ChatEvent::Status { content: "Ищу в интернете…".into() });
 
+            // НЕ оборачиваем в with_cancel: журнал исходящих (152-ФЗ) пишется ПОСЛЕ
+            // вызова — обрыв посередине оставил бы уход в сеть без записи в журнал.
+            // Сам вызов ограничен таймаутами web_client (8 с подключение / 20 с всего).
             let result = tools::execute_tool(&fname, &fargs, &cfg).await;
             searches_done += 1;
 
@@ -579,6 +640,7 @@ fn clear_outbound_log(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Прогресс установки модели. status — стадия (manifest/downloading/verify/…),
 /// completed/total — байты текущего слоя (0/0 у статусных строк без чисел).
+/// Итог (успех/отмена) идёт НЕ событием, а результатом команды — см. PullOutcome.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PullEvent {
@@ -587,24 +649,48 @@ enum PullEvent {
         completed: u64,
         total: u64,
     },
+}
+
+/// Итог установки: завершена или отменена пользователем. Раньше отмена возвращала
+/// тот же Ok(()), что и успех, — интерфейс не мог их отличить и писал «установлено»
+/// после отменённой закачки. На проводе — строки "done" | "cancelled".
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum PullOutcome {
     Done,
+    Cancelled,
 }
 
 /// Установка модели в Ollama (`POST /api/pull`, stream:true). Тянет модель из
 /// интернета (онлайн-провижининг). Поток NDJSON разбираем тем же способом, что и
-/// chat_stream; прогресс шлём через Channel; поддерживаем отмену (PullCancelFlag).
+/// chat_stream; прогресс шлём через Channel; отмена — по флагу СВОЕЙ задачи.
+/// Одна установка на процесс: вторая параллельная честно отклоняется.
 /// Только localhost — наружу ходит сама Ollama, не приложение.
 #[tauri::command]
 async fn pull_model(
     name: String,
     on_event: Channel<PullEvent>,
-    cancel: tauri::State<'_, PullCancelFlag>,
-) -> Result<(), String> {
-    cancel.0.store(false, Ordering::Relaxed); // новая установка — сбрасываем отмену
-    let client = reqwest::Client::new();
+    state: tauri::State<'_, PullState>,
+) -> Result<PullOutcome, String> {
+    // Регистрация задачи — в синхронной области (std-мьютекс не держим через await);
+    // гард ниже снимет регистрацию при любом выходе из функции.
+    let my_cancel = {
+        let mut job = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(active) = job.as_ref() {
+            return Err(format!(
+                "Уже идёт установка «{}» — дождитесь её завершения или отмените.",
+                active.name
+            ));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *job = Some(PullJob { name: name.clone(), cancel: cancel.clone() });
+        cancel
+    };
+    let _guard = PullJobGuard(&state);
+
     let body = serde_json::json!({ "name": name, "stream": true });
 
-    let mut resp = client
+    let mut resp = HTTP
         .post("http://127.0.0.1:11434/api/pull")
         .json(&body)
         .send()
@@ -646,13 +732,37 @@ async fn pull_model(
     };
 
     // Тот же байтовый разбор NDJSON, что в chat_stream (UTF-8 на границе чанков,
-    // дочитка хвоста). Проверяем отмену на каждом чанке — прерывание скачивания.
+    // дочитка хвоста). Чанки ждём короткими окнами: отмена срабатывает, ДАЖЕ когда
+    // сеть молчит; затянувшееся молчание (PULL_STALL) — честная ошибка вместо
+    // вечного «идёт установка».
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        if cancel.0.load(Ordering::Relaxed) {
+    let mut last_data = std::time::Instant::now();
+    loop {
+        if my_cancel.load(Ordering::Relaxed) {
             // отмена: рвём соединение; Ollama останавливает закачку и докачает с места при повторе
-            return Ok(());
+            return Ok(PullOutcome::Cancelled);
         }
+        let chunk = match tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            resp.chunk(),
+        )
+        .await
+        {
+            Err(_elapsed) => {
+                if last_data.elapsed() > PULL_STALL {
+                    return Err("Сеть не отвечает — установка прервана. Проверьте \
+                                интернет и повторите: докачка продолжится с места."
+                        .into());
+                }
+                continue; // окно без данных — перепроверяем отмену
+            }
+            Ok(Ok(Some(chunk))) => {
+                last_data = std::time::Instant::now();
+                chunk
+            }
+            Ok(Ok(None)) => break, // поток корректно завершился
+            Ok(Err(e)) => return Err(format!("Сбой сети при скачивании модели: {e}")),
+        };
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
@@ -671,14 +781,16 @@ async fn pull_model(
         }
     }
 
-    let _ = on_event.send(PullEvent::Done);
-    Ok(())
+    Ok(PullOutcome::Done)
 }
 
-/// Отмена текущей установки модели. pull_model увидит флаг и прервёт скачивание.
+/// Отмена текущей установки модели: взводит флаг АКТИВНОЙ задачи (если она есть).
+/// Итог придёт результатом pull_model (Cancelled) — интерфейс отличит его от успеха.
 #[tauri::command]
-fn cancel_pull(cancel: tauri::State<'_, PullCancelFlag>) {
-    cancel.0.store(true, Ordering::Relaxed);
+fn cancel_pull(state: tauri::State<'_, PullState>) {
+    if let Some(job) = state.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Модель + поддержка рассуждений ("thinking"), зрения ("vision") и вызова
@@ -696,9 +808,9 @@ struct ModelInfo {
 /// Возвращаем имя и поддержку рассуждений (по полю capabilities). Только localhost.
 #[tauri::command]
 async fn list_models() -> Result<Vec<ModelInfo>, String> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
+        .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
@@ -783,9 +895,9 @@ struct ModelStatesResult {
 /// локальный digest/размер/дата. Статус обновления считается отдельно (M2, онлайн).
 #[tauri::command]
 async fn model_states() -> Result<ModelStatesResult, String> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
+        .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
@@ -837,9 +949,10 @@ struct UpdateStatus {
 }
 
 /// Локальные digest по тегам из `/api/tags` (без сети).
-async fn local_digests(client: &reqwest::Client) -> Result<std::collections::HashMap<String, String>, String> {
-    let resp = client
+async fn local_digests() -> Result<std::collections::HashMap<String, String>, String> {
+    let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
+        .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
@@ -860,13 +973,14 @@ async fn local_digests(client: &reqwest::Client) -> Result<std::collections::Has
 
 /// digest манифеста тега в реестре Ollama = sha256 тела ответа (проверено: совпадает
 /// с локальным digest). Требует HTTPS (rustls-tls) — единственный выход в интернет.
+/// `client` — ИЗОЛИРОВАННЫЙ веб-клиент (tools::web_client: https_only, UA, таймауты
+/// 8 с/20 с), НЕ localhost-клиент Ollama — правило разделения сетевых путей.
 async fn registry_digest(client: &reqwest::Client, tag: &str) -> Result<String, String> {
     let (model, t) = tag.split_once(':').unwrap_or((tag, "latest"));
     let url = format!("https://registry.ollama.ai/v2/library/{model}/manifests/{t}");
     let resp = client
         .get(&url)
         .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| format!("Нет доступа к реестру (нужен интернет): {e}"))?;
@@ -883,15 +997,17 @@ async fn registry_digest(client: &reqwest::Client, tag: &str) -> Result<String, 
 /// сравнивает локальный digest с реестром. Без сети — каждая модель отдаёт "error".
 #[tauri::command]
 async fn check_model_updates() -> Result<Vec<UpdateStatus>, String> {
-    let client = reqwest::Client::new();
-    let local = local_digests(&client).await?;
+    // Наружу — только изолированным веб-клиентом (rustls, https_only, таймауты);
+    // localhost-метаданные идут общим клиентом HTTP. Пути не смешиваются.
+    let web = tools::web_client()?;
+    let local = local_digests().await?;
     let mut out = Vec::new();
     for spec in MODEL_SET {
         let Some(local_dig) = local.get(spec.tag) else {
             out.push(UpdateStatus { tag: spec.tag.to_string(), status: "not_installed".into(), message: None });
             continue;
         };
-        match registry_digest(&client, spec.tag).await {
+        match registry_digest(&web, spec.tag).await {
             Ok(remote) => {
                 let status = if &remote == local_dig { "current" } else { "update" };
                 out.push(UpdateStatus { tag: spec.tag.to_string(), status: status.into(), message: None });
@@ -909,8 +1025,11 @@ async fn check_model_updates() -> Result<Vec<UpdateStatus>, String> {
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// Запас под ОС и прочие процессы — отделяет «помещается» от «впритык». Консервативно.
 const MEM_SAFETY_GB: f64 = 1.5;
-/// Байт на элемент KV-кэша при q8_0 (экономный режим). f16 был бы 2.0.
+/// Байт на элемент KV-кэша при q8_0 — экономный режим НАШЕГО движка (engine.rs).
 const KV_BYTES_Q8: f64 = 1.1;
+/// Байт на элемент KV-кэша при f16 — так по умолчанию работает ВНЕШНИЙ движок:
+/// env-переменные экономного режима действуют только на процесс, поднятый нами.
+const KV_BYTES_F16: f64 = 2.0;
 /// Compute-буфер (с flash attention почти не растёт с контекстом).
 const COMPUTE_BUF_GB: f64 = 0.6;
 
@@ -959,21 +1078,35 @@ struct MemoryEstimate {
     available_gb: f64,
     weight_gb: f64,
     kv_gb: f64,
+    vram_tight: bool, // вес+KV не помещаются в СВОБОДНУЮ видеопамять (будет медленнее)
 }
 
 /// Оценить, поместится ли модель при заданном контексте: вес (size из /api/tags) +
-/// KV-кэш (метаданные /api/show × num_ctx) + compute-буфер + запас, против доступной
-/// памяти. На дискретном GPU часть сверх VRAM уходит в RAM (своп — главный риск);
-/// на унифицированной памяти (Apple, VRAM=None) всё в общей RAM. Без блокировки.
-async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
-    let client = reqwest::Client::new();
-
+/// KV-кэш (метаданные /api/show × num_ctx × байт на элемент) + compute-буфер + запас,
+/// против доступной памяти. На дискретном GPU часть сверх VRAM уходит в RAM (своп —
+/// главный риск); на унифицированной памяти (Apple, VRAM=None) всё в общей RAM.
+/// `kv_bytes_per_elem` — честный тип KV-кэша (q8_0 у нашего движка, f16 у внешнего).
+/// `vram_gb`/`vram_free_gb` детектируются ОДИН РАЗ вызывающим: plan_inference зовёт
+/// estimate до ~9 раз, а detect_vram — это запуск внешней утилиты (nvidia-smi).
+async fn estimate(
+    model: &str,
+    num_ctx: u64,
+    kv_bytes_per_elem: f64,
+    vram_gb: Option<f64>,
+    vram_free_gb: Option<f64>,
+) -> Result<MemoryEstimate, String> {
     // Что сейчас в памяти (/api/ps) — первым: целевая уже загружена → помещается (хот-
     // путь, без тяжёлого /api/show). Прочие при MAX_LOADED_MODELS=1 выгрузятся под
-    // новую → их размер прибавляется к доступному.
+    // новую → их размер (и занятая ими видеопамять) прибавляется к доступному.
     let mut loaded_total: u64 = 0;
+    let mut loaded_vram: u64 = 0;
     let mut already_loaded = false;
-    if let Ok(resp) = client.get("http://127.0.0.1:11434/api/ps").send().await {
+    if let Ok(resp) = HTTP
+        .get("http://127.0.0.1:11434/api/ps")
+        .timeout(OLLAMA_META_TIMEOUT)
+        .send()
+        .await
+    {
         if let Ok(ps) = resp.json::<serde_json::Value>().await {
             if let Some(arr) = ps.get("models").and_then(|m| m.as_array()) {
                 for m in arr {
@@ -983,6 +1116,7 @@ async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
                         already_loaded = true;
                     } else {
                         loaded_total += size;
+                        loaded_vram += m.get("size_vram").and_then(|s| s.as_u64()).unwrap_or(0);
                     }
                 }
             }
@@ -997,12 +1131,14 @@ async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
             available_gb,
             weight_gb: 0.0,
             kv_gb: 0.0,
+            vram_tight: false,
         });
     }
 
     // вес = размер GGUF из /api/tags
-    let tags: serde_json::Value = client
+    let tags: serde_json::Value = HTTP
         .get("http://127.0.0.1:11434/api/tags")
+        .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Ollama недоступна: {e}"))?
@@ -1022,8 +1158,9 @@ async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
     let weight_gb = weight_bytes as f64 / GB;
 
     // KV-кэш из метаданных /api/show
-    let show: serde_json::Value = client
+    let show: serde_json::Value = HTTP
         .post("http://127.0.0.1:11434/api/show")
+        .timeout(OLLAMA_META_TIMEOUT)
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -1043,52 +1180,38 @@ async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
             let val_len = mi_u64(mi, ".attention.value_length").unwrap_or(key_len);
             // KV = слои × KV-головы × (K_dim + V_dim) × байты × токены
             let elems = blocks * kv_heads * (key_len + val_len) * num_ctx;
-            elems as f64 * KV_BYTES_Q8 / GB
+            elems as f64 * kv_bytes_per_elem / GB
         }
         // метаданных нет → консервативная оценка KV как доля веса под контекст
-        _ => weight_gb * 0.2 * (num_ctx as f64 / 8192.0),
+        // (доля калибрована под q8_0 — для f16 пропорционально больше)
+        _ => weight_gb * 0.2 * (num_ctx as f64 / 8192.0) * (kv_bytes_per_elem / KV_BYTES_Q8),
     };
 
     let required_gb = weight_gb + kv_gb + COMPUTE_BUF_GB + MEM_SAFETY_GB;
 
-    // Что сейчас в памяти (/api/ps): целевая модель уже загружена → помещается (её
-    // объём уже учтён). Прочие при MAX_LOADED_MODELS=1 выгрузятся под новую → их
-    // размер освобождается, поэтому прибавляем к доступному.
-    let mut loaded_total: u64 = 0;
-    let mut already_loaded = false;
-    if let Ok(resp) = client.get("http://127.0.0.1:11434/api/ps").send().await {
-        if let Ok(ps) = resp.json::<serde_json::Value>().await {
-            if let Some(arr) = ps.get("models").and_then(|m| m.as_array()) {
-                for m in arr {
-                    let name = m.get("name").and_then(|n| n.as_str());
-                    let size = m.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
-                    if name == Some(model) {
-                        already_loaded = true;
-                    } else {
-                        loaded_total += size;
-                    }
-                }
-            }
-        }
-    }
-
-    let (vram_gb, _) = detect_vram();
-    // эффективно доступно = реалистично доступная RAM + то, что выгрузится при загрузке новой
-    let available_gb = usable_ram_gb() + loaded_total as f64 / GB;
-
-    // сколько потребуется именно от RAM (своп — триггер зависания); на дискретном
-    // GPU часть до объёма VRAM не давит на RAM.
+    // Сколько потребуется именно от RAM (своп — триггер зависания); на дискретном
+    // GPU часть до объёма VRAM не давит на RAM. /api/ps выше уже учтён: available_gb
+    // включает то, что освободит выгрузка прочих моделей (MAX_LOADED_MODELS=1).
     let (ram_needed, limiting) = match vram_gb {
         Some(vram) => ((required_gb - vram).max(0.0), "vram"),
         None => (required_gb, "ram"),
     };
 
-    let fits = if already_loaded || ram_needed <= available_gb {
+    let fits = if ram_needed <= available_gb {
         "ok"
     } else if ram_needed - MEM_SAFETY_GB <= available_gb {
         "tight"
     } else {
         "no"
+    };
+
+    // Отдельное честное наблюдение: помещаются ли вес+KV в СВОБОДНУЮ видеопамять.
+    // Свободная = замер сейчас + то, что освободит выгрузка прочих моделей (size_vram
+    // из /api/ps). На вердикт fits не влияет (тот про RAM/своп) — идёт примечанием
+    // «будет медленнее: часть слоёв уйдёт в ОЗУ».
+    let vram_tight = match vram_free_gb {
+        Some(free) => weight_gb + kv_gb > free + loaded_vram as f64 / GB,
+        None => false,
     };
 
     Ok(MemoryEstimate {
@@ -1098,13 +1221,8 @@ async fn estimate(model: &str, num_ctx: u64) -> Result<MemoryEstimate, String> {
         available_gb,
         weight_gb,
         kv_gb,
+        vram_tight,
     })
-}
-
-/// Команда: оценить память модели при контексте (для блока «Железо»/диагностики).
-#[tauri::command]
-async fn estimate_memory(model: String, num_ctx: u64) -> Result<MemoryEstimate, String> {
-    estimate(&model, num_ctx).await
 }
 
 // ── Стабильность (S2): лестница смягчения и авто-подбор модели «вниз» ──────────
@@ -1122,9 +1240,13 @@ fn ru_resource(limiting: &str) -> &'static str {
 
 /// Размеры установленных моделей (имя → байты) из /api/tags — для подбора «полегче».
 async fn installed_sizes() -> std::collections::HashMap<String, u64> {
-    let client = reqwest::Client::new();
     let mut out = std::collections::HashMap::new();
-    if let Ok(resp) = client.get("http://127.0.0.1:11434/api/tags").send().await {
+    if let Ok(resp) = HTTP
+        .get("http://127.0.0.1:11434/api/tags")
+        .timeout(OLLAMA_META_TIMEOUT)
+        .send()
+        .await
+    {
         if let Ok(tags) = resp.json::<serde_json::Value>().await {
             if let Some(arr) = tags.get("models").and_then(|m| m.as_array()) {
                 for m in arr {
@@ -1149,6 +1271,17 @@ struct InferencePlan {
     num_ctx: u64,           // контекст для запроса
     reason: Option<String>, // пояснение для downscale/refuse
     original_model: String, // что просил пользователь
+    note: Option<String>,   // примечание (действие не меняет): напр., тесно в видеопамяти
+}
+
+/// Примечание к плану: вес+KV не помещаются в СВОБОДНУЮ видеопамять → часть слоёв
+/// уйдёт в ОЗУ, ответ будет медленнее. Вердикт «помещается» это не меняет (тот про RAM).
+fn vram_note(est: &MemoryEstimate) -> Option<String> {
+    est.vram_tight.then(|| {
+        "Модель не помещается целиком в свободную видеопамять — ответ будет медленнее \
+         (часть слоёв уйдёт в оперативную память)."
+            .to_string()
+    })
 }
 
 /// Лестница смягчения ПЕРЕД запуском (S2): экономрежим (K) уже применён → пробуем
@@ -1156,10 +1289,20 @@ struct InferencePlan {
 /// модель той же роли «вниз» → если ничего, честный отказ с дефицитом. Только «вниз»;
 /// ручной выбор не меняется (downscale действует лишь на этот запрос).
 #[tauri::command]
-async fn plan_inference(model: String) -> Result<InferencePlan, String> {
+async fn plan_inference(
+    model: String,
+    engine: tauri::State<'_, engine::EngineState>,
+) -> Result<InferencePlan, String> {
+    // Честный KV: q8_0 действует, только когда движок подняли мы (env-переменные
+    // экономного режима); внешний движок по умолчанию держит KV в f16 (~вдвое больше).
+    let kv_bytes = if engine::was_started_by_us(&engine) { KV_BYTES_Q8 } else { KV_BYTES_F16 };
+    // Видеопамять детектируем один раз на весь план: estimate вызывается до ~9 раз,
+    // а detect_vram запускает внешнюю утилиту. free — честная свободная, не total.
+    let (vram_gb, vram_free_gb, _) = detect_vram();
+
     // 1) запрошенная модель: пробуем снижать контекст
     for &ctx in &CTX_LADDER {
-        let est = estimate(&model, ctx).await?;
+        let est = estimate(&model, ctx, kv_bytes, vram_gb, vram_free_gb).await?;
         if est.fits != "no" {
             let action = if ctx == CTX_LADDER[0] { "ok" } else { "downscale" };
             let reason = (ctx != CTX_LADDER[0]).then(|| {
@@ -1174,6 +1317,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
                 num_ctx: ctx,
                 reason,
                 original_model: model,
+                note: vram_note(&est),
             });
         }
     }
@@ -1191,7 +1335,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
         cands.sort_by_key(|(_, sz)| *sz); // от самой лёгкой
         for (cand, _) in cands {
             for &ctx in &CTX_LADDER {
-                let est = estimate(cand.tag, ctx).await?;
+                let est = estimate(cand.tag, ctx, kv_bytes, vram_gb, vram_free_gb).await?;
                 if est.fits != "no" {
                     return Ok(InferencePlan {
                         action: "downscale".into(),
@@ -1202,6 +1346,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
                             ru_resource(&est.limiting)
                         )),
                         original_model: model,
+                        note: vram_note(&est),
                     });
                 }
             }
@@ -1210,7 +1355,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
 
     // 3) ничего не помещается → честный отказ с дефицитом
     let last = *CTX_LADDER.last().unwrap();
-    let est = estimate(&model, last).await?;
+    let est = estimate(&model, last, kv_bytes, vram_gb, vram_free_gb).await?;
     Ok(InferencePlan {
         action: "refuse".into(),
         model: model.clone(),
@@ -1222,6 +1367,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
             est.available_gb
         )),
         original_model: model,
+        note: None,
     })
 }
 
@@ -1229,8 +1375,7 @@ async fn plan_inference(model: String) -> Result<InferencePlan, String> {
 /// Таймаут 3 с, чтобы не зависнуть, если порт открыт, но ответа нет. Только localhost.
 #[tauri::command]
 async fn ollama_version() -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = HTTP
         .get("http://127.0.0.1:11434/api/version")
         .timeout(std::time::Duration::from_secs(3))
         .send()
@@ -1286,7 +1431,8 @@ async fn ensure_engine(
 struct HardwareInfo {
     ram_gb: f64,
     cpu_cores: usize,
-    vram_gb: Option<f64>,
+    vram_gb: Option<f64>,      // всего (класс железа — стабилен)
+    vram_free_gb: Option<f64>, // свободно сейчас (честная доступность)
     vram_source: String, // "dxgi" | "nvidia-smi" | "rocm-smi" | "unified" | "unknown"
     tier: String,        // "green" | "yellow" | "red"
 }
@@ -1303,9 +1449,11 @@ fn detect_hardware() -> Result<HardwareInfo, String> {
         .map(|n| n.get())
         .unwrap_or(0);
 
-    let (vram_gb, vram_source) = detect_vram();
+    let (vram_gb, vram_free_gb, vram_source) = detect_vram();
 
     // Пороги «светофора» (по требованию): VRAM важнее, но RAM тоже учитываем.
+    // Уровень — по ОБЪЁМУ видеопамяти (класс железа), не по свободной: открытый
+    // браузер не должен «перекрашивать» машину из зелёной в жёлтую.
     let has_vram = |min: f64| vram_gb.is_some_and(|v| v >= min);
     let tier = if has_vram(6.0) || ram_gb >= 16.0 {
         "green"
@@ -1320,35 +1468,57 @@ fn detect_hardware() -> Result<HardwareInfo, String> {
         ram_gb,
         cpu_cores,
         vram_gb,
+        vram_free_gb,
         vram_source,
         tier,
     })
 }
 
 // macOS: общая (unified) память — отдельной VRAM нет, уровень считаем по RAM.
+// Возвращаемая тройка везде: (всего, свободно, источник).
 #[cfg(target_os = "macos")]
-fn detect_vram() -> (Option<f64>, String) {
-    (None, "unified".to_string())
+fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+    (None, None, "unified".to_string())
 }
 
 // Windows: DXGI — поле DedicatedVideoMemory. Намеренно НЕ WMI AdapterRAM
-// (он режет видеопамять до 4 ГБ). Берём максимум по адаптерам.
+// (он режет видеопамять до 4 ГБ). Берём максимум по адаптерам; у лучшего адаптера
+// дополнительно спрашиваем СВОБОДНУЮ видеопамять через IDXGIAdapter3 (budget минус
+// уже занятое) — честная доступность, а не паспортный объём.
 #[cfg(target_os = "windows")]
-fn detect_vram() -> (Option<f64>, String) {
-    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ERROR_NOT_FOUND};
+fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    };
     unsafe {
         let factory: IDXGIFactory1 = match CreateDXGIFactory1() {
             Ok(f) => f,
-            Err(_) => return (None, "unknown".to_string()),
+            Err(_) => return (None, None, "unknown".to_string()),
         };
         let mut best: u64 = 0;
+        let mut best_free: Option<u64> = None;
         let mut i = 0u32;
         loop {
             match factory.EnumAdapters(i) {
                 Ok(adapter) => {
                     // windows 0.58: GetDesc() возвращает дескриптор (не out-параметр)
                     if let Ok(desc) = adapter.GetDesc() {
-                        best = best.max(desc.DedicatedVideoMemory as u64);
+                        let total = desc.DedicatedVideoMemory as u64;
+                        if total > best {
+                            best = total;
+                            best_free = adapter.cast::<IDXGIAdapter3>().ok().and_then(|a3| {
+                                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                                a3.QueryVideoMemoryInfo(
+                                    0,
+                                    DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                                    &mut info,
+                                )
+                                .ok()
+                                .map(|_| info.Budget.saturating_sub(info.CurrentUsage))
+                            });
+                        }
                     }
                     i += 1;
                 }
@@ -1357,9 +1527,10 @@ fn detect_vram() -> (Option<f64>, String) {
             }
         }
         if best > 0 {
-            (Some(best as f64 / 1024.0 / 1024.0 / 1024.0), "dxgi".to_string())
+            let gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
+            (Some(gb(best)), best_free.map(gb), "dxgi".to_string())
         } else {
-            (None, "unknown".to_string())
+            (None, None, "unknown".to_string())
         }
     }
 }
@@ -1367,27 +1538,37 @@ fn detect_vram() -> (Option<f64>, String) {
 // Linux: nvidia-smi → rocm-smi → неизвестно. Утилиты могут отсутствовать —
 // ошибки гасим (не паникуем), сети нет.
 #[cfg(target_os = "linux")]
-fn detect_vram() -> (Option<f64>, String) {
+fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     use std::process::Command;
 
-    // NVIDIA: вывод в МиБ, по строке на GPU — берём максимум.
+    // NVIDIA: одним вызовом total и free (МиБ), строка на GPU: "8192, 6144".
+    // Берём GPU с наибольшим объёмом; free — с той же строки (тот же GPU).
     if let Ok(out) = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .args(["--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"])
         .output()
     {
         if out.status.success() {
-            let max_mib = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(|l| l.trim().parse::<f64>().ok())
-                .fold(0.0_f64, f64::max);
-            if max_mib > 0.0 {
-                return (Some(max_mib / 1024.0), "nvidia-smi".to_string());
+            let mut best: Option<(f64, f64)> = None; // (total, free) МиБ лучшего GPU
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut it = line.split(',').map(str::trim);
+                if let (Some(t), Some(f)) = (it.next(), it.next()) {
+                    if let (Ok(t), Ok(f)) = (t.parse::<f64>(), f.parse::<f64>()) {
+                        if best.is_none_or(|(bt, _)| t > bt) {
+                            best = Some((t, f));
+                        }
+                    }
+                }
+            }
+            if let Some((t, f)) = best {
+                if t > 0.0 {
+                    return (Some(t / 1024.0), Some(f / 1024.0), "nvidia-smi".to_string());
+                }
             }
         }
     }
 
     // AMD: rocm-smi --showmeminfo vram --csv. Эвристика: наибольшее число байт
-    // в выводе = суммарная VRAM.
+    // в выводе = суммарная VRAM. Свободную честно не знаем → None.
     if let Ok(out) = Command::new("rocm-smi")
         .args(["--showmeminfo", "vram", "--csv"])
         .output()
@@ -1401,19 +1582,20 @@ fn detect_vram() -> (Option<f64>, String) {
             if max_bytes > 0 {
                 return (
                     Some(max_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
+                    None,
                     "rocm-smi".to_string(),
                 );
             }
         }
     }
 
-    (None, "unknown".to_string())
+    (None, None, "unknown".to_string())
 }
 
 // Прочие ОС: видеопамять неизвестна, ориентируемся на RAM.
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn detect_vram() -> (Option<f64>, String) {
-    (None, "unknown".to_string())
+fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+    (None, None, "unknown".to_string())
 }
 
 // ── Диагностика («проверка системы»): самопроверка для установки под ключ ────
@@ -1501,7 +1683,9 @@ async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
             "Движок недоступен — состояние моделей не проверить".into()));
     }
 
-    // 3. База документов: открывается ли, сколько в ней всего.
+    // 3. База документов: открывается ли, сколько в ней всего. Если рядом лежит
+    // резервная копия повреждённого файла — база пересоздавалась: честно предупреждаем
+    // (индекс пришлось начать заново, исходные файлы у пользователя целы).
     let db_check = docstore::db_path(&app).and_then(|p| {
         let conn = docstore::open(&p)?;
         let docs = docstore::list_all_documents(&conn)?;
@@ -1509,15 +1693,22 @@ async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
     });
     match db_check {
         Ok((path, docs)) => {
+            let recovered = docstore::corrupt_backup_path(&path).exists();
+            let status = if recovered { "warn" } else { "ok" };
+            let note = if recovered {
+                "; ранее база пересоздавалась после повреждения (копия сохранена рядом)"
+            } else {
+                ""
+            };
             if docs.is_empty() {
-                out.push(diag("documents", "База документов", "ok",
-                    "Работает, пока пуста (документы добавляются во вкладке «Документы»)".into()));
+                out.push(diag("documents", "База документов", status,
+                    format!("Работает, пока пуста (документы добавляются во вкладке «Документы»){note}")));
             } else {
                 let chunks: i64 = docs.iter().map(|d| d.chunk_count).sum();
                 let size_mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64
                     / 1024.0 / 1024.0;
-                out.push(diag("documents", "База документов", "ok",
-                    format!("Документов: {}, фрагментов: {chunks} ({size_mb:.1} МБ)", docs.len())));
+                out.push(diag("documents", "База документов", status,
+                    format!("Документов: {}, фрагментов: {chunks} ({size_mb:.1} МБ){note}", docs.len())));
             }
         }
         Err(e) => out.push(diag("documents", "База документов", "fail", e)),
@@ -1558,7 +1749,10 @@ async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
                 _ => "fail",
             };
             let vram = match hw.vram_gb {
-                Some(v) => format!("видеопамять {v:.0} ГБ"),
+                Some(v) => match hw.vram_free_gb {
+                    Some(f) => format!("видеопамять {v:.0} ГБ (свободно {f:.1} ГБ)"),
+                    None => format!("видеопамять {v:.0} ГБ"),
+                },
                 None if hw.vram_source == "unified" => "общая память (Apple)".to_string(),
                 None => "видеопамять неизвестна".to_string(),
             };
@@ -2330,7 +2524,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(CancelFlag(std::sync::Mutex::new(Arc::new(AtomicBool::new(false)))))
-        .manage(PullCancelFlag(AtomicBool::new(false)))
+        .manage(PullState(std::sync::Mutex::new(None)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
         .manage(engine::EngineState::new())
         .invoke_handler(tauri::generate_handler![
@@ -2352,7 +2546,6 @@ pub fn run() {
             list_models,
             model_states,
             check_model_updates,
-            estimate_memory,
             plan_inference,
             run_diagnostics,
             ollama_version,

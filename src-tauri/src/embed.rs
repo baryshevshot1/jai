@@ -18,6 +18,11 @@ const OLLAMA: &str = "http://127.0.0.1:11434";
 /// остаётся загруженной всю индексацию и выгружается лишь спустя время после неё.
 const EMBED_KEEP_ALIVE: &str = "30s";
 
+/// Потолок ожидания эмбеддинга батча: холодная загрузка bge-m3 плюс CPU-эмбеддинг
+/// большого батча на слабом железе. Это не стрим — общий таймаут уместен: зависший
+/// движок не должен держать индексацию/поиск бесконечно.
+const EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Deserialize)]
 struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
@@ -29,15 +34,15 @@ pub async fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": EMBED_MODEL,
         "input": texts,
         "keep_alive": EMBED_KEEP_ALIVE, // быстро освобождаем память после использования
     });
 
-    let resp = client
+    let resp = crate::HTTP
         .post(format!("{OLLAMA}/api/embed"))
+        .timeout(EMBED_TIMEOUT)
         .json(&body)
         .send()
         .await
@@ -86,8 +91,12 @@ pub async fn embed_one(text: &str) -> Result<Vec<f32>, String> {
 /// Установлена ли модель эмбеддингов (для UI: можно ли индексировать/искать).
 /// Мягкая проверка через список тегов; сетевые сбои → false, без паники.
 pub async fn is_available() -> bool {
-    let client = reqwest::Client::new();
-    let resp = match client.get(format!("{OLLAMA}/api/tags")).send().await {
+    let resp = match crate::HTTP
+        .get(format!("{OLLAMA}/api/tags"))
+        .timeout(crate::OLLAMA_META_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r,
         _ => return false,
     };
