@@ -11,9 +11,21 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::Manager;
 
-/// Флаг отмены текущего стрима (нажата «Стоп» ИЛИ сработал watchdog). Arc — чтобы
-/// watchdog-задача могла взвести его параллельно с чтением потока (тот же механизм).
-struct CancelFlag(Arc<AtomicBool>);
+/// Флаг отмены АКТИВНОГО стрима (нажата «Стоп» ИЛИ сработал watchdog). Внутри —
+/// `Mutex<Arc<AtomicBool>>`: каждый новый запрос кладёт сюда СВОЙ свежий флаг, а
+/// «Стоп» взводит тот, что активен сейчас. Так новый запрос не «размораживает»
+/// старый стрим (у каждого свой Arc), и отмена всегда бьёт по текущему запросу.
+struct CancelFlag(std::sync::Mutex<Arc<AtomicBool>>);
+
+impl CancelFlag {
+    /// Зарегистрировать новый запрос как активный: создаёт свежий флаг, делает его
+    /// текущим (старый остаётся взведённым у своего стрима) и возвращает вызывающему.
+    fn begin(&self) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = flag.clone();
+        flag
+    }
+}
 
 /// Отдельный флаг отмены установки модели (`/api/pull`). Отдельный от CancelFlag,
 /// чтобы отмена скачивания не гасила идущий чат и наоборот — они могут идти параллельно.
@@ -94,7 +106,7 @@ async fn chat_stream(
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
 ) -> Result<String, String> {
-    cancel.0.store(false, Ordering::Relaxed); // новый запрос — сбрасываем «Стоп»
+    let my_cancel = cancel.begin(); // свой флаг отмены на этот запрос (без гонок)
     // Контекст — рычаг смягчения (S2): меньше num_ctx → меньше KV-кэш → меньше памяти.
     let ctx = num_ctx.unwrap_or(8192);
     let body = serde_json::json!({
@@ -112,7 +124,7 @@ async fn chat_stream(
     });
     // Стриминг вынесен в общий помощник: его же переиспользует агентный цикл
     // (онлайн-режим) для финального ответа — поведение офлайн-чата неизменно.
-    stream_chat_response(body, &on_event, &cancel.0).await
+    stream_chat_response(body, &on_event, &my_cancel).await
 }
 
 /// Стриминг ответа Ollama по NDJSON в окно через Channel + watchdog по свопу (S3).
@@ -168,9 +180,15 @@ async fn stream_chat_response(
     // full — полный текст ответа (авторитетный результат, без гонок на фронте).
     let mut full = String::new();
 
-    // Разбор одной NDJSON-строки: thinking / content / done.
-    let handle = |line: &str, full: &mut String| {
+    // Разбор одной NDJSON-строки: thinking / content / done / error. Ошибку,
+    // присланную Ollama посреди потока (упал runner, нехватка памяти), кладём в
+    // stream_err — иначе ответ молча обрывается и пользователь не поймёт причину.
+    let handle = |line: &str, full: &mut String, stream_err: &mut Option<String>| {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(e) = json.get("error").and_then(|e| e.as_str()) {
+                *stream_err = Some(e.to_string());
+                return;
+            }
             // Рассуждения «думающих» моделей приходят отдельным полем thinking.
             if let Some(t) = json
                 .get("message")
@@ -197,33 +215,62 @@ async fn stream_chat_response(
         }
     };
 
+    // Остановить watchdog при ЛЮБОМ выходе из функции (успех, ошибка, отмена) —
+    // иначе задача продолжит крутиться и может позже взвести чужой флаг отмены.
+    let stop_watchdog = || watchdog.abort();
+
     // Ollama шлёт NDJSON. Копим БАЙТЫ (чтобы не резать UTF-8 на границе чанка) и
     // разбираем только целые строки; остаток без \n дочитываем после конца потока.
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+    let mut stream_err: Option<String> = None;
+    loop {
+        // «Стоп»/watchdog должны срабатывать, ДАЖЕ пока Ollama молчит (холодная
+        // загрузка, залипание в свопе). Поэтому не блокируемся на chunk() навсегда:
+        // ждём данные короткими окнами и между ними проверяем флаг отмены.
         if cancel.load(Ordering::Relaxed) {
-            break; // нажали «Стоп» — перестаём читать, соединение закроется и Ollama остановит генерацию
+            break; // «Стоп» или watchdog — рвём чтение, соединение закроется, Ollama остановит генерацию
         }
+        let chunk = match tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            resp.chunk(),
+        )
+        .await
+        {
+            Err(_elapsed) => continue,   // за окно данных не пришло — перепроверяем отмену
+            Ok(Ok(Some(chunk))) => chunk, // получили данные
+            Ok(Ok(None)) => break,       // поток корректно завершился
+            Ok(Err(e)) => {
+                stop_watchdog();
+                return Err(e.to_string());
+            }
+        };
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line_bytes);
             let line = line.trim();
             if !line.is_empty() {
-                handle(line, &mut full);
+                handle(line, &mut full, &mut stream_err);
             }
+        }
+        if stream_err.is_some() {
+            break;
         }
     }
     // Хвост без завершающего перевода строки — здесь финальные токены ответа.
-    if !buf.is_empty() {
+    if stream_err.is_none() && !buf.is_empty() {
         let line = String::from_utf8_lossy(&buf);
         let line = line.trim();
         if !line.is_empty() {
-            handle(line, &mut full);
+            handle(line, &mut full, &mut stream_err);
         }
     }
 
-    watchdog.abort(); // генерация закончилась — watchdog больше не нужен
+    stop_watchdog(); // генерация закончилась — watchdog больше не нужен
+    // Ошибка, присланная самим Ollama в потоке — сообщаем пользователю явно.
+    if let Some(e) = stream_err {
+        return Err(format!("Ollama прервал генерацию: {e}"));
+    }
     // Если прервал watchdog (а не пользователь) — отдаём точную причину как ошибку.
     if let Some(reason) = wd_reason.lock().unwrap_or_else(|e| e.into_inner()).take() {
         return Err(format!(
@@ -239,7 +286,11 @@ async fn stream_chat_response(
 /// вызовом инструмента и в финальном стриме.
 #[tauri::command]
 fn cancel_stream(cancel: tauri::State<'_, CancelFlag>) {
-    cancel.0.store(true, Ordering::Relaxed);
+    cancel
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .store(true, Ordering::Relaxed);
 }
 
 // ── Онлайн-слой (агентный режим): цикл tool calling вокруг чата ───────────────
@@ -297,7 +348,7 @@ async fn agentic_chat(
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
 ) -> Result<String, String> {
-    cancel.0.store(false, Ordering::Relaxed); // новый запрос — сбрасываем «Стоп»
+    let my_cancel = cancel.begin(); // свой флаг отмены на этот запрос (без гонок)
     let ctx = num_ctx.unwrap_or(8192);
     let cfg = read_web_search_config(&app);
     let tool_specs = tools::tool_specs();
@@ -308,7 +359,7 @@ async fn agentic_chat(
 
     // Раунды инструментов: пока модель просит вызовы — исполняем и продолжаем.
     for round in 0..MAX_TOOL_ROUNDS {
-        if cancel.0.load(Ordering::Relaxed) {
+        if my_cancel.load(Ordering::Relaxed) {
             return Ok(String::new()); // «Стоп» — выходим тихо (фронт игнорирует хвост)
         }
         let _ = on_event.send(ChatEvent::Status {
@@ -356,7 +407,7 @@ async fn agentic_chat(
 
         // Исполняем каждый запрошенный инструмент в Rust.
         for tc in &tool_calls {
-            if cancel.0.load(Ordering::Relaxed) {
+            if my_cancel.load(Ordering::Relaxed) {
                 return Ok(String::new());
             }
             let fname = tc
@@ -414,7 +465,7 @@ async fn agentic_chat(
         }
     }
 
-    if cancel.0.load(Ordering::Relaxed) {
+    if my_cancel.load(Ordering::Relaxed) {
         return Ok(String::new());
     }
 
@@ -427,7 +478,7 @@ async fn agentic_chat(
         "think": think,
         "options": { "num_ctx": ctx },
     });
-    stream_chat_response(final_body, &on_event, &cancel.0).await
+    stream_chat_response(final_body, &on_event, &my_cancel).await
 }
 
 // ── Лог исходящих обращений (152-ФЗ): прозрачность постфактум ─────────────────
@@ -1235,7 +1286,7 @@ fn detect_hardware() -> Result<HardwareInfo, String> {
     let (vram_gb, vram_source) = detect_vram();
 
     // Пороги «светофора» (по требованию): VRAM важнее, но RAM тоже учитываем.
-    let has_vram = |min: f64| vram_gb.map_or(false, |v| v >= min);
+    let has_vram = |min: f64| vram_gb.is_some_and(|v| v >= min);
     let tier = if has_vram(6.0) || ram_gb >= 16.0 {
         "green"
     } else if has_vram(4.0) || ram_gb >= 8.0 {
@@ -1896,7 +1947,7 @@ fn list_conversations(app: tauri::AppHandle) -> Result<Vec<ConversationMeta>, St
             }
         }
     }
-    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)); // свежие сверху
+    metas.sort_by_key(|m| std::cmp::Reverse(m.updated_at)); // свежие сверху
     Ok(metas)
 }
 
@@ -2136,7 +2187,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(CancelFlag(Arc::new(AtomicBool::new(false))))
+        .manage(CancelFlag(std::sync::Mutex::new(Arc::new(AtomicBool::new(false)))))
         .manage(PullCancelFlag(AtomicBool::new(false)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
         .manage(engine::EngineState::new())

@@ -47,6 +47,11 @@ pub fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// размерность эмбеддинга.
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("Не удалось открыть базу: {e}"))?;
+    // Каждая команда открывает своё соединение. Без busy_timeout параллельная работа
+    // (индексация документа + поиск во время чата) даёт «database is locked». Даём
+    // писателю до 5 с дождаться освобождения вместо мгновенной ошибки.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Не удалось задать busy_timeout: {e}"))?;
     init(&conn)?;
     Ok(conn)
 }
