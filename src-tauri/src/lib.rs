@@ -924,6 +924,12 @@ async fn list_models() -> Result<Vec<ModelInfo>, String> {
                         caps.map(|c| c.iter().any(|x| x.as_str() == Some(cap)))
                             .unwrap_or(false)
                     };
+                    // Модели эмбеддингов (bge-m3) не умеют отвечать — в селекторе чата
+                    // им не место: выбор такой модели ронял бы любой вопрос. Если
+                    // capabilities не отдаются (старый Ollama) — модель оставляем.
+                    if has("embedding") {
+                        return None;
+                    }
                     Some(ModelInfo {
                         name,
                         thinking: has("thinking"),
