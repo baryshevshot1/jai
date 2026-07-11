@@ -20,12 +20,7 @@
   <body>
     <div class="app">
       <aside class="sidebar">
-        <div class="side-tabs">
-          <button type="button" class="side-tab active" id="tab-chats-btn">Диалоги</button>
-          <button type="button" class="side-tab" id="tab-docs-btn">Документы</button>
-        </div>
-
-        <!-- Вкладка «Диалоги» -->
+        <!-- Панель: чаты и проекты (документы и служебные действия — в настройках) -->
         <div class="tab-pane" id="pane-chats">
           <div class="side-top">
             <button type="button" class="newchat" id="new-chat-btn">
@@ -57,32 +52,6 @@
           <div class="conv-list" id="conv-list"></div>
         </div>
 
-        <!-- Вкладка «Документы» (база с поиском по смыслу) -->
-        <div class="tab-pane" id="pane-docs" hidden>
-          <div class="side-top">
-            <button type="button" class="newchat" id="add-doc-btn">
-              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-              Добавить документ
-            </button>
-          </div>
-
-          <div class="doc-status" id="doc-status" hidden>
-            <div class="doc-status__text" id="doc-status-text"></div>
-            <div class="doc-status__actions">
-              <button type="button" class="doc-install-btn" id="install-embed-btn" hidden></button>
-              <button type="button" class="doc-install-btn doc-install-btn--ghost" id="install-local-btn" hidden>Импорт с флешки/диска</button>
-            </div>
-          </div>
-
-          <div class="index-progress" id="index-progress" hidden>
-            <div class="index-progress__bar"><i id="index-progress-fill"></i></div>
-            <div class="index-progress__label" id="index-progress-label"></div>
-            <button type="button" class="pull-cancel-btn" id="pull-cancel-btn" hidden>Отмена</button>
-          </div>
-
-          <div class="doc-list" id="doc-list"></div>
-        </div>
-
         <div class="side-foot">
           <div class="hwchip" id="hw-bar" hidden>
             <div class="hwchip__status">
@@ -94,16 +63,6 @@
               <svg class="hwchip__micon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" /></svg>
               <span id="hw-model-name"></span>
             </div>
-          </div>
-          <div class="side-actions">
-            <button type="button" class="sbtn" id="check-btn" title="Проверить движок и железо">
-              <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
-              Проверка
-            </button>
-            <button type="button" class="sbtn" id="clear-btn" title="Удалить все диалоги">
-              <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
-              Очистить
-            </button>
           </div>
         </div>
         <div class="sidebar-resizer" id="sidebar-resizer" title="Потянуть, чтобы изменить ширину"></div>
@@ -129,7 +88,7 @@
             <span class="led"></span>
             <span id="status">проверка движка…</span>
           </div>
-          <button type="button" class="iconbtn" id="refresh-btn" title="Обновить список моделей" aria-label="Обновить">
+          <button type="button" class="iconbtn" id="refresh-btn" title="Перепроверить движок, железо и список моделей" aria-label="Обновить">
             <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
           </button>
           <div class="divider-v"></div>
@@ -230,6 +189,36 @@
               </div>
 
               <div class="settings-status" id="models-status" hidden></div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-card__head models-head">
+                <h2 class="settings-card__title">Документы (быстрые чаты)</h2>
+                <button type="button" class="ep-btn ep-btn--icon" id="add-doc-btn">
+                  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+                  Добавить документ
+                </button>
+              </div>
+              <p class="settings-card__desc models-desc">
+                База знаний быстрых чатов (вне проектов): такие чаты ищут ответы по этим
+                документам. У каждого проекта — своя база на экране проекта.
+              </p>
+
+              <div class="doc-status" id="doc-status" hidden>
+                <div class="doc-status__text" id="doc-status-text"></div>
+                <div class="doc-status__actions">
+                  <button type="button" class="doc-install-btn" id="install-embed-btn" hidden></button>
+                  <button type="button" class="doc-install-btn doc-install-btn--ghost" id="install-local-btn" hidden>Импорт с флешки/диска</button>
+                </div>
+              </div>
+
+              <div class="index-progress" id="index-progress" hidden>
+                <div class="index-progress__bar"><i id="index-progress-fill"></i></div>
+                <div class="index-progress__label" id="index-progress-label"></div>
+                <button type="button" class="pull-cancel-btn" id="pull-cancel-btn" hidden>Отмена</button>
+              </div>
+
+              <div class="doc-list" id="doc-list"></div>
             </section>
 
             <section class="settings-card">
@@ -335,6 +324,17 @@
               </p>
 
               <div class="model-list" id="diag-list"></div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-card__head models-head">
+                <h2 class="settings-card__title">История диалогов</h2>
+                <button type="button" class="ep-btn ep-btn--ghost" id="clear-chats-btn">Удалить все диалоги…</button>
+              </div>
+              <p class="settings-card__desc models-desc">
+                Диалоги хранятся локально на этом компьютере. Удаление стирает всю историю
+                безвозвратно (с подтверждением).
+              </p>
             </section>
 
             <section class="settings-card">

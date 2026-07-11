@@ -1,6 +1,6 @@
-// База документов: вкладки сайдбара, список/добавление/удаление документов,
-// индикатор прогресса индексации и установка модели эмбеддингов (bge-m3).
-// Одна логика обслуживает и вкладку «Документы» (общая база, projectId=null),
+// База документов: список/добавление/удаление документов, индикатор прогресса
+// индексации и установка модели эмбеддингов (bge-m3). Одна логика обслуживает
+// и карточку «Документы» в настройках (общая база быстрых чатов, projectId=null),
 // и раздел «Знания проекта» — через объект DocCtx.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -17,16 +17,12 @@ import {
   indexProgressLabel,
   installEmbedBtn,
   installLocalBtn,
-  paneChatsEl,
-  paneDocsEl,
   projectAddDocBtn,
   projectDocListEl,
   projectIndexProgressEl,
   projectIndexProgressFill,
   projectIndexProgressLabel,
   pullCancelBtn,
-  tabChatsBtn,
-  tabDocsBtn,
 } from "./dom";
 import { fileFormat, humanError, plural } from "./util";
 import { confirmModal } from "./ui";
@@ -60,23 +56,14 @@ export function initDocContexts() {
   };
 }
 
-export function switchTab(tab: "chats" | "docs") {
-  const docs = tab === "docs";
-  paneChatsEl.hidden = docs;
-  paneDocsEl.hidden = !docs;
-  tabChatsBtn.classList.toggle("active", !docs);
-  tabDocsBtn.classList.toggle("active", docs);
-  if (docs) refreshDocuments(sidebarDocCtx); // на открытии вкладки — свежий список
-}
-
-// Тянет список документов контекста и (для сайдбара) статус модели эмбеддингов.
+// Тянет список документов контекста и (для общей базы) статус модели эмбеддингов.
 export async function refreshDocuments(ctx: DocCtx) {
   try {
     state.embeddingReady = await invoke<boolean>("embedding_status");
   } catch {
     state.embeddingReady = false;
   }
-  // Карточка установки bge-m3 — только в сайдбаре (общий статус модели поиска).
+  // Карточка установки bge-m3 — только у общей базы (общий статус модели поиска).
   if (ctx === sidebarDocCtx) {
     if (state.embeddingReady) {
       docStatusEl.hidden = true;
@@ -107,7 +94,7 @@ function renderDocList(docs: DocumentMeta[], ctx: DocCtx) {
     const empty = document.createElement("div");
     empty.className = "doc-empty";
     empty.textContent = !state.embeddingReady
-      ? "Для документов нужна модель поиска bge-m3 (установите во вкладке «Документы»)."
+      ? "Для документов нужна модель поиска bge-m3 — установите её в настройках (раздел «Документы») или через мастер установки."
       : ctx.projectId
         ? "В проекте пока нет документов. Добавьте — и чаты проекта будут искать по ним."
         : "База пуста. Добавьте документы — и спрашивайте по ним.";
@@ -253,7 +240,7 @@ export async function refreshCurrentDocsCount() {
   }
 }
 
-// «Установить bge-m3»: единый runPull с прогрессом в панели вкладки «Документы».
+// «Установить bge-m3»: единый runPull с прогрессом в карточке «Документы» настроек.
 // Возвращает итог: обновление списка МОДЕЛЕЙ после успеха делает точка сборки
 // (main.ts) — documents не импортирует models (слои без циклов).
 export async function installEmbeddingModel(): Promise<PullOutcome | "error"> {
@@ -298,11 +285,9 @@ export async function installEmbeddingModel(): Promise<PullOutcome | "error"> {
   return outcome;
 }
 
-// Обработчики вкладки «Документы» (кнопка установки bge-m3 подключается в main.ts —
+// Обработчики карточки «Документы» (кнопка установки bge-m3 подключается в main.ts —
 // ей после успеха нужен loadModels из models.ts, а documents его не импортирует).
 export function wireDocuments() {
-  tabChatsBtn.addEventListener("click", () => switchTab("chats"));
-  tabDocsBtn.addEventListener("click", () => switchTab("docs"));
   addDocBtn.addEventListener("click", () => addDocument(sidebarDocCtx));
   pullCancelBtn.addEventListener("click", cancelActivePull);
 }

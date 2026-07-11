@@ -72,6 +72,7 @@ function openSettings() {
   settingsView.hidden = false;
   settingsBtn.classList.add("active");
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
+  refreshDocuments(sidebarDocCtx); // свежий список общей базы (карточка «Документы»)
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
   resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
   refreshOutboundLog(); // актуальный журнал обращений в интернет
@@ -163,8 +164,8 @@ async function pickImportSource(): Promise<string | null> {
   return pickModelsDir();
 }
 
-// «Импорт с флешки/диска» из карточки в «Документах»: копирование моделей на
-// компьютер с прогрессом в панели вкладки (после импорта носитель можно вынуть).
+// «Импорт с флешки/диска» из карточки «Документы» в настройках: копирование моделей
+// на компьютер с прогрессом в той же карточке (после импорта носитель можно вынуть).
 async function installFromLocalDir() {
   const dir = await pickImportSource();
   if (!dir) return;
