@@ -72,7 +72,16 @@ fn init(conn: &Connection) -> Result<(), String> {
         drop_all(conn)?;
     }
 
+    // Аддитивная миграция ДО создания таблиц: базы, созданные до появления проектов,
+    // имеют documents с глобальным UNIQUE(sha256) без project_id. Перестраиваем с
+    // сохранением данных (project_id=NULL = вне проектов). При сбое — сброс индекса
+    // (кэш поверх исходных файлов), после чего CREATE ниже создаст схему заново.
+    migrate_documents_project_id(conn);
+
     conn.execute_batch(
+        // documents.project_id: NULL = документ вне проектов (общая база для быстрых
+        // чатов). Уникальность sha256 — В ПРЕДЕЛАХ проекта: один файл можно держать в
+        // разных проектах независимо (как в Claude).
         "CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -81,10 +90,12 @@ fn init(conn: &Connection) -> Result<(), String> {
             id          INTEGER PRIMARY KEY,
             filename    TEXT NOT NULL,
             ext         TEXT NOT NULL,
-            sha256      TEXT NOT NULL UNIQUE,
+            sha256      TEXT NOT NULL,
             added_at    INTEGER NOT NULL,
             char_count  INTEGER NOT NULL,
-            chunk_count INTEGER NOT NULL
+            chunk_count INTEGER NOT NULL,
+            project_id  TEXT,
+            UNIQUE(project_id, sha256)
         );
         CREATE TABLE IF NOT EXISTS chunks (
             id          INTEGER PRIMARY KEY,
@@ -100,6 +111,55 @@ fn init(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| format!("Не удалось записать версию схемы: {e}"))?;
     Ok(())
+}
+
+/// Миграция старой схемы documents (глобальный UNIQUE(sha256), без project_id) на
+/// новую (project_id + UNIQUE(project_id, sha256)). Данные сохраняем: существующие
+/// документы получают project_id=NULL (вне проектов). Если таблицы ещё нет (свежая
+/// база) или столбец уже есть — ничего не делаем. При ошибке перестройки сбрасываем
+/// индекс (кэш), чтобы приложение продолжило работу с чистой новой схемой.
+fn migrate_documents_project_id(conn: &Connection) {
+    let table_exists = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !table_exists {
+        return; // свежая база — мигрировать нечего, CREATE создаст новую схему
+    }
+    let has_col = conn
+        .prepare("SELECT 1 FROM pragma_table_info('documents') WHERE name = 'project_id'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(true); // при сомнении не трогаем существующую базу
+    if has_col {
+        return; // уже новая схема
+    }
+
+    // Перестройка с переносом данных. Внешние ключи на время миграции выключаем,
+    // чтобы DROP/RENAME не спорил с ссылкой chunks.doc_id → documents(id) (id сохраняем).
+    let rebuilt: rusqlite::Result<()> = (|| {
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TABLE documents_new (
+                id          INTEGER PRIMARY KEY,
+                filename    TEXT NOT NULL,
+                ext         TEXT NOT NULL,
+                sha256      TEXT NOT NULL,
+                added_at    INTEGER NOT NULL,
+                char_count  INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                project_id  TEXT,
+                UNIQUE(project_id, sha256)
+             );
+             INSERT INTO documents_new (id, filename, ext, sha256, added_at, char_count, chunk_count, project_id)
+                SELECT id, filename, ext, sha256, added_at, char_count, chunk_count, NULL FROM documents;
+             DROP TABLE documents;
+             ALTER TABLE documents_new RENAME TO documents;
+             PRAGMA foreign_keys=ON;",
+        )
+    })();
+    if rebuilt.is_err() {
+        let _ = drop_all(conn); // не смогли мигрировать — сбрасываем индекс (пересоберётся)
+    }
 }
 
 /// Полный сброс схемы (при смене версии или несовместимой размерности вектора).
@@ -221,11 +281,16 @@ fn row_to_meta(r: &rusqlite::Row) -> rusqlite::Result<DocumentMeta> {
     })
 }
 
-/// Документ с таким sha256 уже в базе? (идемпотентность — не индексируем повторно).
-pub fn find_by_hash(conn: &Connection, sha256: &str) -> Result<Option<DocumentMeta>, String> {
+/// Документ с таким sha256 уже в ЭТОМ проекте? (идемпотентность в пределах проекта —
+/// один файл можно держать в разных проектах, повторно в одном — не индексируем).
+pub fn find_by_hash(
+    conn: &Connection,
+    sha256: &str,
+    project_id: Option<&str>,
+) -> Result<Option<DocumentMeta>, String> {
     conn.query_row(
-        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE sha256 = ?1"),
-        [sha256],
+        &format!("SELECT {DOC_COLUMNS} FROM documents WHERE sha256 = ?1 AND project_id IS ?2"),
+        rusqlite::params![sha256, project_id],
         row_to_meta,
     )
     .map(Some)
@@ -235,7 +300,7 @@ pub fn find_by_hash(conn: &Connection, sha256: &str) -> Result<Option<DocumentMe
     })
 }
 
-/// Вставка записи о документе, возвращает его id.
+/// Вставка записи о документе в проект (project_id=None — вне проектов), возвращает id.
 pub fn insert_document(
     conn: &Connection,
     filename: &str,
@@ -244,11 +309,12 @@ pub fn insert_document(
     added_at: i64,
     char_count: i64,
     chunk_count: i64,
+    project_id: Option<&str>,
 ) -> Result<i64, String> {
     conn.execute(
-        "INSERT INTO documents(filename, ext, sha256, added_at, char_count, chunk_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![filename, ext, sha256, added_at, char_count, chunk_count],
+        "INSERT INTO documents(filename, ext, sha256, added_at, char_count, chunk_count, project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![filename, ext, sha256, added_at, char_count, chunk_count, project_id],
     )
     .map_err(|e| format!("Не удалось сохранить документ: {e}"))?;
     Ok(conn.last_insert_rowid())
@@ -270,8 +336,28 @@ pub fn insert_chunk(
     Ok(conn.last_insert_rowid())
 }
 
-/// Список документов (свежие сверху).
-pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentMeta>, String> {
+/// Список документов проекта (project_id=None — вне проектов), свежие сверху.
+pub fn list_documents(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> Result<Vec<DocumentMeta>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {DOC_COLUMNS} FROM documents WHERE project_id IS ?1 ORDER BY added_at DESC"
+        ))
+        .map_err(|e| format!("Ошибка чтения списка документов: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![project_id], row_to_meta)
+        .map_err(|e| format!("Ошибка чтения списка документов: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("Ошибка чтения документа: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Все документы базы независимо от проекта (для диагностики: общий счёт/размер).
+pub fn list_all_documents(conn: &Connection) -> Result<Vec<DocumentMeta>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT {DOC_COLUMNS} FROM documents ORDER BY added_at DESC"
@@ -283,6 +369,24 @@ pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentMeta>, String> {
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|e| format!("Ошибка чтения документа: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// id всех документов проекта (для каскадного удаления вместе с проектом).
+pub fn document_ids_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<i64>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM documents WHERE project_id = ?1")
+        .map_err(|e| format!("Ошибка чтения документов проекта: {e}"))?;
+    let rows = stmt
+        .query_map([project_id], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("Ошибка чтения документов проекта: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("Ошибка чтения id документа: {e}"))?);
     }
     Ok(out)
 }
@@ -312,29 +416,40 @@ pub struct RetrievedChunk {
     pub distance: f32,
 }
 
-/// KNN top-k к вектору запроса с join к метаданным (имя документа, № фрагмента).
-/// Одним запросом: vec0 MATCH + ORDER BY distance + LIMIT, join по rowid=chunks.id.
-pub fn search(conn: &Connection, query: &[f32], k: usize) -> Result<Vec<RetrievedChunk>, String> {
+/// KNN top-k к вектору запроса в пределах ПРОЕКТА (project_id=None — вне проектов),
+/// с join к метаданным. vec0 KNN отдаёт k ближайших ГЛОБАЛЬНО, поэтому фильтр по
+/// проекту мог бы обнулить результат — берём расширенный пул кандидатов (k×5) и
+/// после фильтра по проекту оставляем top-k.
+pub fn search(
+    conn: &Connection,
+    query: &[f32],
+    k: usize,
+    project_id: Option<&str>,
+) -> Result<Vec<RetrievedChunk>, String> {
+    let pool = (k * 5).max(k) as i64; // пул кандидатов до фильтра по проекту
     let mut stmt = conn
         .prepare(
-            // k=? — KNN-констрейнта vec0 (при join LIMIT не проталкивается в vec0).
             "SELECT c.text, d.filename, c.chunk_index, c.page, v.distance
              FROM vec_chunks v
              JOIN chunks c ON c.id = v.rowid
              JOIN documents d ON d.id = c.doc_id
-             WHERE v.embedding MATCH ?1 AND k = ?2 ORDER BY v.distance",
+             WHERE v.embedding MATCH ?1 AND k = ?2 AND d.project_id IS ?3
+             ORDER BY v.distance LIMIT ?4",
         )
         .map_err(|e| format!("Не удалось подготовить поиск: {e}"))?;
     let rows = stmt
-        .query_map(rusqlite::params![vec_to_blob(query), k as i64], |r| {
-            Ok(RetrievedChunk {
-                text: r.get(0)?,
-                filename: r.get(1)?,
-                chunk_index: r.get(2)?,
-                page: r.get(3)?,
-                distance: r.get(4)?,
-            })
-        })
+        .query_map(
+            rusqlite::params![vec_to_blob(query), pool, project_id, k as i64],
+            |r| {
+                Ok(RetrievedChunk {
+                    text: r.get(0)?,
+                    filename: r.get(1)?,
+                    chunk_index: r.get(2)?,
+                    page: r.get(3)?,
+                    distance: r.get(4)?,
+                })
+            },
+        )
         .map_err(|e| format!("Ошибка поиска: {e}"))?;
     let mut out = Vec::new();
     for r in rows {
@@ -343,10 +458,14 @@ pub fn search(conn: &Connection, query: &[f32], k: usize) -> Result<Vec<Retrieve
     Ok(out)
 }
 
-/// Пуста ли база (для фронта: включать ли поиск по документам).
-pub fn is_empty(conn: &Connection) -> Result<bool, String> {
+/// Пуста ли база проекта (project_id=None — вне проектов): включать ли поиск.
+pub fn is_empty(conn: &Connection, project_id: Option<&str>) -> Result<bool, String> {
     let n: i64 = conn
-        .query_row("SELECT count(*) FROM documents", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM documents WHERE project_id IS ?1",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("Ошибка чтения базы: {e}"))?;
     Ok(n == 0)
 }
@@ -403,11 +522,11 @@ mod tests {
         ensure_vec_table(&conn, vecs[0].len()).unwrap();
 
         for (i, ((name, text), v)) in docs.iter().zip(&vecs).enumerate() {
-            let id = insert_document(&conn, name, "txt", &format!("hash{i}"), i as i64, text.chars().count() as i64, 1).unwrap();
+            let id = insert_document(&conn, name, "txt", &format!("hash{i}"), i as i64, text.chars().count() as i64, 1, None).unwrap();
             let cid = insert_chunk(&conn, id, 0, text, None).unwrap();
             insert_vector(&conn, cid, v).unwrap();
         }
-        assert_eq!(list_documents(&conn).unwrap().len(), 3);
+        assert_eq!(list_documents(&conn, None).unwrap().len(), 3);
 
         // вопрос про стоимость аренды → ближайший фрагмент про арендную плату
         let q = crate::embed::embed_one("сколько стоит аренда помещения в месяц").await.unwrap();
@@ -419,12 +538,12 @@ mod tests {
         assert!(top.contains("50000"), "релевантный фрагмент про арендную плату должен быть сверху");
 
         // путь search(): тот же top, но уже с метаданными источника
-        let found = search(&conn, &q, 3).unwrap();
+        let found = search(&conn, &q, 3, None).unwrap();
         assert_eq!(found[0].filename, "аренда.txt", "источник top-1 — документ про аренду");
         assert!(found[0].text.contains("50000"));
 
         // удаление чистит и фрагменты, и векторы
-        let first = list_documents(&conn).unwrap();
+        let first = list_documents(&conn, None).unwrap();
         let id = first.iter().find(|d| d.filename == "аренда.txt").unwrap().id;
         delete_document(&conn, id).unwrap();
         let nvec: i64 = conn.query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0)).unwrap();
@@ -447,5 +566,68 @@ mod tests {
             .query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "после пересоздания индекс пуст");
+    }
+
+    // Изоляция по проектам: документы одного проекта не видны в другом и вне проектов.
+    #[test]
+    fn per_project_isolation() {
+        register_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        ensure_vec_table(&conn, 4).unwrap(); // как после первой индексации
+
+        // один и тот же sha в разных проектах допустим (UNIQUE(project_id, sha256))
+        insert_document(&conn, "a.txt", "txt", "sha1", 1, 10, 1, Some("projA")).unwrap();
+        insert_document(&conn, "a.txt", "txt", "sha1", 2, 10, 1, Some("projB")).unwrap();
+        insert_document(&conn, "g.txt", "txt", "sha2", 3, 10, 1, None).unwrap();
+
+        assert_eq!(list_documents(&conn, Some("projA")).unwrap().len(), 1);
+        assert_eq!(list_documents(&conn, Some("projB")).unwrap().len(), 1);
+        assert_eq!(list_documents(&conn, None).unwrap().len(), 1, "вне проектов — свой один");
+        assert_eq!(list_all_documents(&conn).unwrap().len(), 3, "всего три записи");
+
+        assert!(!is_empty(&conn, Some("projA")).unwrap());
+        assert!(is_empty(&conn, Some("projC")).unwrap(), "в пустом проекте — пусто");
+
+        // дубль в пределах одного проекта отсекается find_by_hash
+        assert!(find_by_hash(&conn, "sha1", Some("projA")).unwrap().is_some());
+        assert!(find_by_hash(&conn, "sha1", Some("projC")).unwrap().is_none());
+        assert!(find_by_hash(&conn, "sha2", None).unwrap().is_some());
+
+        // каскад по проекту: id документов projA → удаление
+        let ids = document_ids_for_project(&conn, "projA").unwrap();
+        assert_eq!(ids.len(), 1);
+        delete_document(&conn, ids[0]).unwrap();
+        assert!(is_empty(&conn, Some("projA")).unwrap(), "после удаления projA пуст");
+        assert_eq!(list_all_documents(&conn).unwrap().len(), 2);
+    }
+
+    // Миграция старой схемы (глобальный UNIQUE(sha256), без project_id): данные
+    // сохраняются, столбец project_id появляется со значением NULL (вне проектов).
+    #[test]
+    fn migrates_old_documents_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        // воспроизводим СТАРУЮ таблицу до появления проектов
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id INTEGER PRIMARY KEY, filename TEXT NOT NULL, ext TEXT NOT NULL,
+                sha256 TEXT NOT NULL UNIQUE, added_at INTEGER NOT NULL,
+                char_count INTEGER NOT NULL, chunk_count INTEGER NOT NULL
+            );
+            INSERT INTO documents(filename, ext, sha256, added_at, char_count, chunk_count)
+                VALUES ('old.txt','txt','oldsha',1,10,1);",
+        )
+        .unwrap();
+
+        // init() запускает миграцию: столбец добавлен, запись на месте, project_id=NULL
+        init(&conn).unwrap();
+        let has_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('documents') WHERE name='project_id'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap();
+        assert!(has_col, "после миграции есть столбец project_id");
+        let docs = list_documents(&conn, None).unwrap();
+        assert_eq!(docs.len(), 1, "старый документ сохранён и относится к «вне проектов»");
+        assert_eq!(docs[0].filename, "old.txt");
     }
 }

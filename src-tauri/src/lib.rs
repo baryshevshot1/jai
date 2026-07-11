@@ -1504,7 +1504,7 @@ async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
     // 3. База документов: открывается ли, сколько в ней всего.
     let db_check = docstore::db_path(&app).and_then(|p| {
         let conn = docstore::open(&p)?;
-        let docs = docstore::list_documents(&conn)?;
+        let docs = docstore::list_all_documents(&conn)?;
         Ok((p, docs))
     });
     match db_check {
@@ -1764,8 +1764,10 @@ fn now_ms() -> i64 {
 async fn index_document(
     app: tauri::AppHandle,
     path: String,
+    project_id: Option<String>,
     on_progress: Channel<IndexProgress>,
 ) -> Result<IndexResult, String> {
+    let pid = project_id.as_deref();
     // 1) sha256 содержимого файла — для идемпотентности.
     let bytes = std::fs::read(&path).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
     let mut hasher = Sha256::new();
@@ -1788,7 +1790,7 @@ async fn index_document(
     // 3) дубликат по sha256 — короткая сессия БД, соединение не держим через await.
     {
         let conn = docstore::open(&docstore::db_path(&app)?)?;
-        if let Some(existing) = docstore::find_by_hash(&conn, &sha)? {
+        if let Some(existing) = docstore::find_by_hash(&conn, &sha, pid)? {
             return Ok(IndexResult {
                 status: "exists".into(),
                 document: existing,
@@ -1826,6 +1828,7 @@ async fn index_document(
         added_at,
         doc.chars as i64,
         total as i64,
+        pid,
     )?;
     for (i, (text, vec)) in chunks.iter().zip(&vectors).enumerate() {
         let chunk_id = docstore::insert_chunk(&tx, doc_id, i as i64, text, None)?;
@@ -1853,11 +1856,14 @@ async fn index_document(
     })
 }
 
-/// Список документов базы (для интерфейса).
+/// Список документов проекта (project_id=None — вне проектов), для интерфейса.
 #[tauri::command]
-fn list_documents(app: tauri::AppHandle) -> Result<Vec<docstore::DocumentMeta>, String> {
+fn list_documents(
+    app: tauri::AppHandle,
+    project_id: Option<String>,
+) -> Result<Vec<docstore::DocumentMeta>, String> {
     let conn = docstore::open(&docstore::db_path(&app)?)?;
-    docstore::list_documents(&conn)
+    docstore::list_documents(&conn, project_id.as_deref())
 }
 
 /// Удаление документа из базы (вместе с фрагментами и векторами).
@@ -1867,11 +1873,14 @@ fn delete_document(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     docstore::delete_document(&conn, id)
 }
 
-/// Пуста ли база документов (фронт решает, включать ли поиск перед вопросом).
+/// Пуста ли база документов проекта (фронт решает, включать ли поиск перед вопросом).
 #[tauri::command]
-fn documents_empty(app: tauri::AppHandle) -> Result<bool, String> {
+fn documents_empty(
+    app: tauri::AppHandle,
+    project_id: Option<String>,
+) -> Result<bool, String> {
     let conn = docstore::open(&docstore::db_path(&app)?)?;
-    docstore::is_empty(&conn)
+    docstore::is_empty(&conn, project_id.as_deref())
 }
 
 /// Семантический поиск по базе: эмбеддинг вопроса → KNN top-k фрагментов с
@@ -1881,31 +1890,36 @@ async fn search_documents(
     app: tauri::AppHandle,
     query: String,
     k: usize,
+    project_id: Option<String>,
 ) -> Result<Vec<docstore::RetrievedChunk>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    // пустая база → не трогаем эмбеддинги (соединение не держим через await)
+    let pid = project_id.as_deref();
+    // пустая база проекта → не трогаем эмбеддинги (соединение не держим через await)
     {
         let conn = docstore::open(&docstore::db_path(&app)?)?;
-        if docstore::is_empty(&conn)? {
+        if docstore::is_empty(&conn, pid)? {
             return Ok(Vec::new());
         }
     }
     let qvec = embed::embed_one(q).await?;
     let conn = docstore::open(&docstore::db_path(&app)?)?;
-    docstore::search(&conn, &qvec, k)
+    docstore::search(&conn, &qvec, k, pid)
 }
 
 // ── История диалогов: хранение в appDataDir/conversations/<id>.json ──────────
 
-/// Полный диалог (как лежит в файле).
+/// Полный диалог (как лежит в файле). `project_id` — принадлежность проекту
+/// (None/отсутствует = быстрый чат вне проектов; старые файлы читаются как None).
 #[derive(Serialize, Deserialize)]
 struct Conversation {
     id: String,
     title: String,
     updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     messages: Vec<ChatMessage>,
 }
 
@@ -1915,6 +1929,8 @@ struct ConversationMeta {
     id: String,
     title: String,
     updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
 }
 
 /// Каталог с диалогами внутри appDataDir (кроссплатформенно). Создаём при необходимости.
@@ -1963,6 +1979,7 @@ fn list_conversations(app: tauri::AppHandle) -> Result<Vec<ConversationMeta>, St
                     id: conv.id,
                     title: conv.title,
                     updated_at: conv.updated_at,
+                    project_id: conv.project_id,
                 });
             }
         }
@@ -2008,6 +2025,111 @@ fn clear_conversations(app: tauri::AppHandle) -> Result<(), String> {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Проекты: группировка чатов + своя база знаний (документы) ─────────────────
+// Проекты хранятся одним файлом appDataDir/projects.json (массив). Диалоги и
+// документы ссылаются на project_id. Модель как в Claude: у проекта свои чаты и
+// своя база документов; быстрые чаты и общие документы живут вне проектов (None).
+
+/// Проект: имя + опциональные инструкции (системная подсказка для чатов проекта).
+#[derive(Serialize, Deserialize, Clone)]
+struct Project {
+    id: String,
+    name: String,
+    #[serde(default)]
+    instructions: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn projects_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Не удалось получить appDataDir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать каталог: {e}"))?;
+    Ok(dir.join("projects.json"))
+}
+
+fn load_projects(app: &tauri::AppHandle) -> Result<Vec<Project>, String> {
+    let path = projects_path(app)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()), // файла нет — проектов ещё нет
+    };
+    Ok(serde_json::from_str::<Vec<Project>>(&text).unwrap_or_default())
+}
+
+fn save_projects(app: &tauri::AppHandle, projects: &[Project]) -> Result<(), String> {
+    let path = projects_path(app)?;
+    let text = serde_json::to_string_pretty(projects).map_err(|e| e.to_string())?;
+    write_atomic(&path, &text)
+}
+
+/// Список проектов (свежие по обновлению сверху).
+#[tauri::command]
+fn list_projects(app: tauri::AppHandle) -> Result<Vec<Project>, String> {
+    let mut projects = load_projects(&app)?;
+    projects.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
+    Ok(projects)
+}
+
+/// Создать/обновить проект (upsert по id). Фронт задаёт id (UUID), имя, инструкции.
+/// Одна точка для создания, переименования и правки инструкций.
+#[tauri::command]
+fn save_project(app: tauri::AppHandle, project: Project) -> Result<(), String> {
+    validate_id(&project.id)?;
+    let mut projects = load_projects(&app)?;
+    if let Some(existing) = projects.iter_mut().find(|p| p.id == project.id) {
+        existing.name = project.name;
+        existing.instructions = project.instructions;
+        existing.updated_at = project.updated_at;
+    } else {
+        projects.push(project);
+    }
+    save_projects(&app, &projects)
+}
+
+/// Удалить проект вместе с его чатами и документами (каскад). Необратимо.
+#[tauri::command]
+fn delete_project(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    validate_id(&id)?;
+    // 1) удалить проект из списка
+    let projects: Vec<Project> = load_projects(&app)?
+        .into_iter()
+        .filter(|p| p.id != id)
+        .collect();
+    save_projects(&app, &projects)?;
+
+    // 2) удалить чаты этого проекта (файлы, где project_id == id)
+    if let Ok(dir) = conversations_dir(&app) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(conv) = serde_json::from_str::<Conversation>(&text) {
+                        if conv.project_id.as_deref() == Some(id.as_str()) {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3) удалить документы этого проекта из базы (фрагменты + векторы)
+    if let Ok(conn) = docstore::open(&docstore::db_path(&app)?) {
+        if let Ok(ids) = docstore::document_ids_for_project(&conn, &id) {
+            for doc_id in ids {
+                let _ = docstore::delete_document(&conn, doc_id);
             }
         }
     }
@@ -2241,6 +2363,9 @@ pub fn run() {
             save_conversation,
             delete_conversation,
             clear_conversations,
+            list_projects,
+            save_project,
+            delete_project,
             get_setting,
             set_setting,
             set_engine_path,
