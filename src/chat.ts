@@ -33,10 +33,12 @@ import {
   addBubble,
   addError,
   addNotice,
+  addTurnActions,
   renderMarkdownInto,
   renderSources,
   renderWebSources,
   scrollToBottom,
+  setRetryHandler,
   setStreaming,
   stop,
 } from "./ui";
@@ -185,6 +187,27 @@ export async function send() {
   addBubble("user", text, doc, undefined, images);
   persist(); // вопрос (с файлом/картинкой) сохраняется сразу
   state.autoScroll = true; // при отправке снова следуем за ответом
+  await generate();
+}
+
+// «Повторить»: убрать последний ответ ассистента из истории и ленты и сгенерировать
+// заново на тот же вопрос (с текущими моделью/настройками — можно сменить и повторить).
+export function regenerate() {
+  if (state.streaming || !state.selectedModel) return;
+  if (history[history.length - 1]?.role !== "assistant") return;
+  history.pop();
+  persist();
+  const turns = messagesEl.querySelectorAll(".turn.ai");
+  turns[turns.length - 1]?.remove();
+  state.autoScroll = true;
+  void generate();
+}
+
+// Генерация ответа на ПОСЛЕДНИЙ вопрос истории: RAG-поиск, бюджет контекста, оценка
+// памяти, стрим (офлайн или агентный). Общий путь send() и regenerate().
+async function generate() {
+  // Запрос для поиска по базе — текст последнего вопроса пользователя (без документа).
+  const queryText = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
 
   const myGen = ++state.generation;
   setStreaming(true);
@@ -195,6 +218,40 @@ export async function send() {
   let reasoning = "";
   let reasonExpanded = false;
   const startTs = Date.now();
+
+  // Секундомер ожидания: загрузка модели и «Размышления» занимают десятки секунд —
+  // без счётчика кажется, что приложение зависло. Первые секунды цифру не показываем
+  // (быстрый ответ не должен мигать числами). Подпись-основа меняется статусами
+  // агентного режима («Ищу в интернете…») — счётчик продолжает идти при них.
+  let waitLabel = "Думаю над ответом";
+  const waitLbl = ui.thinking.querySelector("span:last-child")!;
+  const waitTimer = window.setInterval(() => {
+    if (!ui.thinking.isConnected) {
+      clearInterval(waitTimer); // индикатор убран (пошёл ответ/стоп) — счётчик не нужен
+      return;
+    }
+    const sec = Math.round((Date.now() - startTs) / 1000);
+    if (sec >= 4) waitLbl.textContent = `${waitLabel} · ${sec} с`;
+  }, 1000);
+
+  // Живая печать с форматированием: Markdown-рендер всего ответа на каждый токен
+  // расточителен, поэтому перерисовываем не чаще раза в LIVE_RENDER_MS — глазу
+  // этого достаточно, а слабое железо не захлёбывается. Финальный рендер по
+  // завершении остаётся авторитетным.
+  const LIVE_RENDER_MS = 180;
+  let liveTimer: number | null = null;
+  let lastLiveTs = 0;
+  const paintLive = () => {
+    lastLiveTs = Date.now();
+    renderAnswer(answer);
+    scrollToBottom();
+  };
+  const stopLivePaint = () => {
+    if (liveTimer !== null) {
+      clearTimeout(liveTimer);
+      liveTimer = null;
+    }
+  };
 
   // Кнопка «Показать больше/меньше»: видна, только если рассуждение длиннее 3 строк.
   const syncToggle = () => {
@@ -244,9 +301,10 @@ export async function send() {
   onEvent.onmessage = (msg) => {
     if (myGen !== state.generation) return; // нажали «Стоп» — игнорируем хвост
     if (msg.type === "status") {
-      // Агентный цикл сообщает стадию («Ищу в интернете…») — показываем в индикаторе.
-      const lbl = ui.thinking.querySelector("span:last-child");
-      if (lbl) lbl.textContent = msg.content;
+      // Агентный цикл сообщает стадию («Ищу в интернете…») — показываем в индикаторе;
+      // секундомер выше подхватит новую подпись как основу.
+      waitLabel = msg.content;
+      waitLbl.textContent = msg.content;
     } else if (msg.type === "sources") {
       // Источники веб-поиска: копим без дублей по URL, рисуем под финальным ответом.
       for (const s of msg.items) {
@@ -266,7 +324,17 @@ export async function send() {
       if (answer) {
         ui.thinking.remove(); // пошёл ответ — убираем «Думаю…»
         freezeReason(true);
-        ui.msg.textContent = answer; // живая печать ПРОСТЫМ текстом — дёшево, ничего не виснет
+        // Живая печать с Markdown, но не чаще LIVE_RENDER_MS: свежий кусок либо
+        // рисуем сразу (пауза прошла), либо ставим отложенную перерисовку.
+        const since = Date.now() - lastLiveTs;
+        if (since >= LIVE_RENDER_MS) {
+          paintLive();
+        } else if (liveTimer === null) {
+          liveTimer = window.setTimeout(() => {
+            liveTimer = null;
+            if (myGen === state.generation) paintLive();
+          }, LIVE_RENDER_MS - since);
+        }
       }
       scrollToBottom();
     }
@@ -283,6 +351,7 @@ export async function send() {
   // ответ в историю — иначе «Думаю…» висит вечно, а ответ теряется (модель потом «не
   // помнит» свою реплику). Замыкание видит актуальные answer/reasoning/sources.
   state.activeStopCleanup = () => {
+    stopLivePaint(); // отложенная перерисовка не должна ожить после «Стоп»
     ui.thinking.remove();
     freezeReason(true);
     if (reasoning) ui.rbody.textContent = reasoning;
@@ -290,6 +359,7 @@ export async function send() {
       renderAnswer(answer);
       if (sources.length) renderSources(ui.turn, sources);
       if (webSources.length) renderWebSources(ui.turn, webSources);
+      addTurnActions(ui.turn, answer); // частичный ответ тоже можно скопировать/повторить
       history.push({
         role: "assistant",
         content: answer,
@@ -307,7 +377,7 @@ export async function send() {
     try {
       // Поиск в базе ПРОЕКТА открытого чата (или общей, вне проектов — currentProjectId=null).
       const retrieved = await invoke<RetrievedChunk[]>("search_documents", {
-        query: text,
+        query: queryText,
         k: RAG_TOP_K,
         projectId: state.currentProjectId,
       });
@@ -433,6 +503,7 @@ export async function send() {
     });
     if (myGen === state.generation) {
       state.activeStopCleanup = null; // нормально завершились — дочистка «Стоп» не нужна
+      stopLivePaint(); // финальный рендер ниже авторитетен — отложенный не нужен
       ui.thinking.remove();
       freezeReason(true);
       if (reasoning) ui.rbody.textContent = reasoning; // готов, раскрывается по клику
@@ -441,6 +512,7 @@ export async function send() {
         renderAnswer(answer); // финальное форматирование один раз
         if (sources.length) renderSources(ui.turn, sources); // из каких документов взято
         if (webSources.length) renderWebSources(ui.turn, webSources); // из интернета
+        addTurnActions(ui.turn, answer); // «Копировать» / «Повторить»
         history.push({
           role: "assistant",
           content: answer,
@@ -459,6 +531,7 @@ export async function send() {
   } catch (err) {
     if (myGen !== state.generation) return;
     state.activeStopCleanup = null; // завершились с ошибкой — дочистка «Стоп» не нужна
+    stopLivePaint();
     ui.thinking.remove();
     if (!answer && !reasoning) ui.turn.remove();
     addError(String(err));
@@ -487,6 +560,7 @@ export function autoGrow() {
 // Обработчики композера и ленты: отправка, «Стоп», OCR, копирование кода,
 // авто-прокрутка, чипы пустого состояния.
 export function wireChat() {
+  setRetryHandler(regenerate); // кнопка «Повторить» под ответами (ui.ts — без циклов)
   composerWrapEl.addEventListener("submit", (e) => {
     e.preventDefault();
     send();

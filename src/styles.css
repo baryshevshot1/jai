@@ -725,6 +725,23 @@ body.resizing { cursor: col-resize; user-select: none; }
 .turn.ai { align-items: flex-start; }
 .msg { font-size: var(--t-lg); line-height: var(--lh-relaxed); color: var(--text); max-width: 100%; }
 
+/* действия под ответом ассистента: «Копировать», «Повторить» */
+.msg-actions { display: flex; gap: var(--s2); margin-top: 2px; }
+.msg-act {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin-left: -8px; /* текст кнопки — вровень с левым краем ответа */
+  font-family: inherit;
+  font-size: var(--t-xs);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+.msg-act + .msg-act { margin-left: 0; }
+.msg-act:hover { color: var(--text); background: var(--hover); }
+
 /* индикатор «думаю» — три пульсирующие точки */
 .thinking { display: flex; align-items: center; gap: var(--s2); color: var(--muted); font-size: var(--t-md); }
 .dots { display: inline-flex; gap: 5px; }
@@ -1438,6 +1455,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .modal__btn:focus-visible,
 .conv-del:focus-visible,
 .reason-toggle:focus-visible,
+.msg-act:focus-visible,
 .copy:focus-visible,
 .chip:focus-visible,
 .search input:focus-visible,

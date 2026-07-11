@@ -56,6 +56,61 @@ export function renderMarkdownInto(el: HTMLElement, text: string): void {
   void mdReady.then(paint);
 }
 
+// ── Действия под ответом ассистента ──────────────────────────────────────────
+
+// Обработчик «Повторить» регистрирует chat.ts (ui.ts не импортирует его — без циклов).
+let retryHandler: (() => void) | null = null;
+export function setRetryHandler(fn: () => void) {
+  retryHandler = fn;
+}
+
+// «Повторить» имеет смысл только у ПОСЛЕДНЕГО ответа: при появлении любого
+// следующего хода кнопки прежних ответов прячем.
+function retireRetryButtons() {
+  messagesEl
+    .querySelectorAll<HTMLButtonElement>(".msg-act--retry")
+    .forEach((b) => (b.hidden = true));
+}
+
+// Панель действий под ответом: «Копировать» — весь ответ как текст (Markdown-исходник,
+// вставляется куда угодно), «Повторить» — перегенерировать ответ на тот же вопрос.
+export function addTurnActions(turn: HTMLElement, text: string) {
+  const row = document.createElement("div");
+  row.className = "msg-actions";
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "msg-act";
+  copy.textContent = "Копировать";
+  copy.addEventListener("click", () => {
+    const restore = () => setTimeout(() => (copy.textContent = "Копировать"), 1500);
+    navigator.clipboard.writeText(text).then(
+      () => {
+        copy.textContent = "✓ Скопировано";
+        restore();
+      },
+      () => {
+        copy.textContent = "Не удалось";
+        restore();
+      },
+    );
+  });
+  row.appendChild(copy);
+
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "msg-act msg-act--retry";
+  retry.textContent = "Повторить";
+  retry.title = "Сгенерировать ответ заново";
+  retry.addEventListener("click", () => {
+    if (state.streaming) return;
+    retryHandler?.();
+  });
+  row.appendChild(retry);
+
+  turn.appendChild(row);
+}
+
 // ── Пузыри и уведомления ленты ───────────────────────────────────────────────
 
 // Карточка прикреплённого файла внутри пузыря сообщения (иконка-бейдж + имя + размер).
@@ -93,6 +148,7 @@ export function addBubble(
   images?: string[],
   webSources?: WebSource[],
 ): HTMLElement {
+  retireRetryButtons(); // любой новый ход делает прежние «Повторить» неактуальными
   const turn = document.createElement("div");
   let body: HTMLElement;
   if (role === "user") {
@@ -119,6 +175,7 @@ export function addBubble(
     turn.appendChild(body);
     if (sources && sources.length) renderSources(turn, sources); // источники из базы
     if (webSources && webSources.length) renderWebSources(turn, webSources); // из интернета
+    addTurnActions(turn, text); // «Копировать»/«Повторить» и у ответов из истории
   }
   messagesEl.appendChild(turn);
   refreshEmptyState();
@@ -129,6 +186,7 @@ export function addBubble(
 // Строит ответ ассистента: индикатор «думаю» (точки), переливающееся
 // «Рассуждение» с текстом (без рамки/коллапса) и контейнер ответа.
 export function addAssistantTurn() {
+  retireRetryButtons(); // начинается новый ответ — прежние «Повторить» неактуальны
   const turn = document.createElement("div");
   turn.className = "turn ai";
 
