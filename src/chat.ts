@@ -16,6 +16,7 @@ import {
   state,
   thinkingByModel,
   toolsByModel,
+  visionByModel,
   vramNotedModels,
 } from "./state";
 import {
@@ -42,7 +43,7 @@ import {
   setStreaming,
   stop,
 } from "./ui";
-import { clearPendingDoc, clearPendingImage } from "./attachments";
+import { anyVisionModel, clearPendingDoc, clearPendingImage } from "./attachments";
 import { persist } from "./conversations";
 
 // Системная подсказка — задаёт деловой тон ассистента и запрещает эмодзи.
@@ -408,10 +409,23 @@ async function generate() {
     if (instr) messages.splice(1, 0, { role: "system", content: instr });
   }
 
+  // Авто-модель: ход с изображением выполняем на vision-модели, НЕ меняя выбор
+  // пользователя в шапке (следующий текстовый вопрос вернётся к выбранной модели).
+  // Смотрим на СОБРАННЫЕ сообщения — картинка может прийти и из недавней истории
+  // (уточняющий вопрос про уже отправленное фото, без нового вложения).
+  let baseModel = state.selectedModel;
+  if (
+    messages.some((m) => m.images && m.images.length > 0) &&
+    !(visionByModel.get(baseModel) ?? false)
+  ) {
+    const vis = anyVisionModel();
+    if (vis) baseModel = vis; // нет vision-модели — идём как есть (гейт был при прикреплении)
+  }
+
   // Лестница смягчения (S2): ДО запуска оцениваем память по формуле. При нехватке —
   // снижаем контекст / подбираем модель полегче «вниз» / честно отказываем. Ручной
   // выбор не меняем: downscale действует только на этот запрос.
-  let useModel = state.selectedModel;
+  let useModel = baseModel;
   let useCtx: number | undefined;
   let downscaleNote: string | null = null;
   try {
@@ -422,7 +436,7 @@ async function generate() {
       reason: string | null;
       original_model: string;
       note: string | null;
-    }>("plan_inference", { model: state.selectedModel });
+    }>("plan_inference", { model: baseModel });
     if (myGen !== state.generation) return;
     if (plan.action === "refuse") {
       state.activeStopCleanup = null; // отказ до старта — дочистка не нужна

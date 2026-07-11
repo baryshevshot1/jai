@@ -17,7 +17,6 @@ import {
   imgRemoveBtn,
   inputEl,
   messagesEl,
-  modelSelectEl,
 } from "./dom";
 import { docSubline, fileFormat, imageDataUrl } from "./util";
 import {
@@ -27,7 +26,7 @@ import {
   refreshEmptyState,
   scrollToBottom,
 } from "./ui";
-import { loadModels, updateThinkAvailability } from "./models";
+import { loadModels } from "./models";
 import { cancelActivePull, runPull } from "./pull";
 
 // Прикреплённый документ (Фаза A). text уже усечён под бюджет контекста
@@ -133,7 +132,8 @@ export function clearPendingImage() {
 }
 
 // Есть ли среди установленных моделей хоть одна с поддержкой зрения.
-function anyVisionModel(): string | null {
+// Экспорт: chat.ts маршрутизирует ходы с изображениями на эту модель (авто-модель).
+export function anyVisionModel(): string | null {
   for (const [name, vision] of visionByModel) if (vision) return name;
   return null;
 }
@@ -171,17 +171,18 @@ function removeImage() {
   inputEl.focus();
 }
 
-// Подбор vision-модели: текущая умеет — ок; иначе переключиться на установленную
-// (с уведомлением) либо предложить установить qwen3-vl.
+// Гейт зрения при прикреплении: проверяем, что картинку есть кому «увидеть».
+// Выбор пользователя в шапке НЕ трогаем — ход с изображением сам выполнится на
+// vision-модели (авто-модель, chat.ts), а следующий текстовый вопрос вернётся к
+// выбранной модели. Нет ни одной vision-модели — предлагаем установить qwen3-vl.
 export function ensureVisionModel() {
   if (visionByModel.get(state.selectedModel)) return; // текущая модель видит изображения
   const vis = anyVisionModel();
   if (vis) {
-    state.selectedModel = vis;
-    modelSelectEl.value = vis;
-    updateThinkAvailability();
-    invoke("set_setting", { key: "selected_model", value: vis }).catch(() => {});
-    addNotice(`Для работы с изображением переключился на модель «${vis}».`);
+    addNotice(
+      `Изображение прикреплено — на вопросы с ним ответит модель зрения «${vis}» ` +
+        `(выбранная модель в шапке не меняется).`,
+    );
   } else {
     offerInstallVision();
   }
@@ -243,7 +244,7 @@ async function offerInstallVision() {
   cancelBtn.remove();
   if (outcome === "done") {
     await loadModels();
-    ensureVisionModel(); // теперь vision-модель есть → переключимся на неё
+    ensureVisionModel(); // теперь vision-модель есть → сообщим, что ответит она
   }
 }
 
