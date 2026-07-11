@@ -164,21 +164,37 @@ const history: Message[] = [];
 
 // id текущего диалога (файл appDataDir/conversations/<id>.json).
 let currentId = "";
+// Проект ОТКРЫТОГО чата: null = быстрый чат вне проектов. Определяет базу знаний
+// (RAG) и инструкции, а также куда сохраняется диалог.
+let currentProjectId: string | null = null;
 
 // Кэш списка диалогов и текущий фильтр поиска (для отрисовки боковой панели).
 let convMetas: ConversationMeta[] = [];
 let convFilter = "";
+
+// Проекты (как в Claude): у каждого свои чаты и своя база знаний (документы).
+interface Project {
+  id: string;
+  name: string;
+  instructions: string;
+  created_at: number;
+  updated_at: number;
+}
+let projects: Project[] = [];
+let viewingProjectId: string | null = null; // проект, чей экран открыт (null = не открыт)
 
 // Карточка диалога для боковой панели и полный диалог из файла.
 interface ConversationMeta {
   id: string;
   title: string;
   updated_at: number;
+  project_id?: string | null;
 }
 interface Conversation {
   id: string;
   title: string;
   updated_at: number;
+  project_id?: string | null;
   messages: Message[];
 }
 
@@ -283,6 +299,23 @@ let appVersionEl: HTMLElement;
 let indexProgressEl: HTMLElement;
 let indexProgressFill: HTMLElement;
 let indexProgressLabel: HTMLElement;
+// Проекты: боковая панель, экран проекта, знания и чаты проекта.
+let projectListEl: HTMLElement;
+let newProjectBtn: HTMLButtonElement;
+let projectView: HTMLElement;
+let projectBackBtn: HTMLButtonElement;
+let projectNameInput: HTMLInputElement;
+let projectDeleteBtn: HTMLButtonElement;
+let projectInstructionsEl: HTMLTextAreaElement;
+let projectStatusEl: HTMLElement;
+let projectAddDocBtn: HTMLButtonElement;
+let projectDocListEl: HTMLElement;
+let projectChatListEl: HTMLElement;
+let projectIndexProgressEl: HTMLElement;
+let projectIndexProgressFill: HTMLElement;
+let projectIndexProgressLabel: HTMLElement;
+let chatProjectChip: HTMLButtonElement;
+let chatProjectChipName: HTMLElement;
 
 // Формат файла → подпись бейджа и CSS-класс цвета. Неизвестное — нейтральный «ФАЙЛ».
 function fileFormat(ext: string): { label: string; cls: string } {
@@ -635,9 +668,11 @@ async function send() {
 
   if (docsCount > 0) {
     try {
+      // Поиск в базе ПРОЕКТА открытого чата (или общей, вне проектов — currentProjectId=null).
       const retrieved = await invoke<RetrievedChunk[]>("search_documents", {
         query: text,
         k: RAG_TOP_K,
+        projectId: currentProjectId,
       });
       if (myGen !== generation) return; // остановили во время поиска
       if (retrieved.length) {
@@ -654,6 +689,14 @@ async function send() {
   // Контекст для модели: система + история (урезанная при RAG) + контекст из базы.
   // У реплик с приложенным файлом текст документа вшивается в ход (как в Фазе A).
   const messages = buildApiMessages(contextMsg);
+
+  // Инструкции проекта (если чат внутри проекта) — системным сообщением сразу после
+  // базовой системы. Задают роль и правила для всех чатов этого проекта (как в Claude).
+  if (currentProjectId) {
+    const proj = projects.find((p) => p.id === currentProjectId);
+    const instr = proj?.instructions.trim();
+    if (instr) messages.splice(1, 0, { role: "system", content: instr });
+  }
 
   // Лестница смягчения (S2): ДО запуска оцениваем память по формуле. При нехватке —
   // снижаем контекст / подбираем модель полегче «вниз» / честно отказываем. Ручной
@@ -1012,7 +1055,21 @@ async function offerInstallVision() {
   }
 }
 
-// ── База документов (Фаза B5): вкладки сайдбара + список/добавление/удаление ──
+// ── База документов: контекст (проект или «вне проектов») + список/добавление ──
+// Одна логика обслуживает и вкладку «Документы» в сайдбаре (общие документы для
+// быстрых чатов, projectId=null), и раздел «Знания проекта» на экране проекта.
+
+interface DocCtx {
+  projectId: string | null; // null = вне проектов (общая база быстрых чатов)
+  listEl: HTMLElement;
+  progressEl: HTMLElement;
+  fillEl: HTMLElement;
+  labelEl: HTMLElement;
+  addBtn: HTMLButtonElement;
+  flashTimer: number | null; // таймер авто-скрытия итоговой надписи (чиним гонку)
+}
+let sidebarDocCtx: DocCtx; // общие документы (сайдбар), projectId всегда null
+let projectDocCtx: DocCtx; // знания проекта (экран проекта), projectId — текущий проект
 
 function switchTab(tab: "chats" | "docs") {
   const docs = tab === "docs";
@@ -1020,50 +1077,52 @@ function switchTab(tab: "chats" | "docs") {
   paneDocsEl.hidden = !docs;
   tabChatsBtn.classList.toggle("active", !docs);
   tabDocsBtn.classList.toggle("active", docs);
-  if (docs) refreshDocuments(); // на открытии вкладки — свежий список и статус модели
+  if (docs) refreshDocuments(sidebarDocCtx); // на открытии вкладки — свежий список
 }
 
-// Тянет список документов и статус модели эмбеддингов; обновляет docsCount.
-async function refreshDocuments() {
+// Тянет список документов контекста и (для сайдбара) статус модели эмбеддингов.
+async function refreshDocuments(ctx: DocCtx) {
   try {
     embeddingReady = await invoke<boolean>("embedding_status");
   } catch {
     embeddingReady = false;
   }
-  // нет модели эмбеддингов → карточка с кнопкой установки. Во время установки
-  // карточку не показываем (на её месте — прогресс), но скрыть при готовности можно.
-  if (embeddingReady) {
-    docStatusEl.hidden = true;
-  } else if (!pulling) {
-    docStatusEl.hidden = false;
-    docStatusTextEl.textContent =
-      "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или укажите локальную поставку (каталог моделей Ollama) — без терминала.";
-    installEmbedBtn.hidden = false;
-    installEmbedBtn.disabled = false;
-    installEmbedBtn.textContent = "Скачать (~1.2 ГБ)";
-    installLocalBtn.hidden = false;
-    installLocalBtn.disabled = false;
+  // Карточка установки bge-m3 — только в сайдбаре (общий статус модели поиска).
+  if (ctx === sidebarDocCtx) {
+    if (embeddingReady) {
+      docStatusEl.hidden = true;
+    } else if (!pulling) {
+      docStatusEl.hidden = false;
+      docStatusTextEl.textContent =
+        "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или укажите локальную поставку (каталог моделей Ollama) — без терминала.";
+      installEmbedBtn.hidden = false;
+      installEmbedBtn.disabled = false;
+      installEmbedBtn.textContent = "Скачать (~1.2 ГБ)";
+      installLocalBtn.hidden = false;
+      installLocalBtn.disabled = false;
+    }
   }
 
   let docs: DocumentMeta[] = [];
   try {
-    docs = await invoke<DocumentMeta[]>("list_documents");
+    docs = await invoke<DocumentMeta[]>("list_documents", { projectId: ctx.projectId });
   } catch (e) {
     console.error("list_documents:", e);
   }
-  docsCount = docs.length;
-  renderDocList(docs);
+  renderDocList(docs, ctx);
 }
 
-function renderDocList(docs: DocumentMeta[]) {
-  docListEl.innerHTML = "";
+function renderDocList(docs: DocumentMeta[], ctx: DocCtx) {
+  ctx.listEl.innerHTML = "";
   if (docs.length === 0) {
     const empty = document.createElement("div");
     empty.className = "doc-empty";
-    empty.textContent = embeddingReady
-      ? "База пуста. Добавьте документы — и спрашивайте по ним."
-      : "Документов пока нет.";
-    docListEl.appendChild(empty);
+    empty.textContent = !embeddingReady
+      ? "Для документов нужна модель поиска bge-m3 (установите во вкладке «Документы»)."
+      : ctx.projectId
+        ? "В проекте пока нет документов. Добавьте — и чаты проекта будут искать по ним."
+        : "База пуста. Добавьте документы — и спрашивайте по ним.";
+    ctx.listEl.appendChild(empty);
     return;
   }
   for (const d of docs) {
@@ -1092,39 +1151,46 @@ function renderDocList(docs: DocumentMeta[]) {
     del.className = "doc-item__del";
     del.textContent = "×";
     del.title = "Удалить документ из базы";
-    del.addEventListener("click", () => deleteDocument(d));
+    del.addEventListener("click", () => deleteDocument(d, ctx));
     item.appendChild(del);
 
-    docListEl.appendChild(item);
+    ctx.listEl.appendChild(item);
   }
 }
 
-function showIndexProgress(label: string, frac: number) {
-  indexProgressEl.hidden = false;
-  indexProgressFill.style.width = `${Math.round(frac * 100)}%`;
-  indexProgressLabel.textContent = label;
-  indexProgressLabel.classList.remove("danger");
+function showIndexProgress(label: string, frac: number, ctx: DocCtx) {
+  if (ctx.flashTimer !== null) {
+    clearTimeout(ctx.flashTimer);
+    ctx.flashTimer = null;
+  }
+  ctx.progressEl.hidden = false;
+  ctx.fillEl.style.width = `${Math.round(frac * 100)}%`;
+  ctx.labelEl.textContent = label;
+  ctx.labelEl.classList.remove("danger");
 }
 
-function hideIndexProgress() {
-  indexProgressEl.hidden = true;
-  indexProgressFill.style.width = "0";
+function hideIndexProgress(ctx: DocCtx) {
+  ctx.progressEl.hidden = true;
+  ctx.fillEl.style.width = "0";
 }
 
-// Краткая надпись в области прогресса (итог/ошибка), затем авто-скрытие.
-function flashIndexLabel(text: string, isError: boolean) {
-  indexProgressEl.hidden = false;
-  indexProgressFill.style.width = "0";
-  indexProgressLabel.textContent = text;
-  indexProgressLabel.classList.toggle("danger", isError);
-  setTimeout(() => {
-    indexProgressLabel.classList.remove("danger");
-    indexProgressEl.hidden = true;
+// Краткая надпись в области прогресса (итог/ошибка), затем авто-скрытие. Таймер
+// хранится в контексте и отменяется при новой операции (не гасит чужой прогресс).
+function flashIndexLabel(text: string, isError: boolean, ctx: DocCtx) {
+  if (ctx.flashTimer !== null) clearTimeout(ctx.flashTimer);
+  ctx.progressEl.hidden = false;
+  ctx.fillEl.style.width = "0";
+  ctx.labelEl.textContent = text;
+  ctx.labelEl.classList.toggle("danger", isError);
+  ctx.flashTimer = window.setTimeout(() => {
+    ctx.labelEl.classList.remove("danger");
+    ctx.progressEl.hidden = true;
+    ctx.flashTimer = null;
   }, 3500);
 }
 
-// «Добавить документ»: выбор файла (плагин Фазы A) → индексация с прогрессом.
-async function addDocument() {
+// «Добавить документ» в контекст (сайдбар или проект): выбор файла → индексация.
+async function addDocument(ctx: DocCtx) {
   let path: string | null;
   try {
     const sel = await open({
@@ -1133,53 +1199,254 @@ async function addDocument() {
     });
     path = typeof sel === "string" ? sel : null;
   } catch (e) {
-    flashIndexLabel(`Не удалось открыть диалог: ${e}`, true);
+    flashIndexLabel(`Не удалось открыть диалог: ${e}`, true, ctx);
     return;
   }
   if (!path) return;
 
-  addDocBtn.disabled = true;
-  showIndexProgress("Чтение документа…", 0.04);
+  ctx.addBtn.disabled = true;
+  showIndexProgress("Чтение документа…", 0.04, ctx);
 
   const onProgress = new Channel<IndexProgress>();
   onProgress.onmessage = (p) => {
     const frac = p.total ? p.current / p.total : 0;
-    if (p.phase === "chunk") showIndexProgress(`Подготовка фрагментов: ${p.total}`, 0.08);
-    else if (p.phase === "embed") showIndexProgress(`Индексация: ${p.current} из ${p.total}`, frac);
-    else if (p.phase === "done") showIndexProgress("Сохранение…", 1);
+    if (p.phase === "chunk") showIndexProgress(`Подготовка фрагментов: ${p.total}`, 0.08, ctx);
+    else if (p.phase === "embed") showIndexProgress(`Индексация: ${p.current} из ${p.total}`, frac, ctx);
+    else if (p.phase === "done") showIndexProgress("Сохранение…", 1, ctx);
   };
 
   try {
     const res = await invoke<{ status: string; document: DocumentMeta; rebuilt: boolean }>(
       "index_document",
-      { path, onProgress },
+      { path, projectId: ctx.projectId, onProgress },
     );
-    await refreshDocuments();
+    await refreshDocuments(ctx);
+    if (ctx.projectId) await refreshCurrentDocsCount(); // могли пополнить базу открытого чата
     if (res.rebuilt) {
-      // сменилась модель эмбеддингов → база пересоздана под новую размерность
-      flashIndexLabel("База пересоздана под новую модель поиска — прежние документы добавьте заново", true);
+      flashIndexLabel("База пересоздана под новую модель поиска — прежние документы добавьте заново", true, ctx);
     } else if (res.status === "exists") {
-      flashIndexLabel(`«${res.document.filename}» уже в базе`, false);
+      flashIndexLabel(`«${res.document.filename}» уже в базе`, false, ctx);
     } else {
-      flashIndexLabel(`Добавлен: ${res.document.filename}`, false);
+      flashIndexLabel(`Добавлен: ${res.document.filename}`, false, ctx);
     }
   } catch (e) {
-    hideIndexProgress();
-    flashIndexLabel(String(e), true);
+    hideIndexProgress(ctx);
+    flashIndexLabel(humanError(e), true, ctx);
   } finally {
-    addDocBtn.disabled = false;
+    ctx.addBtn.disabled = false;
   }
 }
 
-async function deleteDocument(d: DocumentMeta) {
+async function deleteDocument(d: DocumentMeta, ctx: DocCtx) {
   if (!(await confirmModal(`Удалить «${d.filename}» из базы документов?`))) return;
   try {
     await invoke("delete_document", { id: d.id });
   } catch (e) {
-    flashIndexLabel(`Не удалось удалить: ${e}`, true);
+    flashIndexLabel(`Не удалось удалить: ${e}`, true, ctx);
     return;
   }
-  await refreshDocuments();
+  await refreshDocuments(ctx);
+  await refreshCurrentDocsCount();
+}
+
+// Есть ли документы в базе ОТКРЫТОГО чата (его проекта или общей — вне проектов).
+// Определяет, запускать ли RAG-поиск перед ответом (docsCount как флаг 0/1).
+async function refreshCurrentDocsCount() {
+  try {
+    const empty = await invoke<boolean>("documents_empty", { projectId: currentProjectId });
+    docsCount = empty ? 0 : 1;
+  } catch {
+    docsCount = 0;
+  }
+}
+
+// Сырые технические ошибки (reqwest/serde/Ollama) → короткий человеческий текст.
+// Детали остаются в console для диагностики; пользователю — понятная суть.
+function humanError(e: unknown): string {
+  const s = String(e);
+  console.error(s);
+  if (/connect|Connection|11434|отказано|refused/i.test(s))
+    return "Движок Ollama недоступен. Проверьте, запущен ли он (кнопка «Проверка»).";
+  if (/tim| timed out|timeout/i.test(s)) return "Превышено время ожидания ответа движка.";
+  if (/no such|not found|404/i.test(s))
+    return "Модель не установлена. Откройте «Настройки → Модели».";
+  if (/memory|OOM|allocat/i.test(s))
+    return "Не хватает памяти для модели. Выберите модель полегче или меньший контекст.";
+  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+}
+
+// ── Проекты: список в сайдбаре, экран проекта (знания + чаты + инструкции) ─────
+
+const ICON_PROJECT =
+  '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>';
+
+// Тянет список проектов из бэкенда и рисует в боковой панели.
+async function refreshProjects() {
+  try {
+    projects = await invoke<Project[]>("list_projects");
+  } catch (e) {
+    console.error("list_projects:", e);
+    projects = [];
+  }
+  renderProjectList();
+}
+
+function renderProjectList() {
+  projectListEl.innerHTML = "";
+  if (projects.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "project-empty";
+    empty.textContent = "Проектов пока нет";
+    projectListEl.appendChild(empty);
+    return;
+  }
+  for (const p of projects) {
+    const item = document.createElement("div");
+    item.className = "project" + (p.id === viewingProjectId ? " active" : "");
+    item.innerHTML = `<svg viewBox="0 0 24 24">${ICON_PROJECT}</svg>`;
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = p.name || "Без названия";
+    item.appendChild(name);
+
+    item.addEventListener("click", () => openProjectView(p.id));
+    projectListEl.appendChild(item);
+  }
+}
+
+// Создать проект: спрашиваем имя, сохраняем, открываем его экран.
+async function createProject() {
+  const name = await promptModal("Название проекта", "Например: Договоры с поставщиками");
+  if (name === null) return;
+  const trimmed = name.trim() || "Новый проект";
+  const now = Date.now();
+  const proj: Project = { id: crypto.randomUUID(), name: trimmed, instructions: "", created_at: now, updated_at: now };
+  try {
+    await invoke("save_project", { project: proj });
+  } catch (e) {
+    addError(`Не удалось создать проект: ${humanError(e)}`);
+    return;
+  }
+  await refreshProjects();
+  openProjectView(proj.id);
+}
+
+// Сохранить имя/инструкции проекта (upsert). Тихо — это фоновое сохранение.
+async function saveProjectMeta(proj: Project) {
+  proj.updated_at = Date.now();
+  try {
+    await invoke("save_project", { project: proj });
+    await refreshProjects();
+  } catch (e) {
+    projectStatus(`Не удалось сохранить: ${humanError(e)}`, true);
+  }
+}
+
+function projectStatus(text: string, isError: boolean) {
+  projectStatusEl.hidden = false;
+  projectStatusEl.textContent = text;
+  projectStatusEl.classList.toggle("settings-status--error", isError);
+  window.setTimeout(() => (projectStatusEl.hidden = true), 2500);
+}
+
+// Открыть полноэкранный экран проекта: инструкции, знания (документы), чаты проекта.
+function openProjectView(id: string) {
+  const proj = projects.find((p) => p.id === id);
+  if (!proj) return;
+  if (streaming) stop();
+  viewingProjectId = id;
+  // Прячем ленту/композер и настройки, показываем экран проекта (как настройки).
+  feedEl.hidden = true;
+  composerWrapEl.hidden = true;
+  settingsView.hidden = true;
+  settingsBtn.classList.remove("active");
+  projectView.hidden = false;
+
+  projectNameInput.value = proj.name;
+  projectInstructionsEl.value = proj.instructions;
+  projectStatusEl.hidden = true;
+
+  projectDocCtx.projectId = id;
+  refreshDocuments(projectDocCtx);
+  renderProjectChats(id);
+  renderProjectList(); // подсветить активный
+}
+
+function closeProjectView() {
+  projectView.hidden = true;
+  viewingProjectId = null;
+  feedEl.hidden = false;
+  composerWrapEl.hidden = false;
+  renderProjectList();
+}
+
+// Список чатов конкретного проекта (внутри экрана проекта).
+function renderProjectChats(projectId: string) {
+  projectChatListEl.innerHTML = "";
+  const items = convMetas.filter((m) => m.project_id === projectId);
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "project-empty";
+    empty.textContent = "В проекте пока нет чатов. Начните новый — он будет искать по документам проекта.";
+    projectChatListEl.appendChild(empty);
+    return;
+  }
+  for (const m of items) {
+    const item = document.createElement("div");
+    item.className = "conv";
+    item.innerHTML = `<svg viewBox="0 0 24 24">${ICON_CHAT}</svg>`;
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = m.title || "Без названия";
+    item.appendChild(name);
+
+    const del = document.createElement("button");
+    del.className = "conv-del";
+    del.textContent = "×";
+    del.title = "Удалить чат";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteConversation(m.id);
+    });
+    item.appendChild(del);
+
+    item.addEventListener("click", () => openConversation(m.id));
+    projectChatListEl.appendChild(item);
+  }
+}
+
+// Удалить проект вместе с чатами и документами (каскад на бэкенде).
+async function deleteProjectFlow() {
+  if (!viewingProjectId) return;
+  const proj = projects.find((p) => p.id === viewingProjectId);
+  const ok = await confirmModal(
+    `Удалить проект «${proj?.name ?? ""}» со всеми его чатами и документами? Это необратимо.`,
+  );
+  if (!ok) return;
+  const id = viewingProjectId;
+  try {
+    await invoke("delete_project", { id });
+  } catch (e) {
+    addError(`Не удалось удалить проект: ${humanError(e)}`);
+    return;
+  }
+  // Если открытый чат принадлежал этому проекту — уводим в новый быстрый чат.
+  if (currentProjectId === id) newDialog(null);
+  closeProjectView();
+  await refreshProjects();
+  await refreshConversationList();
+}
+
+// Индикатор в шапке: к какому проекту относится ОТКРЫТЫЙ чат (клик — открыть проект).
+function updateChatContextChip() {
+  const proj = currentProjectId ? projects.find((p) => p.id === currentProjectId) : null;
+  if (proj) {
+    chatProjectChip.hidden = false;
+    chatProjectChipName.textContent = proj.name;
+  } else {
+    chatProjectChip.hidden = true;
+  }
 }
 
 // ── Установка модели эмбеддингов (операционный слой): pull с прогрессом ───────
@@ -1207,7 +1474,7 @@ async function installEmbeddingModel() {
   pullCancelled = false;
   pullCancelBtn.hidden = false;
   pullCancelBtn.disabled = false;
-  showIndexProgress("Подготовка установки…", 0.02);
+  showIndexProgress("Подготовка установки…", 0.02, sidebarDocCtx);
 
   const onEvent = new Channel<PullEvent>();
   onEvent.onmessage = (e) => {
@@ -1215,23 +1482,23 @@ async function installEmbeddingModel() {
     const frac = e.total > 0 ? e.completed / e.total : 0;
     const ru = ruPullStatus(e.status);
     const tail = e.total > 0 ? ` ${Math.round(frac * 100)}% (${gb(e.completed)} из ${gb(e.total)})` : "";
-    showIndexProgress(`${ru}${tail}`, frac);
+    showIndexProgress(`${ru}${tail}`, frac, sidebarDocCtx);
   };
 
   try {
     await invoke("pull_model", { name: "bge-m3", onEvent });
     pullCancelBtn.hidden = true;
     if (pullCancelled) {
-      flashIndexLabel("Установка отменена — можно докачать позже (Ollama продолжит с места)", false);
+      flashIndexLabel("Установка отменена — можно докачать позже (Ollama продолжит с места)", false, sidebarDocCtx);
     } else {
-      flashIndexLabel("Модель bge-m3 установлена", false);
+      flashIndexLabel("Модель bge-m3 установлена", false, sidebarDocCtx);
       // модель появилась — обновляем статус базы и список моделей без перезапуска
-      await refreshDocuments();
+      await refreshDocuments(sidebarDocCtx);
       await loadModels();
     }
   } catch (e) {
     pullCancelBtn.hidden = true;
-    flashIndexLabel(String(e), true);
+    flashIndexLabel(humanError(e), true, sidebarDocCtx);
   } finally {
     pulling = false;
     pullCancelBtn.hidden = true;
@@ -1248,7 +1515,7 @@ function cancelPull() {
   pullCancelled = true;
   pullCancelBtn.disabled = true;
   invoke("cancel_pull").catch(() => {});
-  showIndexProgress("Отмена…", 0);
+  showIndexProgress("Отмена…", 0, sidebarDocCtx);
 }
 
 // ── Левая панель: изменение ширины и сворачивание ────────────────────────────
@@ -1306,6 +1573,7 @@ async function initSidebar() {
 
 // Открыть настройки: лента и поле ввода скрываются, страница занимает их место.
 function openSettings() {
+  if (!projectView.hidden) closeProjectView(); // настройки и экран проекта взаимоисключаемы
   feedEl.hidden = true;
   composerWrapEl.hidden = true;
   settingsView.hidden = false;
@@ -1366,7 +1634,7 @@ async function applyModelsDir(dir: string, report: (t: string, err: boolean) => 
   try {
     await invoke("set_models_dir", { path: dir }); // валидация manifests/blobs + запись
     const res = await invoke<{ status: string; message: string }>("reload_engine");
-    await refreshDocuments();
+    await refreshDocuments(sidebarDocCtx);
     await loadModels();
     if (res.status === "external") report(res.message, false);
     else if (embeddingReady) report("Локальный каталог моделей применён", false);
@@ -1384,8 +1652,8 @@ async function installFromLocalDir() {
   if (!dir) return;
   installEmbedBtn.disabled = true;
   installLocalBtn.disabled = true;
-  showIndexProgress("Применение локального каталога…", 0.4);
-  await applyModelsDir(dir, (t, err) => flashIndexLabel(t, err));
+  showIndexProgress("Применение локального каталога…", 0.4, sidebarDocCtx);
+  await applyModelsDir(dir, (t, err) => flashIndexLabel(t, err, sidebarDocCtx));
   installEmbedBtn.disabled = false;
   installLocalBtn.disabled = false;
 }
@@ -1424,7 +1692,7 @@ async function resetEnginePaths() {
   try {
     await invoke("clear_engine_overrides");
     await invoke("reload_engine");
-    await refreshDocuments();
+    await refreshDocuments(sidebarDocCtx);
     await loadModels();
     settingsStatus("Пути сброшены — авто-разрешение (ресурс → PATH).", false);
   } catch (e) {
@@ -1650,7 +1918,7 @@ async function pullModelTag(tag: string, isUpdate: boolean) {
     updateByTag.set(tag, "current"); // только что подтянули — актуальна
     await loadModelStates();
     await loadModels(); // обновить выпадающий список моделей
-    await refreshDocuments(); // вдруг поставили bge-m3 — RAG ожил
+    await refreshDocuments(sidebarDocCtx); // вдруг поставили bge-m3 — RAG ожил
     recomputeLastCheck(); // итог в кнопке — с учётом установленного/обновлённого
     modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, false);
   } catch (e) {
@@ -1974,6 +2242,7 @@ async function persist() {
     id: currentId,
     title: titleFromHistory(),
     updated_at: Date.now(),
+    ...(currentProjectId ? { project_id: currentProjectId } : {}),
     messages: history,
   };
   try {
@@ -2002,6 +2271,7 @@ async function refreshConversationList() {
     return;
   }
   renderConvList();
+  if (!projectView.hidden && viewingProjectId) renderProjectChats(viewingProjectId);
 }
 
 // Группа по дате последнего изменения.
@@ -2017,13 +2287,14 @@ function dateGroup(ts: number): string {
 const ICON_CHAT =
   '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>';
 
-// Рисует список диалогов с учётом поиска и групп по датам.
+// Рисует список БЫСТРЫХ чатов (вне проектов) с учётом поиска и групп по датам.
+// Чаты проектов показываются на экране проекта, не в общем списке.
 function renderConvList() {
   convListEl.innerHTML = "";
   const f = convFilter.trim().toLowerCase();
-  const items = f
-    ? convMetas.filter((m) => (m.title || "").toLowerCase().includes(f))
-    : convMetas;
+  const items = convMetas
+    .filter((m) => !m.project_id) // только вне проектов
+    .filter((m) => !f || (m.title || "").toLowerCase().includes(f));
 
   let lastGroup = "";
   for (const m of items) {
@@ -2060,10 +2331,11 @@ function renderConvList() {
   }
 }
 
-// Открывает диалог из файла в ленту.
+// Открывает диалог из файла в ленту. Восстанавливает и проект чата (для RAG/инструкций).
 async function openConversation(id: string) {
   if (streaming) stop();
   if (!settingsView.hidden) closeSettings(); // вышли из настроек — показываем ленту
+  if (!projectView.hidden) closeProjectView(); // и с экрана проекта — в ленту
   let conv: Conversation;
   try {
     conv = await invoke<Conversation>("load_conversation", { id });
@@ -2072,22 +2344,30 @@ async function openConversation(id: string) {
     return;
   }
   currentId = conv.id;
+  currentProjectId = conv.project_id ?? null;
   history.length = 0;
   history.push(...conv.messages);
   renderHistory();
+  updateChatContextChip();
+  refreshCurrentDocsCount(); // база знаний могла быть у проекта этого чата
   refreshConversationList();
   inputEl.focus();
 }
 
-// «Новый диалог»: пустой чат. Старый уже сохранён — ничего не теряется.
-function newDialog() {
+// «Новый чат»: пустой чат в указанном проекте (projectId=null — быстрый чат вне
+// проектов). Старый уже сохранён — ничего не теряется.
+function newDialog(projectId: string | null = null) {
   if (streaming) stop();
   if (!settingsView.hidden) closeSettings(); // вышли из настроек — показываем ленту
+  if (!projectView.hidden) closeProjectView();
   currentId = crypto.randomUUID();
+  currentProjectId = projectId;
   history.length = 0;
   shownSourceFiles.clear(); // новый диалог — источники снова показываем с первого раза
   messagesEl.innerHTML = "";
   refreshEmptyState(); // пустой диалог → показываем приветствие
+  updateChatContextChip();
+  refreshCurrentDocsCount(); // у проекта новый чат сразу видит его базу знаний
   refreshConversationList(); // снимет подсветку (нового ещё нет в списке)
   inputEl.focus();
 }
@@ -2128,6 +2408,45 @@ function confirmModal(message: string, okLabel = "Удалить"): Promise<bool
   });
 }
 
+// Модальный ввод строки (нативный prompt() в Tauri-окне не работает). Возвращает
+// введённую строку или null при отмене.
+function promptModal(title: string, placeholder = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal__text"></div>
+        <input class="modal__input" type="text" />
+        <div class="modal__actions">
+          <button class="modal__btn" data-act="cancel">Отмена</button>
+          <button class="modal__btn modal__btn--primary" data-act="ok">Создать</button>
+        </div>
+      </div>`;
+    overlay.querySelector(".modal__text")!.textContent = title;
+    const input = overlay.querySelector(".modal__input") as HTMLInputElement;
+    input.placeholder = placeholder;
+    document.body.appendChild(overlay);
+
+    const close = (result: string | null) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close(null);
+      else if (e.key === "Enter") close(input.value);
+    };
+    overlay.addEventListener("click", (e) => {
+      const t = e.target as HTMLElement;
+      if (t === overlay || t.dataset.act === "cancel") close(null);
+      else if (t.dataset.act === "ok") close(input.value);
+    });
+    document.addEventListener("keydown", onKey);
+    input.focus();
+  });
+}
+
 // Удаление диалога (с подтверждением — потеря данных необратима).
 async function deleteConversation(id: string) {
   if (!(await confirmModal("Удалить этот диалог? Действие необратимо."))) return;
@@ -2138,10 +2457,11 @@ async function deleteConversation(id: string) {
     return;
   }
   if (id === currentId) {
-    newDialog();
+    newDialog(currentProjectId);
   } else {
-    refreshConversationList();
+    await refreshConversationList();
   }
+  if (!projectView.hidden && viewingProjectId) renderProjectChats(viewingProjectId);
 }
 
 // Очистка всех диалогов (вся история стирается с диска).
@@ -2179,6 +2499,7 @@ async function initConversations() {
     currentId = crypto.randomUUID();
     await refreshConversationList();
   }
+  updateChatContextChip(); // показать чип проекта, если открылся чат внутри проекта
   refreshEmptyState(); // история загружена — теперь решаем, показывать ли приветствие
 }
 
@@ -2671,9 +2992,83 @@ window.addEventListener("DOMContentLoaded", async () => {
   indexProgressEl = document.querySelector("#index-progress")!;
   indexProgressFill = document.querySelector("#index-progress-fill")!;
   indexProgressLabel = document.querySelector("#index-progress-label")!;
+  // Проекты: элементы боковой панели и экрана проекта.
+  projectListEl = document.querySelector("#project-list")!;
+  newProjectBtn = document.querySelector("#new-project-btn")!;
+  projectView = document.querySelector("#project-view")!;
+  projectBackBtn = document.querySelector("#project-back")!;
+  projectNameInput = document.querySelector("#project-name-input")!;
+  projectDeleteBtn = document.querySelector("#project-delete")!;
+  projectInstructionsEl = document.querySelector("#project-instructions")!;
+  projectStatusEl = document.querySelector("#project-status")!;
+  projectAddDocBtn = document.querySelector("#project-add-doc")!;
+  projectDocListEl = document.querySelector("#project-doc-list")!;
+  projectChatListEl = document.querySelector("#project-chat-list")!;
+  projectIndexProgressEl = document.querySelector("#project-index-progress")!;
+  projectIndexProgressFill = document.querySelector("#project-index-progress-fill")!;
+  projectIndexProgressLabel = document.querySelector("#project-index-progress-label")!;
+  chatProjectChip = document.querySelector("#chat-project-chip")!;
+  chatProjectChipName = document.querySelector("#chat-project-chip-name")!;
+
+  // Контексты документов: сайдбар (общие, вне проектов) и экран проекта.
+  sidebarDocCtx = {
+    projectId: null,
+    listEl: docListEl,
+    progressEl: indexProgressEl,
+    fillEl: indexProgressFill,
+    labelEl: indexProgressLabel,
+    addBtn: addDocBtn,
+    flashTimer: null,
+  };
+  projectDocCtx = {
+    projectId: null,
+    listEl: projectDocListEl,
+    progressEl: projectIndexProgressEl,
+    fillEl: projectIndexProgressFill,
+    labelEl: projectIndexProgressLabel,
+    addBtn: projectAddDocBtn,
+    flashTimer: null,
+  };
+
   tabChatsBtn.addEventListener("click", () => switchTab("chats"));
   tabDocsBtn.addEventListener("click", () => switchTab("docs"));
-  addDocBtn.addEventListener("click", addDocument);
+  addDocBtn.addEventListener("click", () => addDocument(sidebarDocCtx));
+  newProjectBtn.addEventListener("click", createProject);
+  projectBackBtn.addEventListener("click", closeProjectView);
+  projectDeleteBtn.addEventListener("click", deleteProjectFlow);
+  projectAddDocBtn.addEventListener("click", () => addDocument(projectDocCtx));
+  document.querySelector("#project-new-chat")!.addEventListener("click", () => {
+    if (viewingProjectId) newDialog(viewingProjectId);
+  });
+  chatProjectChip.addEventListener("click", () => {
+    if (currentProjectId) openProjectView(currentProjectId);
+  });
+  // Имя проекта — сохраняем при потере фокуса/Enter.
+  const commitProjectName = () => {
+    if (!viewingProjectId) return;
+    const proj = projects.find((p) => p.id === viewingProjectId);
+    if (!proj) return;
+    const name = projectNameInput.value.trim() || "Без названия";
+    if (name !== proj.name) {
+      proj.name = name;
+      saveProjectMeta(proj);
+    }
+  };
+  projectNameInput.addEventListener("blur", commitProjectName);
+  projectNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") projectNameInput.blur();
+  });
+  // Инструкции проекта — сохраняем при потере фокуса.
+  projectInstructionsEl.addEventListener("blur", () => {
+    if (!viewingProjectId) return;
+    const proj = projects.find((p) => p.id === viewingProjectId);
+    if (!proj) return;
+    if (projectInstructionsEl.value !== proj.instructions) {
+      proj.instructions = projectInstructionsEl.value;
+      saveProjectMeta(proj);
+      projectStatus("Инструкции сохранены", false);
+    }
+  });
   installEmbedBtn.addEventListener("click", installEmbeddingModel);
   installLocalBtn.addEventListener("click", installFromLocalDir);
   pullCancelBtn.addEventListener("click", cancelPull);
@@ -2689,7 +3084,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     );
   });
   refreshBtn.addEventListener("click", refreshAll);
-  newChatBtn.addEventListener("click", newDialog);
+  newChatBtn.addEventListener("click", () => newDialog(null));
   themeBtn.addEventListener("click", toggleTheme);
   settingsBtn.addEventListener("click", openSettings);
   settingsBackBtn.addEventListener("click", closeSettings);
@@ -2755,6 +3150,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
+  await refreshProjects();   // список проектов в боковой панели
   await initConversations(); // сначала восстановим диалоги в ленту
   loadHardware();            // неблокирующе: светофор железа (локально, без движка)
   // Сначала обеспечиваем движок (поднимаем свой или переиспользуем системный), затем
@@ -2764,6 +3160,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   if (engineReady) {
     checkOllama();           // покажет версию Ollama в шапке
     loadModels();
-    refreshDocuments();      // число документов (для RAG) и статус модели эмбеддингов
+    refreshDocuments(sidebarDocCtx);      // общая база (вне проектов) + статус модели эмбеддингов
+    refreshCurrentDocsCount();            // есть ли документы у открытого чата (для RAG)
   }
 });
