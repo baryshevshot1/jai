@@ -185,6 +185,10 @@ interface Conversation {
 // Счётчик «поколений»: позволяет кнопке «Стоп» игнорировать поздние кусочки.
 let generation = 0;
 let streaming = false;
+// Дочистка активного стрима при «Стоп»: убрать индикатор «Думаю…», заморозить
+// рассуждение и сохранить уже полученный частичный ответ в историю. Устанавливается
+// в send() на время запроса, вызывается один раз (stop или нормальное завершение).
+let activeStopCleanup: (() => void) | null = null;
 // Следовать за ответом только если пользователь у низа ленты (иначе не мешаем читать).
 let autoScroll = true;
 
@@ -603,6 +607,32 @@ async function send() {
   // вставляем их как контекст. Поиск не должен ронять чат — при сбое идём обычным.
   let contextMsg: Message | null = null;
   let sources: SourceRef[] = [];
+
+  // «Стоп» в любой момент запроса (поиск по базе, оценка памяти, генерация): убрать
+  // индикатор «Думаю…», заморозить рассуждение и сохранить уже полученный частичный
+  // ответ в историю — иначе «Думаю…» висит вечно, а ответ теряется (модель потом «не
+  // помнит» свою реплику). Замыкание видит актуальные answer/reasoning/sources.
+  activeStopCleanup = () => {
+    ui.thinking.remove();
+    freezeReason(true);
+    if (reasoning) ui.rbody.textContent = reasoning;
+    if (answer.trim()) {
+      renderAnswer(answer);
+      if (sources.length) renderSources(ui.turn, sources);
+      if (webSources.length) renderWebSources(ui.turn, webSources);
+      history.push({
+        role: "assistant",
+        content: answer,
+        ...(sources.length ? { sources } : {}),
+        ...(webSources.length ? { webSources } : {}),
+      });
+      persist();
+    } else if (!reasoning.trim()) {
+      ui.turn.remove(); // совсем пусто — убираем ход
+    }
+    scrollToBottom();
+  };
+
   if (docsCount > 0) {
     try {
       const retrieved = await invoke<RetrievedChunk[]>("search_documents", {
@@ -641,6 +671,7 @@ async function send() {
     }>("plan_inference", { model: selectedModel });
     if (myGen !== generation) return;
     if (plan.action === "refuse") {
+      activeStopCleanup = null; // отказ до старта — дочистка не нужна
       ui.thinking.remove();
       ui.turn.remove();
       addNotice(
@@ -711,6 +742,7 @@ async function send() {
       onEvent,
     });
     if (myGen === generation) {
+      activeStopCleanup = null; // нормально завершились — дочистка «Стоп» не нужна
       ui.thinking.remove();
       freezeReason(true);
       if (reasoning) ui.rbody.textContent = reasoning; // готов, раскрывается по клику
@@ -736,6 +768,7 @@ async function send() {
     }
   } catch (err) {
     if (myGen !== generation) return;
+    activeStopCleanup = null; // завершились с ошибкой — дочистка «Стоп» не нужна
     ui.thinking.remove();
     if (!answer && !reasoning) ui.turn.remove();
     addError(String(err));
@@ -747,6 +780,12 @@ function stop() {
   if (!streaming) return;
   generation++; // «отвязываем» текущий запрос — поздние кусочки игнорируются
   invoke("cancel_stream").catch(() => {}); // и реально останавливаем генерацию в Ollama
+  // Дочистить UI и сохранить частичный ответ (иначе «Думаю…» зависает, ответ теряется).
+  if (activeStopCleanup) {
+    const cleanup = activeStopCleanup;
+    activeStopCleanup = null;
+    cleanup();
+  }
   setStreaming(false);
 }
 
@@ -1889,14 +1928,31 @@ function renderWebSources(turn: HTMLElement, items: WebSource[]) {
   row.appendChild(label);
   items.forEach((s, i) => {
     if (i) row.appendChild(document.createTextNode("; "));
-    const a = document.createElement("a");
-    a.className = "source-link";
-    a.href = s.url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = s.title || s.url;
-    a.title = s.url;
-    row.appendChild(a);
+    // URL приходит из ответа стороннего поискового провайдера — не доверяем ему.
+    // Разрешаем только http/https; схемы вроде javascript: в привилегированном
+    // webview — вектор для запуска Tauri-команд, поэтому такие ссылки не кликабельны.
+    let safeUrl: string | null = null;
+    try {
+      const u = new URL(s.url);
+      if (u.protocol === "http:" || u.protocol === "https:") safeUrl = u.href;
+    } catch {
+      /* невалидный URL — оставим как обычный текст */
+    }
+    if (safeUrl) {
+      const a = document.createElement("a");
+      a.className = "source-link";
+      a.href = safeUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = s.title || safeUrl;
+      a.title = safeUrl;
+      row.appendChild(a);
+    } else {
+      const span = document.createElement("span");
+      span.className = "source-link";
+      span.textContent = s.title || s.url;
+      row.appendChild(span);
+    }
   });
   turn.appendChild(row);
 }

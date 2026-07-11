@@ -338,10 +338,14 @@ fn kill_tree(mut child: Child) {
 
 #[cfg(windows)]
 fn kill_tree(mut child: Child) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let pid = child.id();
-    // /T — всё дерево процессов, /F — принудительно
+    // /T — всё дерево процессов, /F — принудительно. CREATE_NO_WINDOW — иначе при
+    // выходе из GUI-приложения на миг вспыхивает чёрное окно консоли taskkill.
     let _ = Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
