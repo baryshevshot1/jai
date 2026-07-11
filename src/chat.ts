@@ -196,6 +196,40 @@ export async function send() {
   let reasonExpanded = false;
   const startTs = Date.now();
 
+  // Секундомер ожидания: загрузка модели и «Размышления» занимают десятки секунд —
+  // без счётчика кажется, что приложение зависло. Первые секунды цифру не показываем
+  // (быстрый ответ не должен мигать числами). Подпись-основа меняется статусами
+  // агентного режима («Ищу в интернете…») — счётчик продолжает идти при них.
+  let waitLabel = "Думаю над ответом";
+  const waitLbl = ui.thinking.querySelector("span:last-child")!;
+  const waitTimer = window.setInterval(() => {
+    if (!ui.thinking.isConnected) {
+      clearInterval(waitTimer); // индикатор убран (пошёл ответ/стоп) — счётчик не нужен
+      return;
+    }
+    const sec = Math.round((Date.now() - startTs) / 1000);
+    if (sec >= 4) waitLbl.textContent = `${waitLabel} · ${sec} с`;
+  }, 1000);
+
+  // Живая печать с форматированием: Markdown-рендер всего ответа на каждый токен
+  // расточителен, поэтому перерисовываем не чаще раза в LIVE_RENDER_MS — глазу
+  // этого достаточно, а слабое железо не захлёбывается. Финальный рендер по
+  // завершении остаётся авторитетным.
+  const LIVE_RENDER_MS = 180;
+  let liveTimer: number | null = null;
+  let lastLiveTs = 0;
+  const paintLive = () => {
+    lastLiveTs = Date.now();
+    renderAnswer(answer);
+    scrollToBottom();
+  };
+  const stopLivePaint = () => {
+    if (liveTimer !== null) {
+      clearTimeout(liveTimer);
+      liveTimer = null;
+    }
+  };
+
   // Кнопка «Показать больше/меньше»: видна, только если рассуждение длиннее 3 строк.
   const syncToggle = () => {
     if (reasonExpanded) {
@@ -244,9 +278,10 @@ export async function send() {
   onEvent.onmessage = (msg) => {
     if (myGen !== state.generation) return; // нажали «Стоп» — игнорируем хвост
     if (msg.type === "status") {
-      // Агентный цикл сообщает стадию («Ищу в интернете…») — показываем в индикаторе.
-      const lbl = ui.thinking.querySelector("span:last-child");
-      if (lbl) lbl.textContent = msg.content;
+      // Агентный цикл сообщает стадию («Ищу в интернете…») — показываем в индикаторе;
+      // секундомер выше подхватит новую подпись как основу.
+      waitLabel = msg.content;
+      waitLbl.textContent = msg.content;
     } else if (msg.type === "sources") {
       // Источники веб-поиска: копим без дублей по URL, рисуем под финальным ответом.
       for (const s of msg.items) {
@@ -266,7 +301,17 @@ export async function send() {
       if (answer) {
         ui.thinking.remove(); // пошёл ответ — убираем «Думаю…»
         freezeReason(true);
-        ui.msg.textContent = answer; // живая печать ПРОСТЫМ текстом — дёшево, ничего не виснет
+        // Живая печать с Markdown, но не чаще LIVE_RENDER_MS: свежий кусок либо
+        // рисуем сразу (пауза прошла), либо ставим отложенную перерисовку.
+        const since = Date.now() - lastLiveTs;
+        if (since >= LIVE_RENDER_MS) {
+          paintLive();
+        } else if (liveTimer === null) {
+          liveTimer = window.setTimeout(() => {
+            liveTimer = null;
+            if (myGen === state.generation) paintLive();
+          }, LIVE_RENDER_MS - since);
+        }
       }
       scrollToBottom();
     }
@@ -283,6 +328,7 @@ export async function send() {
   // ответ в историю — иначе «Думаю…» висит вечно, а ответ теряется (модель потом «не
   // помнит» свою реплику). Замыкание видит актуальные answer/reasoning/sources.
   state.activeStopCleanup = () => {
+    stopLivePaint(); // отложенная перерисовка не должна ожить после «Стоп»
     ui.thinking.remove();
     freezeReason(true);
     if (reasoning) ui.rbody.textContent = reasoning;
@@ -433,6 +479,7 @@ export async function send() {
     });
     if (myGen === state.generation) {
       state.activeStopCleanup = null; // нормально завершились — дочистка «Стоп» не нужна
+      stopLivePaint(); // финальный рендер ниже авторитетен — отложенный не нужен
       ui.thinking.remove();
       freezeReason(true);
       if (reasoning) ui.rbody.textContent = reasoning; // готов, раскрывается по клику
@@ -459,6 +506,7 @@ export async function send() {
   } catch (err) {
     if (myGen !== state.generation) return;
     state.activeStopCleanup = null; // завершились с ошибкой — дочистка «Стоп» не нужна
+    stopLivePaint();
     ui.thinking.remove();
     if (!answer && !reasoning) ui.turn.remove();
     addError(String(err));
