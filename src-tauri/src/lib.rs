@@ -61,9 +61,29 @@ async fn with_cancel<F: std::future::Future>(fut: F, cancel: &AtomicBool) -> Opt
     }
 }
 
-/// Отдельный флаг отмены установки модели (`/api/pull`). Отдельный от CancelFlag,
-/// чтобы отмена скачивания не гасила идущий чат и наоборот — они могут идти параллельно.
-struct PullCancelFlag(AtomicBool);
+/// Активная установка модели (одна на процесс): имя тега + флаг отмены ИМЕННО этой
+/// задачи. Отдельно от CancelFlag чата (отмена скачивания не гасит идущий чат).
+/// Параллельные установки запрещены: раньше общий флаг давал гонку — старт второго
+/// pull сбрасывал отмену первого, и тот молча продолжал качать после «Отмены».
+struct PullJob {
+    name: String,
+    cancel: Arc<AtomicBool>,
+}
+struct PullState(std::sync::Mutex<Option<PullJob>>);
+
+/// Гард регистрации установки: снимает задачу при ЛЮБОМ выходе из pull_model
+/// (успех, ошибка, отмена, сброс future) — «залипшая» регистрация невозможна.
+struct PullJobGuard<'a>(&'a PullState);
+impl Drop for PullJobGuard<'_> {
+    fn drop(&mut self) {
+        let state = self.0;
+        state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+/// Отсечка молчания сети при установке: столько подряд без единого байта — честная
+/// ошибка (докачка продолжится с места при повторе), а не вечный «прогресс».
+const PULL_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Watchdog (S3): период замеров и порог роста свопа, при котором прерываем запрос.
 /// Консервативно (≥512 МБ роста = модель реально сливается в своп), чтобы не рубить
@@ -620,6 +640,7 @@ fn clear_outbound_log(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Прогресс установки модели. status — стадия (manifest/downloading/verify/…),
 /// completed/total — байты текущего слоя (0/0 у статусных строк без чисел).
+/// Итог (успех/отмена) идёт НЕ событием, а результатом команды — см. PullOutcome.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PullEvent {
@@ -628,20 +649,45 @@ enum PullEvent {
         completed: u64,
         total: u64,
     },
+}
+
+/// Итог установки: завершена или отменена пользователем. Раньше отмена возвращала
+/// тот же Ok(()), что и успех, — интерфейс не мог их отличить и писал «установлено»
+/// после отменённой закачки. На проводе — строки "done" | "cancelled".
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum PullOutcome {
     Done,
+    Cancelled,
 }
 
 /// Установка модели в Ollama (`POST /api/pull`, stream:true). Тянет модель из
 /// интернета (онлайн-провижининг). Поток NDJSON разбираем тем же способом, что и
-/// chat_stream; прогресс шлём через Channel; поддерживаем отмену (PullCancelFlag).
+/// chat_stream; прогресс шлём через Channel; отмена — по флагу СВОЕЙ задачи.
+/// Одна установка на процесс: вторая параллельная честно отклоняется.
 /// Только localhost — наружу ходит сама Ollama, не приложение.
 #[tauri::command]
 async fn pull_model(
     name: String,
     on_event: Channel<PullEvent>,
-    cancel: tauri::State<'_, PullCancelFlag>,
-) -> Result<(), String> {
-    cancel.0.store(false, Ordering::Relaxed); // новая установка — сбрасываем отмену
+    state: tauri::State<'_, PullState>,
+) -> Result<PullOutcome, String> {
+    // Регистрация задачи — в синхронной области (std-мьютекс не держим через await);
+    // гард ниже снимет регистрацию при любом выходе из функции.
+    let my_cancel = {
+        let mut job = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(active) = job.as_ref() {
+            return Err(format!(
+                "Уже идёт установка «{}» — дождитесь её завершения или отмените.",
+                active.name
+            ));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *job = Some(PullJob { name: name.clone(), cancel: cancel.clone() });
+        cancel
+    };
+    let _guard = PullJobGuard(&state);
+
     let body = serde_json::json!({ "name": name, "stream": true });
 
     let mut resp = HTTP
@@ -686,13 +732,37 @@ async fn pull_model(
     };
 
     // Тот же байтовый разбор NDJSON, что в chat_stream (UTF-8 на границе чанков,
-    // дочитка хвоста). Проверяем отмену на каждом чанке — прерывание скачивания.
+    // дочитка хвоста). Чанки ждём короткими окнами: отмена срабатывает, ДАЖЕ когда
+    // сеть молчит; затянувшееся молчание (PULL_STALL) — честная ошибка вместо
+    // вечного «идёт установка».
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-        if cancel.0.load(Ordering::Relaxed) {
+    let mut last_data = std::time::Instant::now();
+    loop {
+        if my_cancel.load(Ordering::Relaxed) {
             // отмена: рвём соединение; Ollama останавливает закачку и докачает с места при повторе
-            return Ok(());
+            return Ok(PullOutcome::Cancelled);
         }
+        let chunk = match tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            resp.chunk(),
+        )
+        .await
+        {
+            Err(_elapsed) => {
+                if last_data.elapsed() > PULL_STALL {
+                    return Err("Сеть не отвечает — установка прервана. Проверьте \
+                                интернет и повторите: докачка продолжится с места."
+                        .into());
+                }
+                continue; // окно без данных — перепроверяем отмену
+            }
+            Ok(Ok(Some(chunk))) => {
+                last_data = std::time::Instant::now();
+                chunk
+            }
+            Ok(Ok(None)) => break, // поток корректно завершился
+            Ok(Err(e)) => return Err(format!("Сбой сети при скачивании модели: {e}")),
+        };
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
@@ -711,14 +781,16 @@ async fn pull_model(
         }
     }
 
-    let _ = on_event.send(PullEvent::Done);
-    Ok(())
+    Ok(PullOutcome::Done)
 }
 
-/// Отмена текущей установки модели. pull_model увидит флаг и прервёт скачивание.
+/// Отмена текущей установки модели: взводит флаг АКТИВНОЙ задачи (если она есть).
+/// Итог придёт результатом pull_model (Cancelled) — интерфейс отличит его от успеха.
 #[tauri::command]
-fn cancel_pull(cancel: tauri::State<'_, PullCancelFlag>) {
-    cancel.0.store(true, Ordering::Relaxed);
+fn cancel_pull(state: tauri::State<'_, PullState>) {
+    if let Some(job) = state.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Модель + поддержка рассуждений ("thinking"), зрения ("vision") и вызова
@@ -2452,7 +2524,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(CancelFlag(std::sync::Mutex::new(Arc::new(AtomicBool::new(false)))))
-        .manage(PullCancelFlag(AtomicBool::new(false)))
+        .manage(PullState(std::sync::Mutex::new(None)))
         .manage(SettingsLock(std::sync::Mutex::new(())))
         .manage(engine::EngineState::new())
         .invoke_handler(tauri::generate_handler![

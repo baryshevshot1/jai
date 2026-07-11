@@ -106,18 +106,23 @@ interface IndexProgress {
   current: number;
   total: number;
 }
-// Прогресс установки модели (Channel из pull_model).
-type PullEvent =
-  | { type: "progress"; status: string; completed: number; total: number }
-  | { type: "done" };
+// Прогресс установки модели (Channel из pull_model). Итог (успех/отмена) приходит
+// РЕЗУЛЬТАТОМ команды pull_model — по нему честно отличаем «установлено» от отмены.
+interface PullEvent {
+  type: "progress";
+  status: string;
+  completed: number;
+  total: number;
+}
+type PullOutcome = "done" | "cancelled";
 
 // Число документов в базе: >0 → перед ответом ищем релевантные фрагменты.
 let docsCount = 0;
 // Установлена ли модель эмбеддингов (без неё индексация/поиск невозможны).
 let embeddingReady = false;
-// Идёт ли установка модели (pull) и была ли она отменена пользователем.
-let pulling = false;
-let pullCancelled = false;
+// Тег модели, которую сейчас устанавливаем (null — установка не идёт): единый гейт
+// от параллельных установок для всех трёх поверхностей + признак для карточки bge-m3.
+let pullingTag: string | null = null;
 
 // Документы-источники, уже показанные в строке «Источники» в текущем диалоге.
 // Каждый документ упоминаем один раз — дальше не повторяем заметку под ответами.
@@ -737,7 +742,7 @@ async function send() {
       }
     } catch (e) {
       if (myGen !== generation) return;
-      addNotice(`Поиск по документам недоступен: ${e}`);
+      addNotice(`Поиск по документам недоступен: ${humanError(e)}`);
     }
   }
 
@@ -1082,6 +1087,10 @@ function ocrImage() {
 const VISION_MODEL = "qwen3-vl:4b"; // лёгкий вариант для зрения/OCR
 
 async function offerInstallVision() {
+  if (pullingTag) {
+    addNotice(`Дождитесь завершения установки «${pullingTag}» — затем можно ставить модель зрения.`);
+    return;
+  }
   const ok = await confirmModal(
     `Для работы с изображениями нужна модель зрения. Установить ${VISION_MODEL} (~3–4 ГБ)? Потребуется интернет.`,
     "Установить",
@@ -1095,26 +1104,41 @@ async function offerInstallVision() {
   }
   const row = document.createElement("div");
   row.className = "notice";
-  row.textContent = `Установка ${VISION_MODEL}…`;
+  const label = document.createElement("span");
+  label.textContent = `Установка ${VISION_MODEL}…`;
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "notice-cancel";
+  cancelBtn.textContent = "Отмена";
+  cancelBtn.addEventListener("click", () => {
+    cancelBtn.disabled = true;
+    cancelActivePull();
+  });
+  row.append(label, cancelBtn);
   messagesEl.appendChild(row);
   refreshEmptyState();
   scrollToBottom();
 
-  const onEvent = new Channel<PullEvent>();
-  onEvent.onmessage = (e) => {
-    if (e.type !== "progress") return;
-    const pct = e.total > 0 ? ` ${Math.round((e.completed / e.total) * 100)}%` : "";
-    row.textContent = `Установка ${VISION_MODEL}: ${ruPullStatus(e.status)}${pct}`;
-    scrollToBottom();
-  };
-  try {
-    await invoke("pull_model", { name: VISION_MODEL, onEvent });
-    row.textContent = `Модель ${VISION_MODEL} установлена — можно работать с изображениями.`;
+  const outcome = await runPull(VISION_MODEL, {
+    progress: (t) => {
+      label.textContent = `Установка ${VISION_MODEL}: ${t}`;
+      scrollToBottom();
+    },
+    done: () => {
+      label.textContent = `Модель ${VISION_MODEL} установлена — можно работать с изображениями.`;
+    },
+    cancelled: () => {
+      label.textContent = `Установка ${VISION_MODEL} отменена — можно вернуться к ней позже.`;
+    },
+    error: (m) => {
+      row.className = "err";
+      label.textContent = `Не удалось установить ${VISION_MODEL}: ${m}`;
+    },
+  });
+  cancelBtn.remove();
+  if (outcome === "done") {
     await loadModels();
     ensureVisionModel(); // теперь vision-модель есть → переключимся на неё
-  } catch (e) {
-    row.className = "err";
-    row.textContent = `Не удалось установить ${VISION_MODEL}: ${e}`;
   }
 }
 
@@ -1130,6 +1154,10 @@ interface DocCtx {
   labelEl: HTMLElement;
   addBtn: HTMLButtonElement;
   flashTimer: number | null; // таймер авто-скрытия итоговой надписи (чиним гонку)
+  // Счётчик операций виджета прогресса (аналог myGen в send): канал и результат
+  // команды — разные пути IPC, запоздавший progress иначе затирал бы итоговую
+  // надпись и снимал её таймер авто-скрытия (панель «залипала»).
+  opGen: number;
 }
 let sidebarDocCtx: DocCtx; // общие документы (сайдбар), projectId всегда null
 let projectDocCtx: DocCtx; // знания проекта (экран проекта), projectId — текущий проект
@@ -1154,7 +1182,7 @@ async function refreshDocuments(ctx: DocCtx) {
   if (ctx === sidebarDocCtx) {
     if (embeddingReady) {
       docStatusEl.hidden = true;
-    } else if (!pulling) {
+    } else if (pullingTag === null) {
       docStatusEl.hidden = false;
       docStatusTextEl.textContent =
         "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или укажите локальную поставку (каталог моделей Ollama) — без терминала.";
@@ -1268,10 +1296,12 @@ async function addDocument(ctx: DocCtx) {
   if (!path) return;
 
   ctx.addBtn.disabled = true;
+  const myOp = ++ctx.opGen; // виджет прогресса принадлежит этой операции (как myGen в send)
   showIndexProgress("Чтение документа…", 0.04, ctx);
 
   const onProgress = new Channel<IndexProgress>();
   onProgress.onmessage = (p) => {
+    if (myOp !== ctx.opGen) return; // операция уже завершена/сменилась — хвост не рисуем
     const frac = p.total ? p.current / p.total : 0;
     if (p.phase === "chunk") showIndexProgress(`Подготовка фрагментов: ${p.total}`, 0.08, ctx);
     else if (p.phase === "embed") showIndexProgress(`Индексация: ${p.current} из ${p.total}`, frac, ctx);
@@ -1283,6 +1313,7 @@ async function addDocument(ctx: DocCtx) {
       "index_document",
       { path, projectId: ctx.projectId, onProgress },
     );
+    ctx.opGen++; // операция завершена: запоздавший progress ЕЁ ЖЕ канала не затрёт итог
     await refreshDocuments(ctx);
     if (ctx.projectId) await refreshCurrentDocsCount(); // могли пополнить базу открытого чата
     if (res.rebuilt) {
@@ -1293,6 +1324,7 @@ async function addDocument(ctx: DocCtx) {
       flashIndexLabel(`Добавлен: ${res.document.filename}`, false, ctx);
     }
   } catch (e) {
+    ctx.opGen++;
     hideIndexProgress(ctx);
     flashIndexLabel(humanError(e), true, ctx);
   } finally {
@@ -1305,7 +1337,7 @@ async function deleteDocument(d: DocumentMeta, ctx: DocCtx) {
   try {
     await invoke("delete_document", { id: d.id });
   } catch (e) {
-    flashIndexLabel(`Не удалось удалить: ${e}`, true, ctx);
+    flashIndexLabel(`Не удалось удалить: ${humanError(e)}`, true, ctx);
     return;
   }
   await refreshDocuments(ctx);
@@ -1529,56 +1561,114 @@ function gb(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} ГБ`;
 }
 
-// «Установить bge-m3»: тянет модель через Rust (pull_model) с прогрессом и отменой.
-async function installEmbeddingModel() {
-  installEmbedBtn.hidden = true;
-  docStatusEl.hidden = true; // на месте карточки — прогресс
-  pulling = true;
-  pullCancelled = false;
-  pullCancelBtn.hidden = false;
-  pullCancelBtn.disabled = false;
-  showIndexProgress("Подготовка установки…", 0.02, sidebarDocCtx);
+// Адаптер поверхности установки: как рисовать прогресс и итог в её виджетах.
+// Единый runPull обслуживает все три поверхности (карточка bge-m3 в сайдбаре,
+// каталог моделей в настройках, предложение vision-модели в чате).
+interface PullUi {
+  progress(text: string, frac: number): void;
+  done(): void;
+  cancelled(): void;
+  error(msg: string): void; // msg уже прогнан через humanError
+}
 
+// Заблокировать/разблокировать все точки входа установки на время pull: повторный
+// вход и параллельные установки запрещены (бэкенд тоже отклонит — здесь мгновенный
+// локальный гейт). Кнопки строк каталога пересоздаёт renderModelList — он сам
+// смотрит на pullingTag при отрисовке.
+function setPullButtonsEnabled(on: boolean): void {
+  installEmbedBtn.disabled = !on;
+  installLocalBtn.disabled = !on;
+  installFromDiskBtn.disabled = !on;
+  modelListEl.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = !on));
+}
+
+// Единый поток установки модели: канал прогресса + честный итог по результату
+// команды (done/cancelled) — «установлено» больше не показывается после отмены.
+async function runPull(tag: string, ui: PullUi): Promise<PullOutcome | "error"> {
+  if (pullingTag) {
+    ui.error(`Уже идёт установка «${pullingTag}» — дождитесь завершения или отмените её.`);
+    return "error";
+  }
+  pullingTag = tag;
+  setPullButtonsEnabled(false);
+  // Канал и результат команды — разные пути доставки IPC: после итога гасим
+  // запоздавшие progress-сообщения, чтобы они не затирали финальную надпись.
+  let settled = false;
   const onEvent = new Channel<PullEvent>();
   onEvent.onmessage = (e) => {
-    if (e.type !== "progress") return;
+    if (settled) return;
     const frac = e.total > 0 ? e.completed / e.total : 0;
-    const ru = ruPullStatus(e.status);
-    const tail = e.total > 0 ? ` ${Math.round(frac * 100)}% (${gb(e.completed)} из ${gb(e.total)})` : "";
-    showIndexProgress(`${ru}${tail}`, frac, sidebarDocCtx);
+    const tail =
+      e.total > 0 ? ` ${Math.round(frac * 100)}% (${gb(e.completed)} из ${gb(e.total)})` : "";
+    ui.progress(`${ruPullStatus(e.status)}${tail}`, frac);
   };
-
   try {
-    await invoke("pull_model", { name: "bge-m3", onEvent });
-    pullCancelBtn.hidden = true;
-    if (pullCancelled) {
-      flashIndexLabel("Установка отменена — можно докачать позже (Ollama продолжит с места)", false, sidebarDocCtx);
-    } else {
-      flashIndexLabel("Модель bge-m3 установлена", false, sidebarDocCtx);
-      // модель появилась — обновляем статус базы и список моделей без перезапуска
-      await refreshDocuments(sidebarDocCtx);
-      await loadModels();
-    }
+    const outcome = await invoke<PullOutcome>("pull_model", { name: tag, onEvent });
+    settled = true;
+    if (outcome === "cancelled") ui.cancelled();
+    else ui.done();
+    return outcome;
   } catch (e) {
-    pullCancelBtn.hidden = true;
-    flashIndexLabel(humanError(e), true, sidebarDocCtx);
+    settled = true;
+    ui.error(humanError(e));
+    return "error";
   } finally {
-    pulling = false;
-    pullCancelBtn.hidden = true;
-    // если модель так и не установилась — вернуть карточку с кнопкой
-    if (!embeddingReady) {
-      docStatusEl.hidden = false;
-      installEmbedBtn.hidden = false;
-      installEmbedBtn.disabled = false;
-    }
+    pullingTag = null;
+    setPullButtonsEnabled(true);
   }
 }
 
-function cancelPull() {
-  pullCancelled = true;
+// Отмена активной установки — кнопки всех поверхностей ведут сюда. Итог придёт
+// результатом pull_model, и поверхность отреагирует своей веткой cancelled.
+function cancelActivePull() {
   pullCancelBtn.disabled = true;
+  modelPullCancelBtn.disabled = true;
   invoke("cancel_pull").catch(() => {});
-  showIndexProgress("Отмена…", 0, sidebarDocCtx);
+}
+
+// «Установить bge-m3»: единый runPull с прогрессом в панели вкладки «Документы».
+// Возвращает итог — вызывающий решает, что обновлять после успеха.
+async function installEmbeddingModel(): Promise<PullOutcome | "error"> {
+  const ctx = sidebarDocCtx;
+  const myOp = ++ctx.opGen; // виджет прогресса теперь принадлежит этой операции
+  installEmbedBtn.hidden = true;
+  docStatusEl.hidden = true; // на месте карточки — прогресс
+  pullCancelBtn.hidden = false;
+  pullCancelBtn.disabled = false;
+  showIndexProgress("Подготовка установки…", 0.02, ctx);
+
+  const outcome = await runPull("bge-m3", {
+    progress: (t, f) => {
+      if (myOp === ctx.opGen) showIndexProgress(t, f, ctx);
+    },
+    done: () => {
+      if (myOp === ctx.opGen) flashIndexLabel("Модель bge-m3 установлена", false, ctx);
+    },
+    cancelled: () => {
+      if (myOp === ctx.opGen)
+        flashIndexLabel(
+          "Установка отменена — можно докачать позже (Ollama продолжит с места)",
+          false,
+          ctx,
+        );
+    },
+    error: (m) => {
+      if (myOp === ctx.opGen) flashIndexLabel(m, true, ctx);
+    },
+  });
+
+  pullCancelBtn.hidden = true;
+  if (outcome === "done") {
+    // модель появилась — обновляем статус базы и список моделей без перезапуска
+    await refreshDocuments(ctx);
+    await loadModels();
+  } else if (!embeddingReady) {
+    // не установилась — вернуть карточку с кнопкой
+    docStatusEl.hidden = false;
+    installEmbedBtn.hidden = false;
+    installEmbedBtn.disabled = false;
+  }
+  return outcome;
 }
 
 // ── Левая панель: изменение ширины и сворачивание ────────────────────────────
@@ -1703,7 +1793,7 @@ async function applyModelsDir(dir: string, report: (t: string, err: boolean) => 
     else if (embeddingReady) report("Локальный каталог моделей применён", false);
     else report("Каталог применён, но bge-m3 в нём не найдена", true);
   } catch (e) {
-    report(String(e), true); // напр. «не похоже на каталог моделей Ollama»
+    report(humanError(e), true); // напр. «не похоже на каталог моделей Ollama»
   } finally {
     refreshEnginePaths();
   }
@@ -1780,11 +1870,6 @@ function modelsStatus(text: string, isError: boolean) {
   }
 }
 
-function fmtSize(bytes?: number): string {
-  if (!bytes) return "";
-  return ` · ${(bytes / 1024 / 1024 / 1024).toFixed(1)} ГБ`;
-}
-
 // Локальные состояния моделей набора (без сети) → отрисовка списка.
 async function loadModelStates() {
   try {
@@ -1792,7 +1877,7 @@ async function loadModelStates() {
     modelStates = res.models;
   } catch (e) {
     modelStates = [];
-    modelsStatus(`Не удалось получить список моделей: ${e}`, true);
+    modelsStatus(`Не удалось получить список моделей: ${humanError(e)}`, true);
   }
   renderModelList();
 }
@@ -1903,7 +1988,7 @@ function renderModelList() {
     }
     const tag = document.createElement("div");
     tag.className = "model-row__tag";
-    tag.textContent = `${m.tag}${fmtSize(m.size)}`;
+    tag.textContent = m.tag + (m.size ? ` · ${gb(m.size)}` : ""); // единый форматтер байтов
     info.append(title, tag);
 
     const badge = document.createElement("span");
@@ -1922,6 +2007,7 @@ function renderModelList() {
       btn.innerHTML = m.installed
         ? `${ICON_REFRESH_CW}Обновить`
         : `${ICON_DOWNLOAD}Установить`;
+      btn.disabled = pullingTag !== null; // во время активной установки — заблокировано
       btn.addEventListener("click", () => pullModelTag(m.tag, m.installed));
       row.appendChild(btn);
     }
@@ -1958,7 +2044,8 @@ async function checkModelUpdates() {
   }
 }
 
-// Установка/обновление модели онлайн (один pull тега) с прогрессом и отменой.
+// Установка/обновление модели онлайн — единый runPull с прогрессом в строке раздела.
+// «Установлено» и статус «актуальна» — ТОЛЬКО при честном done (не после отмены).
 async function pullModelTag(tag: string, isUpdate: boolean) {
   const verb = isUpdate ? "Обновление" : "Установка";
   modelProgressEl.hidden = false;
@@ -1967,28 +2054,28 @@ async function pullModelTag(tag: string, isUpdate: boolean) {
   modelProgressFill.style.width = "4%";
   modelProgressLabel.textContent = `${verb} ${tag}…`;
 
-  const onEvent = new Channel<PullEvent>();
-  onEvent.onmessage = (e) => {
-    if (e.type !== "progress") return;
-    const frac = e.total > 0 ? e.completed / e.total : 0;
-    modelProgressFill.style.width = `${Math.round(frac * 100)}%`;
-    const pct = e.total > 0 ? ` ${Math.round(frac * 100)}%` : "";
-    modelProgressLabel.textContent = `${verb} ${tag}: ${ruPullStatus(e.status)}${pct}`;
-  };
-  try {
-    await invoke("pull_model", { name: tag, onEvent });
-    modelProgressEl.hidden = true;
+  const outcome = await runPull(tag, {
+    progress: (t, f) => {
+      modelProgressFill.style.width = `${Math.max(4, Math.round(f * 100))}%`;
+      modelProgressLabel.textContent = `${verb} ${tag}: ${t}`;
+    },
+    done: () => modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, false),
+    cancelled: () =>
+      modelsStatus(
+        `${tag}: ${isUpdate ? "обновление отменено" : "установка отменена"} — докачка продолжится при повторе.`,
+        false,
+      ),
+    error: (m) => modelsStatus(`Не удалось ${isUpdate ? "обновить" : "установить"} ${tag}: ${m}`, true),
+  });
+
+  modelProgressEl.hidden = true;
+  modelPullCancelBtn.hidden = true;
+  if (outcome === "done") {
     updateByTag.set(tag, "current"); // только что подтянули — актуальна
     await loadModelStates();
     await loadModels(); // обновить выпадающий список моделей
     await refreshDocuments(sidebarDocCtx); // вдруг поставили bge-m3 — RAG ожил
     recomputeLastCheck(); // итог в кнопке — с учётом установленного/обновлённого
-    modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, false);
-  } catch (e) {
-    modelProgressEl.hidden = true;
-    modelsStatus(`Не удалось ${isUpdate ? "обновить" : "установить"} ${tag}: ${e}`, true);
-  } finally {
-    modelPullCancelBtn.hidden = true;
   }
 }
 
@@ -2574,7 +2661,7 @@ async function loadModels() {
     models = await invoke<ModelInfo[]>("list_models");
   } catch (err) {
     showModelHint("Ollama недоступна");
-    addError(`Не удалось получить список моделей: ${err}`);
+    addError(`Не удалось получить список моделей: ${humanError(err)}`);
     return;
   }
 
@@ -3040,7 +3127,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   modelPullCancelBtn = document.querySelector("#model-pull-cancel")!;
   checkUpdatesBtn.addEventListener("click", checkModelUpdates);
   installFromDiskBtn.addEventListener("click", installFromDiskForModels);
-  modelPullCancelBtn.addEventListener("click", () => invoke("cancel_pull").catch(() => {}));
+  modelPullCancelBtn.addEventListener("click", cancelActivePull);
   diagRunBtn = document.querySelector("#diag-run-btn")!;
   diagListEl = document.querySelector("#diag-list")!;
   diagRunBtn.addEventListener("click", runDiagnostics);
@@ -3087,6 +3174,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     labelEl: indexProgressLabel,
     addBtn: addDocBtn,
     flashTimer: null,
+    opGen: 0,
   };
   projectDocCtx = {
     projectId: null,
@@ -3096,6 +3184,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     labelEl: projectIndexProgressLabel,
     addBtn: projectAddDocBtn,
     flashTimer: null,
+    opGen: 0,
   };
 
   tabChatsBtn.addEventListener("click", () => switchTab("chats"));
@@ -3139,7 +3228,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   installEmbedBtn.addEventListener("click", installEmbeddingModel);
   installLocalBtn.addEventListener("click", installFromLocalDir);
-  pullCancelBtn.addEventListener("click", cancelPull);
+  pullCancelBtn.addEventListener("click", cancelActivePull);
   epSetModelsBtn.addEventListener("click", settingsPickModels);
   epSetEngineBtn.addEventListener("click", setEnginePathDialog);
   epResetBtn.addEventListener("click", resetEnginePaths);
