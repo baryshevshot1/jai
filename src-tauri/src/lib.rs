@@ -205,7 +205,7 @@ async fn stream_chat_response(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Ollama вернул ошибку {status}: {text}"));
+        return Err(ollama_chat_error(status, &text));
     }
 
     // Watchdog (S3): лёгкая задача следит за РОСТОМ свопа во время генерации (своп —
@@ -407,6 +407,40 @@ fn read_web_search_config(app: &tauri::AppHandle) -> tools::WebSearchConfig {
     }
 }
 
+/// Человеческое объяснение ошибки /api/chat. Ollama отвечает JSON {"error": "..."},
+/// причём текст бывает ЕЩЁ одним JSON от нового движка ({"error":{"message":…}}) —
+/// пользователь видел сырое месиво из кавычек. Разворачиваем до двух слоёв и
+/// переводим известные случаи на понятный язык.
+fn ollama_chat_error(status: reqwest::StatusCode, body: &str) -> String {
+    let mut msg = body.trim().to_string();
+    for _ in 0..2 {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg) else { break };
+        let Some(err) = v.get("error") else { break };
+        msg = match err {
+            serde_json::Value::String(s) => s.clone(),
+            other => other
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| other.to_string()),
+        };
+    }
+    if msg.contains("Failed to load image or audio file") {
+        return "Модель не смогла прочитать приложенное изображение. Попробуйте сохранить \
+                картинку в PNG или JPG и прикрепить снова."
+            .into();
+    }
+    if msg.contains("does not support images") {
+        return "Выбранная модель не работает с изображениями — установите модель зрения \
+                (например, qwen3-vl) в настройках."
+            .into();
+    }
+    if msg.is_empty() {
+        return format!("Ollama вернул ошибку {status}");
+    }
+    format!("Ollama вернул ошибку {status}: {msg}")
+}
+
 /// Агентный цикл tool calling вокруг чата. Делает «решающие» ходы к Ollama без
 /// стриминга (с массивом `tools`), исполняет инструменты в Rust, а ФИНАЛЬНЫЙ ответ
 /// стримит тем же механизмом, что и обычный чат (stream_chat_response). Уважает
@@ -462,7 +496,7 @@ async fn agentic_chat(
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Ollama вернул ошибку {status}: {text}"));
+            return Err(ollama_chat_error(status, &text));
         }
         let json: serde_json::Value =
             match with_cancel(resp.json::<serde_json::Value>(), &my_cancel).await {
@@ -1843,7 +1877,38 @@ fn read_image_base64(path: String) -> Result<String, String> {
             bytes.len() / 1024 / 1024
         ));
     }
+    let bytes = normalize_attached_image(bytes, &ext)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// Привести прикреплённое изображение к формату, который движок Ollama гарантированно
+/// прочитает. PNG/JPEG/GIF движок понимает — байты не трогаем (быстро и без потерь).
+/// WebP он НЕ умеет (llama.cpp/stb_image: «Failed to load image or audio file»),
+/// поэтому декодируем у себя и перекодируем: с прозрачностью → PNG, без — JPEG 85
+/// (PNG для фотографий раздувался бы в разы). Огромные кадры заодно ужимаем до
+/// 2048 px по длинной стороне: vision-модели всё равно приводят вход к ~1 Мп,
+/// а нам меньше гонять байтов в движок.
+fn normalize_attached_image(bytes: Vec<u8>, ext: &str) -> Result<Vec<u8>, String> {
+    if ext != "webp" {
+        return Ok(bytes);
+    }
+    let img = image::load_from_memory(&bytes)
+        .map_err(|_| "Не удалось прочитать WEBP-изображение (файл повреждён?)".to_string())?;
+    const MAX_SIDE: u32 = 2048;
+    let img = if img.width().max(img.height()) > MAX_SIDE {
+        img.resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    if img.color().has_alpha() {
+        img.write_to(&mut out, image::ImageFormat::Png)
+    } else {
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+        img.write_with_encoder(enc)
+    }
+    .map_err(|e| format!("Не удалось перекодировать изображение: {e}"))?;
+    Ok(out.into_inner())
 }
 
 /// Извлечение текста из файла. Переиспользуется индексацией базы (Фаза B3),
@@ -2598,7 +2663,57 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_verdict, parse_version};
+    use super::{fit_verdict, normalize_attached_image, ollama_chat_error, parse_version};
+
+    // 64×64 красный квадрат в WebP (сгенерирован cwebp) — фикстура конвертации.
+    const WEBP_B64: &str = "UklGRlAAAABXRUJQVlA4IEQAAADQAwCdASpAAEAAPpFIoEwlpCMiIggAsBIJaQB2AAAjPuOsAFeIUwAA/u5DH/6+AKeqP//pNn/BJ/8En8D39HhUCAAAAA==";
+
+    // WebP движок Ollama не понимает — normalize обязан вернуть JPEG/PNG,
+    // который снова декодируется (то есть движку он точно по зубам).
+    #[test]
+    fn webp_is_recoded_to_supported_format() {
+        use base64::Engine;
+        let webp = base64::engine::general_purpose::STANDARD.decode(WEBP_B64).unwrap();
+        let out = normalize_attached_image(webp, "webp").expect("конвертация webp");
+        assert!(!out.starts_with(b"RIFF"), "webp должен быть перекодирован");
+        assert!(
+            out.starts_with(&[0xFF, 0xD8]) || out.starts_with(b"\x89PNG"),
+            "ожидался JPEG или PNG, первые байты: {:?}",
+            &out[..4.min(out.len())]
+        );
+        image::load_from_memory(&out).expect("результат снова читается");
+    }
+
+    // PNG/JPEG/GIF движок читает сам — байты не трогаем (быстро, без потерь).
+    #[test]
+    fn non_webp_passes_through_untouched() {
+        let bytes = vec![1u8, 2, 3];
+        assert_eq!(normalize_attached_image(bytes.clone(), "png").unwrap(), bytes);
+        assert_eq!(normalize_attached_image(bytes.clone(), "gif").unwrap(), bytes);
+    }
+
+    #[test]
+    fn corrupt_webp_gives_friendly_error() {
+        let err = normalize_attached_image(vec![0u8; 10], "webp").unwrap_err();
+        assert!(err.contains("WEBP"), "{err}");
+    }
+
+    // Вложенный JSON-эрзац от нового движка разворачивается в человеческий текст.
+    #[test]
+    fn ollama_chat_error_unwraps_nested_json() {
+        let body = r#"{"error":"{\"error\":{\"code\":400,\"message\":\"Failed to load image or audio file\",\"type\":\"invalid_request_error\"}}"}"#;
+        let msg = ollama_chat_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert!(msg.contains("изображение"), "{msg}");
+        assert!(!msg.contains("Failed"), "сырой текст не должен доходить до пользователя: {msg}");
+
+        let msg =
+            ollama_chat_error(reqwest::StatusCode::NOT_FOUND, r#"{"error":"model not found"}"#);
+        assert_eq!(msg, "Ollama вернул ошибку 404 Not Found: model not found");
+
+        // Не-JSON тело показываем как есть (со статусом).
+        let msg = ollama_chat_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(msg.contains("boom"));
+    }
 
     // Вердикт «поместится ли»: без GPU — против RAM; с GPU — на RAM давит только
     // остаток сверх VRAM; зона «впритык» — в пределах MEM_SAFETY_GB.
