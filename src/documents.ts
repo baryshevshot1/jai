@@ -83,7 +83,7 @@ export async function refreshDocuments(ctx: DocCtx) {
     } else if (state.pullingTag === null) {
       docStatusEl.hidden = false;
       docStatusTextEl.textContent =
-        "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или укажите локальную поставку (каталог моделей Ollama) — без терминала.";
+        "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или импортируйте с флешки/диска (каталог моделей Ollama) — без терминала.";
       installEmbedBtn.hidden = false;
       installEmbedBtn.disabled = false;
       installEmbedBtn.textContent = "Скачать (~1.2 ГБ)";

@@ -112,6 +112,11 @@ export let projectIndexProgressLabel: HTMLElement;
 export let projectNewChatBtn: HTMLButtonElement;
 export let chatProjectChip: HTMLButtonElement;
 export let chatProjectChipName: HTMLElement;
+// Мастер установки (первый запуск).
+export let wizardView: HTMLElement;
+export let wizardCard: HTMLElement;
+export let wizardCloseBtn: HTMLButtonElement;
+export let openWizardBtn: HTMLButtonElement;
 
 // Заполнить все рефы (вызывается ПЕРВЫМ в DOMContentLoaded, до любой инициализации).
 export function initDom(): void {
@@ -221,4 +226,8 @@ export function initDom(): void {
   projectNewChatBtn = document.querySelector("#project-new-chat")!;
   chatProjectChip = document.querySelector("#chat-project-chip")!;
   chatProjectChipName = document.querySelector("#chat-project-chip-name")!;
+  wizardView = document.querySelector("#wizard-view")!;
+  wizardCard = document.querySelector("#wizard-card")!;
+  wizardCloseBtn = document.querySelector("#wizard-close")!;
+  openWizardBtn = document.querySelector("#open-wizard-btn")!;
 }

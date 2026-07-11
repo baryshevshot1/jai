@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Jarvis AI — установка с флешки</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 720px;
+         margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #1c1a17; }
+  h1 { font-size: 1.5rem; } h2 { font-size: 1.1rem; margin-top: 28px; }
+  code { background: #f1eee8; padding: 2px 6px; border-radius: 6px; }
+  .step { margin: 8px 0; }
+  .note { background: #ebf1fd; border-radius: 10px; padding: 12px 16px; margin: 16px 0; }
+  .warn { background: #fdf3e7; border-radius: 10px; padding: 12px 16px; margin: 16px 0; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #191714; color: #eae6df; }
+    code { background: #2a2723; }
+    .note { background: #1e293c; } .warn { background: #3a2f1e; }
+  }
+</style>
+</head>
+<body>
+<h1>Jarvis AI — установка с этой флешки</h1>
+<p>Jarvis AI — ИИ-ассистент, который работает <b>полностью на вашем компьютере</b>,
+без интернета: данные не покидают ПК. На флешке — всё нужное: приложение,
+движок и модели.</p>
+
+<h2>Windows 10/11</h2>
+<div class="step">1. Откройте папку <code>Windows</code> и запустите <code>Установить.bat</code>.</div>
+<div class="step">2. Если появится синее окно «Система Windows защитила ваш компьютер» —
+нажмите <b>«Подробнее» → «Выполнить в любом случае»</b> (сборка без платной подписи кода — это ожидаемо).</div>
+<div class="step">3. После установки запустите <b>Jarvis AI</b> из меню «Пуск».</div>
+
+<h2>Linux (Ubuntu и совместимые)</h2>
+<div class="step">1. Откройте терминал в папке <code>Linux</code> этой флешки.</div>
+<div class="step">2. Выполните: <code>bash install.sh</code> (спросит пароль sudo).</div>
+<div class="step">3. Запустите <b>Jarvis AI</b> из меню приложений.</div>
+
+<h2>macOS (Apple Silicon)</h2>
+<div class="step">1. Откройте папку <code>macOS</code>, перетащите Jarvis AI в «Программы».</div>
+<div class="step">2. Первый запуск — правый клик по приложению → «Открыть» → «Открыть».</div>
+<div class="step">3. Движок: установите Ollama с <code>ollama.com/download/mac</code>.</div>
+
+<div class="note"><b>Первый запуск.</b> Приложение само откроет «Мастер установки»:
+покажет, что за компьютер перед ним, предложит модели, которые он потянет,
+и <b>само найдёт папку <code>models</code> на этой флешке</b> — останется нажать
+«Установить выбранные». После импорта флешку можно извлечь: всё работает с диска,
+без интернета.</div>
+
+<div class="warn"><b>Если что-то не так.</b> В приложении откройте
+«Настройки → Проверка системы» — там видно состояние движка, моделей, базы и
+железа. Мастер установки всегда доступен из «Настройки → Модели → Мастер
+установки…».</div>
+
+<p style="color:#8a857c; font-size:.9em">Флешка подготовлена скриптом
+<code>tools/make-usb.sh</code> из репозитория проекта. Файловая система флешки —
+exFAT (файлы моделей крупнее 4 ГБ).</p>
+</body>
+</html>

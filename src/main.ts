@@ -33,6 +33,7 @@ import { initConversations, wireConversations } from "./conversations";
 import { refreshProjects, wireProjects } from "./projects";
 import { initSidebar, initTheme, initThinking, wireSettings } from "./settings";
 import { initOnline } from "./online";
+import { maybeOfferWizard, wireWizard } from "./wizard";
 
 window.addEventListener("DOMContentLoaded", async () => {
   initDom(); // реестр элементов — строго первым
@@ -46,6 +47,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   wireConversations();
   wireProjects();
   wireSettings();
+  wireWizard();
   // Композиция поверх слоёв: documents не импортирует models, поэтому обновление
   // списка моделей после успешной установки bge-m3 делает точка сборки.
   installEmbedBtn.addEventListener("click", async () => {
@@ -71,4 +73,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     refreshDocuments(sidebarDocCtx); // общая база (вне проектов) + статус модели эмбеддингов
     refreshCurrentDocsCount(); // есть ли документы у открытого чата (для RAG)
   }
+  // Первый запуск: обязательных моделей нет → мастер установки (оценит машину,
+  // предложит посильный набор, поставит с флешки или из интернета). Сам молчит,
+  // если движок недоступен — тогда мастер открывается кнопкой из настроек.
+  maybeOfferWizard();
 });
