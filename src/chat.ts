@@ -33,10 +33,12 @@ import {
   addBubble,
   addError,
   addNotice,
+  addTurnActions,
   renderMarkdownInto,
   renderSources,
   renderWebSources,
   scrollToBottom,
+  setRetryHandler,
   setStreaming,
   stop,
 } from "./ui";
@@ -185,6 +187,27 @@ export async function send() {
   addBubble("user", text, doc, undefined, images);
   persist(); // вопрос (с файлом/картинкой) сохраняется сразу
   state.autoScroll = true; // при отправке снова следуем за ответом
+  await generate();
+}
+
+// «Повторить»: убрать последний ответ ассистента из истории и ленты и сгенерировать
+// заново на тот же вопрос (с текущими моделью/настройками — можно сменить и повторить).
+export function regenerate() {
+  if (state.streaming || !state.selectedModel) return;
+  if (history[history.length - 1]?.role !== "assistant") return;
+  history.pop();
+  persist();
+  const turns = messagesEl.querySelectorAll(".turn.ai");
+  turns[turns.length - 1]?.remove();
+  state.autoScroll = true;
+  void generate();
+}
+
+// Генерация ответа на ПОСЛЕДНИЙ вопрос истории: RAG-поиск, бюджет контекста, оценка
+// памяти, стрим (офлайн или агентный). Общий путь send() и regenerate().
+async function generate() {
+  // Запрос для поиска по базе — текст последнего вопроса пользователя (без документа).
+  const queryText = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
 
   const myGen = ++state.generation;
   setStreaming(true);
@@ -336,6 +359,7 @@ export async function send() {
       renderAnswer(answer);
       if (sources.length) renderSources(ui.turn, sources);
       if (webSources.length) renderWebSources(ui.turn, webSources);
+      addTurnActions(ui.turn, answer); // частичный ответ тоже можно скопировать/повторить
       history.push({
         role: "assistant",
         content: answer,
@@ -353,7 +377,7 @@ export async function send() {
     try {
       // Поиск в базе ПРОЕКТА открытого чата (или общей, вне проектов — currentProjectId=null).
       const retrieved = await invoke<RetrievedChunk[]>("search_documents", {
-        query: text,
+        query: queryText,
         k: RAG_TOP_K,
         projectId: state.currentProjectId,
       });
@@ -488,6 +512,7 @@ export async function send() {
         renderAnswer(answer); // финальное форматирование один раз
         if (sources.length) renderSources(ui.turn, sources); // из каких документов взято
         if (webSources.length) renderWebSources(ui.turn, webSources); // из интернета
+        addTurnActions(ui.turn, answer); // «Копировать» / «Повторить»
         history.push({
           role: "assistant",
           content: answer,
@@ -535,6 +560,7 @@ export function autoGrow() {
 // Обработчики композера и ленты: отправка, «Стоп», OCR, копирование кода,
 // авто-прокрутка, чипы пустого состояния.
 export function wireChat() {
+  setRetryHandler(regenerate); // кнопка «Повторить» под ответами (ui.ts — без циклов)
   composerWrapEl.addEventListener("submit", (e) => {
     e.preventDefault();
     send();
