@@ -20,6 +20,7 @@ import {
   newProjectBtn,
   settingsBtn,
   settingsView,
+  wizardView,
 } from "./dom";
 import { humanError } from "./util";
 import { addError, confirmModal, promptModal, stop } from "./ui";
@@ -109,11 +110,12 @@ export function openProjectView(id: string) {
   if (!proj) return;
   if (state.streaming) stop();
   state.viewingProjectId = id;
-  // Прячем ленту/композер и настройки, показываем экран проекта (как настройки).
+  // Прячем ленту/композер, настройки и мастер, показываем экран проекта.
   feedEl.hidden = true;
   composerWrapEl.hidden = true;
   settingsView.hidden = true;
   settingsBtn.classList.remove("active");
+  wizardView.hidden = true;
   projectView.hidden = false;
 
   projectNameInput.value = proj.name;

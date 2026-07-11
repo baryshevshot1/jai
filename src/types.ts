@@ -135,6 +135,27 @@ export interface HardwareInfo {
   tier: "green" | "yellow" | "red";
 }
 
+// Оценка модели набора против текущего железа — ДО установки (assess_models).
+export interface ModelAssessment {
+  tag: string;
+  role: string;
+  title: string;
+  required: boolean;
+  installed: boolean;
+  size_gb: number; // фактический размер (установлена) либо приблизительный
+  approx: boolean; // размер приблизительный (модель ещё не установлена)
+  verdict: "ok" | "tight" | "no"; // потянет ли машина
+  limiting: string; // "ram" | "vram"
+}
+
+// Найденный носитель с каталогом моделей Ollama (find_model_sources).
+export interface ModelSource {
+  path: string;
+  removable: boolean;
+  models: number;
+  total_gb: number;
+}
+
 // Итог одной проверки диагностики (run_diagnostics).
 export interface DiagCheck {
   id: string;

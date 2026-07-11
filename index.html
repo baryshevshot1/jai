@@ -226,6 +226,7 @@
 
               <div class="settings-card__actions">
                 <button type="button" class="ep-btn ep-btn--ghost" id="install-from-disk-btn">Импорт с флешки/диска…</button>
+                <button type="button" class="ep-btn ep-btn--ghost" id="open-wizard-btn">Мастер установки…</button>
               </div>
 
               <div class="settings-status" id="models-status" hidden></div>
@@ -367,6 +368,20 @@
         </section>
 
         <!-- Полноэкранная страница проекта (на месте ленты): чаты + знания проекта -->
+        <!-- Мастер установки (первый запуск): оценка машины → посильные модели → источник.
+             Содержимое карточки строит wizard.ts; каркас и стили — как у настроек. -->
+        <section class="settings-view" id="wizard-view" hidden>
+          <div class="settings-head">
+            <button type="button" class="iconbtn" id="wizard-close" title="Закрыть (мастер доступен из настроек)" aria-label="Закрыть">
+              <svg viewBox="0 0 24 24"><path d="M19 12H5" /><path d="M12 19l-7-7 7-7" /></svg>
+            </button>
+            <span class="settings-head__title">Мастер установки</span>
+          </div>
+          <div class="settings-body">
+            <section class="settings-card" id="wizard-card"></section>
+          </div>
+        </section>
+
         <section class="settings-view project-view" id="project-view" hidden>
           <div class="settings-head">
             <button type="button" class="iconbtn" id="project-back" title="Назад" aria-label="Назад">

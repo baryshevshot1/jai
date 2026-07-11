@@ -18,6 +18,7 @@ import {
   settingsBtn,
   settingsView,
   stopBtn,
+  wizardView,
 } from "./dom";
 import { docSubline, fileFormat, imageDataUrl } from "./util";
 
@@ -229,6 +230,7 @@ export function showChatView() {
   settingsBtn.classList.remove("active");
   modelsStatusEl.hidden = true;
   projectView.hidden = true;
+  wizardView.hidden = true;
   state.viewingProjectId = null;
   projectListEl.querySelectorAll(".project.active").forEach((el) => el.classList.remove("active"));
   feedEl.hidden = false;

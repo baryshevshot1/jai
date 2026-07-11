@@ -46,6 +46,7 @@ import {
   themeBtn,
   themeIconEl,
   thinkToggleEl,
+  wizardView,
 } from "./dom";
 import { humanError, ICON_REFRESH_CW } from "./util";
 import { confirmModal, showChatView } from "./ui";
@@ -65,6 +66,7 @@ import { runImport } from "./pull";
 // Открыть настройки: лента и поле ввода скрываются, страница занимает их место.
 function openSettings() {
   if (!projectView.hidden) closeProjectView(); // настройки и экран проекта взаимоисключаемы
+  wizardView.hidden = true; // как и мастер установки
   feedEl.hidden = true;
   composerWrapEl.hidden = true;
   settingsView.hidden = false;
