@@ -28,7 +28,14 @@ import {
   sidebarDocCtx,
   wireDocuments,
 } from "./documents";
-import { checkOllama, ensureEngine, loadHardware, loadModels, wireModels } from "./models";
+import {
+  checkOllama,
+  ensureEngine,
+  initModelChoice,
+  loadHardware,
+  loadModels,
+  wireModels,
+} from "./models";
 import { initConversations, wireConversations } from "./conversations";
 import { refreshProjects, wireProjects } from "./projects";
 import { initGentle, initSidebar, initTheme, initThinking, wireSettings } from "./settings";
@@ -57,19 +64,23 @@ window.addEventListener("DOMContentLoaded", async () => {
   initTheme(); // применяем сохранённую/системную тему как можно раньше
   initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
   await initGentle(); // щадящий режим — ДО светофора железа (авто-решение учитывает выбор)
+  await initModelChoice(); // «Автоматически» или ручной выбор — ДО подбора модели ниже
   initOnline(); // восстанавливаем онлайн-режим и настройки веб-поиска (по умолчанию офлайн)
   initSidebar(); // восстанавливаем ширину и состояние левой панели
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
   await refreshProjects(); // список проектов в боковой панели
   await initConversations(); // сначала восстановим диалоги в ленту
-  loadHardware(); // неблокирующе: светофор железа (локально, без движка)
+  // Светофор железа — параллельно с движком (не блокирует его запуск), но его результат
+  // нужен ДО подбора модели: уровень решает, брать старшую модель или лёгкую.
+  const hwReady = loadHardware();
   // Сначала обеспечиваем движок (поднимаем свой или переиспользуем системный), затем
   // уже опираемся на него. Если не готов — статус выставлен, движок-зависимые шаги
-  // пропускаем (пользователь может повторить кнопкой «Проверка»).
+  // пропускаем (пользователь может повторить кнопкой обновления в шапке).
   const engineReady = await ensureEngine();
   if (engineReady) {
     checkOllama(); // покажет версию Ollama в шапке
+    await hwReady; // уровень железа известен → авто-выбор модели сразу верный, без «скачка»
     loadModels();
     refreshDocuments(sidebarDocCtx); // общая база (вне проектов) + статус модели эмбеддингов
     refreshCurrentDocsCount(); // есть ли документы у открытого чата (для RAG)

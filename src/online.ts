@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type { OutboundLogEntry } from "./types";
 import { state } from "./state";
 import {
-  onlineBadgeEl,
   onlineMasterToggleEl,
   onlineStateTextEl,
   onlineStatusEl,
@@ -18,13 +17,17 @@ import {
   wsUrlEl,
 } from "./dom";
 
-// Применяет состояние онлайн-режима ко всему UI: тумблер в композере, индикатор в
-// шапке (виден только в онлайне — в офлайне обычная работа), подпись и кнопка в
-// настройках. `persist` — записать выбор в settings.json (по умолчанию да).
+// Применяет состояние онлайн-режима ко всему UI: тумблер в композере (он и есть
+// индикатор — во включённом состоянии подсвечен), подпись и кнопка в настройках.
+// Что именно ушло наружу, видно по источникам под ответом и в журнале обращений.
+// `persist` — записать выбор в settings.json (по умолчанию да).
 function setOnlineMode(on: boolean, persist = true) {
   state.onlineMode = on;
   onlineToggleEl.classList.toggle("on", on);
-  onlineBadgeEl.hidden = !on; // индикатор «данные могут уходить наружу» только в онлайне
+  onlineToggleEl.title = on
+    ? "Онлайн-режим включён: при поиске текст запроса уходит на внешний поисковый сервер, " +
+      "при чтении страницы открывается указанный сайт. Нажмите, чтобы вернуться в офлайн."
+    : "Онлайн-режим выключен — работа полностью офлайн. Нажмите, чтобы разрешить поиск в интернете.";
   onlineStateTextEl.textContent = on ? "включён" : "выключен";
   onlineMasterToggleEl.textContent = on ? "Выключить" : "Включить";
   if (persist) {

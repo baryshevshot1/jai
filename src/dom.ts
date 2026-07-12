@@ -10,10 +10,12 @@ export let emptyStateEl: HTMLElement;
 export let inputEl: HTMLTextAreaElement;
 export let sendBtn: HTMLButtonElement;
 export let stopBtn: HTMLButtonElement;
-export let modelSelectEl: HTMLSelectElement;
 export let statusEl: HTMLElement;
 export let engineEl: HTMLElement;
+export let engineMetaEl: HTMLElement; // «Ollama <версия>» — видна, только когда движок ответил
+export let engineVersionEl: HTMLElement;
 export let refreshBtn: HTMLButtonElement;
+export let brandHomeBtn: HTMLButtonElement; // бренд в шапке = кнопка «на главную»
 export let hwBarEl: HTMLElement;
 export let hwWordEl: HTMLElement;
 export let hwSpecsEl: HTMLElement;
@@ -22,9 +24,10 @@ export let hwModelNameEl: HTMLElement;
 export let convListEl: HTMLElement;
 export let newChatBtn: HTMLButtonElement;
 export let thinkToggleEl: HTMLButtonElement;
-// Онлайн-режим (агентный): тумблер в композере, индикатор в шапке, поля и журнал в настройках.
+// Онлайн-режим (агентный): тумблер в композере, поля и журнал в настройках.
+// Отдельного индикатора в шапке нет — состояние видно по самому тумблеру,
+// по источникам под ответом и по журналу обращений в настройках.
 export let onlineToggleEl: HTMLButtonElement;
-export let onlineBadgeEl: HTMLElement;
 export let onlineStateTextEl: HTMLElement;
 export let onlineMasterToggleEl: HTMLButtonElement;
 export let wsProviderEl: HTMLInputElement;
@@ -71,6 +74,9 @@ export let epSetEngineBtn: HTMLButtonElement;
 export let epResetBtn: HTMLButtonElement;
 export let settingsStatusEl: HTMLElement;
 export let modelListEl: HTMLElement;
+// Ручной выбор модели (настройки): «Автоматически» либо конкретная установленная.
+export let modelChoiceEl: HTMLSelectElement;
+export let modelChoiceStateEl: HTMLElement;
 export let checkUpdatesBtn: HTMLButtonElement;
 export let installFromDiskBtn: HTMLButtonElement;
 export let modelsStatusEl: HTMLElement;
@@ -80,6 +86,7 @@ export let modelProgressLabel: HTMLElement;
 export let modelPullCancelBtn: HTMLButtonElement;
 export let diagRunBtn: HTMLButtonElement;
 export let diagListEl: HTMLElement;
+export let diagSummaryEl: HTMLElement;
 export let appUpdateCheckBtn: HTMLButtonElement;
 export let appUpdateDiskBtn: HTMLButtonElement;
 export let appUpdateInfoEl: HTMLElement;
@@ -123,10 +130,12 @@ export function initDom(): void {
   inputEl = document.querySelector("#chat-input")!;
   sendBtn = document.querySelector("#send-btn")!;
   stopBtn = document.querySelector("#stop-btn")!;
-  modelSelectEl = document.querySelector("#model-select")!;
   statusEl = document.querySelector("#status")!;
   engineEl = document.querySelector("#engine")!;
+  engineMetaEl = document.querySelector("#engine-meta")!;
+  engineVersionEl = document.querySelector("#engine-version")!;
   refreshBtn = document.querySelector("#refresh-btn")!;
+  brandHomeBtn = document.querySelector("#brand-home")!;
   hwBarEl = document.querySelector("#hw-bar")!;
   hwWordEl = document.querySelector("#hw-word")!;
   hwSpecsEl = document.querySelector("#hw-specs")!;
@@ -136,7 +145,6 @@ export function initDom(): void {
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
   onlineToggleEl = document.querySelector("#online-toggle")!;
-  onlineBadgeEl = document.querySelector("#online-badge")!;
   onlineStateTextEl = document.querySelector("#online-state-text")!;
   onlineMasterToggleEl = document.querySelector("#online-master-toggle")!;
   wsProviderEl = document.querySelector("#ws-provider")!;
@@ -183,6 +191,8 @@ export function initDom(): void {
   epResetBtn = document.querySelector("#ep-reset")!;
   settingsStatusEl = document.querySelector("#settings-status")!;
   modelListEl = document.querySelector("#model-list")!;
+  modelChoiceEl = document.querySelector("#model-choice")!;
+  modelChoiceStateEl = document.querySelector("#model-choice-state")!;
   checkUpdatesBtn = document.querySelector("#check-updates-btn")!;
   installFromDiskBtn = document.querySelector("#install-from-disk-btn")!;
   modelsStatusEl = document.querySelector("#models-status")!;
@@ -192,6 +202,7 @@ export function initDom(): void {
   modelPullCancelBtn = document.querySelector("#model-pull-cancel")!;
   diagRunBtn = document.querySelector("#diag-run-btn")!;
   diagListEl = document.querySelector("#diag-list")!;
+  diagSummaryEl = document.querySelector("#diag-summary")!;
   appUpdateCheckBtn = document.querySelector("#app-update-check")!;
   appUpdateDiskBtn = document.querySelector("#app-update-disk")!;
   appUpdateInfoEl = document.querySelector("#app-update-info")!;

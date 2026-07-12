@@ -26,7 +26,7 @@ import {
   refreshEmptyState,
   scrollToBottom,
 } from "./ui";
-import { loadModels } from "./models";
+import { loadModels, pickVisionModel } from "./models";
 import { cancelActivePull, runPull } from "./pull";
 
 // Прикреплённый документ (Фаза A). text уже усечён под бюджет контекста
@@ -131,13 +131,6 @@ export function clearPendingImage() {
   imgChipThumb.removeAttribute("src");
 }
 
-// Есть ли среди установленных моделей хоть одна с поддержкой зрения.
-// Экспорт: chat.ts маршрутизирует ходы с изображениями на эту модель (авто-модель).
-export function anyVisionModel(): string | null {
-  for (const [name, vision] of visionByModel) if (vision) return name;
-  return null;
-}
-
 // «Прикрепить изображение»: диалог → чтение base64 в Rust → превью + гейт vision-модели.
 async function attachImage() {
   let path: string | null;
@@ -172,25 +165,24 @@ function removeImage() {
 }
 
 // Гейт зрения при прикреплении: проверяем, что картинку есть кому «увидеть».
-// Выбор пользователя в шапке НЕ трогаем — ход с изображением сам выполнится на
-// vision-модели (авто-модель, chat.ts), а следующий текстовый вопрос вернётся к
-// выбранной модели. Нет ни одной vision-модели — предлагаем установить qwen3-vl.
+// Сам ход с изображением уйдёт на модель зрения автоматически (chat.ts), а
+// следующий обычный вопрос так же автоматически вернётся к текстовой модели —
+// переключать ничего не нужно. Нет ни одной модели зрения — предлагаем установить.
 export function ensureVisionModel() {
   if (visionByModel.get(state.selectedModel)) return; // текущая модель видит изображения
-  const vis = anyVisionModel();
-  if (vis) {
-    addNotice(
-      `Изображение прикреплено — на вопросы с ним ответит модель зрения «${vis}» ` +
-        `(выбранная модель в шапке не меняется).`,
-    );
+  if (pickVisionModel()) {
+    addNotice("Изображение прикреплено — на вопросы с ним ответит модель зрения.");
   } else {
     offerInstallVision();
   }
 }
 
-// Нет vision-модели → предложить установить qwen3-vl через единый runPull.
-// Лёгкий документированный вариант (см. CLAUDE.md и набор моделей на странице настроек).
-const VISION_MODEL = "qwen3-vl:4b"; // лёгкий вариант для зрения/OCR
+// Нет модели зрения → предложить установить qwen3-vl через единый runPull.
+// Ставим ЛЁГКИЙ вариант независимо от «светофора»: уровень green даётся уже за 16 ГБ ОЗУ
+// (VRAM может быть всего 6 ГБ), а 8B на 6 ГБ видеопамяти — впритык (CLAUDE.md). Навязывать
+// лишние 3 ГБ загрузки ради зрения не стоит. Старшую модель приложение всё равно возьмёт,
+// если пользователь поставил её сам из настроек (см. bestOfRole в models.ts).
+const VISION_MODEL = "qwen3-vl:4b";
 
 async function offerInstallVision() {
   if (state.pullingTag) {
@@ -203,8 +195,8 @@ async function offerInstallVision() {
   );
   if (!ok) {
     addNotice(
-      "Чтобы работать с изображениями, установите vision-модель (например, qwen3-vl) — " +
-        "онлайн или с диска (настройки → «Модели» → «Импорт с флешки/диска»).",
+      "Чтобы работать с изображениями, установите модель зрения (qwen3-vl) — " +
+        "онлайн или с диска: Настройки → «Модели».",
     );
     return;
   }

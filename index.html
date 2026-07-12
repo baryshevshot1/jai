@@ -73,25 +73,29 @@
           <button type="button" class="iconbtn" id="sidebar-toggle" title="Скрыть/показать панель" aria-label="Скрыть или показать панель">
             <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" /></svg>
           </button>
-          <span class="brand">
-            <span class="brand-logo" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z" /></svg>
+          <!-- Бренд — он же «домой»: из настроек, проекта или мастера возвращает к чату. -->
+          <button type="button" class="brand" id="brand-home" title="На главную — к чату" aria-label="На главную — к чату">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M14.4 2 6.4 13.4h5.2L9.6 22l8-11.4h-5.2z" /></svg>
             </span>
             <span class="brand-name">Jarvis<span class="brand-ai">AI</span></span>
-          </span>
+          </button>
+          <div class="divider-v"></div>
           <button type="button" class="chat-project-chip" id="chat-project-chip" hidden title="Открыть проект этого чата">
             <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             <span id="chat-project-chip-name"></span>
           </button>
-          <select class="model-pick" id="model-select" aria-label="Выбор модели"></select>
-          <div class="online-badge" id="online-badge" hidden title="Онлайн-режим включён. При веб-поиске текст запроса уходит на внешний поисковый сервер, при чтении страницы открывается указанный сайт. Выключите тумблер «Онлайн» в строке ввода, чтобы работать полностью офлайн.">
-            <span class="online-badge__dot"></span>
-            <span class="online-badge__text">Онлайн · данные могут уходить наружу</span>
-          </div>
           <div class="spacer"></div>
+          <!-- Состояние движка: живой индикатор + человеческое состояние + тихая
+               техническая подпись «на чём работает» (движок и его версия). -->
           <div class="engine" id="engine">
             <span class="led"></span>
-            <span id="status">проверка движка…</span>
+            <span class="engine__state" id="status">проверка движка…</span>
+            <span class="engine__meta" id="engine-meta" hidden>
+              <span class="engine__sep"></span>
+              <span class="engine__name">Ollama</span>
+              <span class="engine__ver" id="engine-version"></span>
+            </span>
           </div>
           <button type="button" class="iconbtn" id="refresh-btn" title="Перепроверить движок, железо и список моделей" aria-label="Обновить">
             <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
@@ -108,8 +112,8 @@
         <div class="feed" id="feed">
           <div class="thread" id="messages"></div>
           <div class="empty-state" id="empty-state" hidden>
-            <div class="empty-state__logo" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z" /></svg>
+            <div class="brand-mark brand-mark--xl" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M14.4 2 6.4 13.4h5.2L9.6 22l8-11.4h-5.2z" /></svg>
             </div>
             <div class="empty-state__title">Чем помочь?</div>
             <div class="empty-state__hint">
@@ -181,7 +185,23 @@
                   Проверить обновления
                 </button>
               </div>
-              <p class="settings-card__desc models-desc">Состояние, установка и обновление — онлайн или с диска.</p>
+              <p class="settings-card__desc models-desc">
+                Модель приложение подбирает само: обычный вопрос — текстовая модель,
+                вопрос с картинкой — модель зрения, а если машине не хватает памяти —
+                более лёгкая. Менять вручную не нужно; ниже — состояние набора,
+                установка и обновление (онлайн или с диска).
+              </p>
+
+              <div class="settings-field settings-field--first">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="12" rx="3" /><path d="M12 3v4M9 13h.01M15 13h.01M9.5 16.5h5" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Модель для ответов</div>
+                  <div class="settings-field__value" id="model-choice-state">…</div>
+                </div>
+                <select class="ep-select" id="model-choice" aria-label="Модель для ответов"></select>
+              </div>
 
               <div class="model-list" id="model-list"></div>
 
@@ -201,13 +221,12 @@
 
             <section class="settings-card">
               <div class="settings-card__head">
-                <h2 class="settings-card__title">Движок и модели</h2>
+                <h2 class="settings-card__title">Движок и производительность</h2>
                 <p class="settings-card__desc">
                   Щадящий режим бережёт слабые компьютеры: нейросеть занимает только половину
                   ядер процессора — ответы медленнее, зато машина не перегревается (на слабом
-                  железе режим включается сам). Ниже — офлайн-поставка: укажите предзагруженный
-                  каталог моделей Ollama и, при необходимости, путь к движку; пути сохраняются
-                  и применяются при запуске.
+                  железе режим включается сам). Пути ниже нужны только для установки без
+                  интернета — когда модели и движок уже лежат на диске. Обычно их трогать не надо.
                 </p>
               </div>
 
@@ -288,8 +307,9 @@
                   По умолчанию приложение работает полностью офлайн — данные не покидают компьютер.
                   Онлайн-режим разрешает модели два инструмента: «веб-поиск» (текст поискового запроса
                   уходит на внешний поисковый сервер) и «чтение страницы» (открывается сайт по https-ссылке —
-                  из вопроса или из результатов поиска). Включается только вручную. Пока он активен,
-                  в шапке виден индикатор, а каждое обращение наружу попадает в журнал ниже.
+                  из вопроса или из результатов поиска). Включается только вручную — тумблером «Онлайн»
+                  в строке ввода; пока он активен, на нём горит точка. Что нашлось в интернете, видно
+                  ссылками под ответом, а каждое обращение наружу попадает в журнал ниже.
                 </p>
               </div>
 
@@ -349,6 +369,7 @@
               </p>
 
               <div class="model-list" id="diag-list"></div>
+              <div class="diag-summary" id="diag-summary" hidden></div>
             </section>
 
             <section class="settings-card">
