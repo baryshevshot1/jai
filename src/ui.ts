@@ -379,13 +379,33 @@ export function renderWebSources(turn: HTMLElement, items: WebSource[]) {
 
 // ── Модальные окна (нативные confirm()/prompt() в Tauri-окне не работают) ─────
 
+// Ловушка фокуса модального окна: Tab/Shift+Tab ходят по элементам окна по кругу,
+// не убегая на фон (стандарт доступности диалогов, aria-modal сам фокус не держит).
+function trapTab(e: KeyboardEvent, overlay: HTMLElement) {
+  if (e.key !== "Tab") return;
+  const items = [...overlay.querySelectorAll<HTMLElement>("button, input")];
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  const inside = active instanceof HTMLElement && overlay.contains(active);
+  if (e.shiftKey && (active === first || !inside)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (active === last || !inside)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 // Своё модальное подтверждение.
 export function confirmModal(message: string, okLabel = "Удалить"): Promise<boolean> {
   return new Promise((resolve) => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
     overlay.innerHTML = `
-      <div class="modal">
+      <div class="modal" role="dialog" aria-modal="true">
         <div class="modal__text"></div>
         <div class="modal__actions">
           <button class="modal__btn" data-act="cancel">Отмена</button>
@@ -399,11 +419,13 @@ export function confirmModal(message: string, okLabel = "Удалить"): Promi
     const close = (result: boolean) => {
       overlay.remove();
       document.removeEventListener("keydown", onKey);
+      opener?.focus(); // фокус возвращается туда, откуда открыли (доступность)
       resolve(result);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close(false);
       else if (e.key === "Enter") close(true);
+      else trapTab(e, overlay);
     };
     overlay.addEventListener("click", (e) => {
       const t = e.target as HTMLElement;
@@ -418,10 +440,11 @@ export function confirmModal(message: string, okLabel = "Удалить"): Promi
 // Модальный ввод строки. Возвращает введённую строку или null при отмене.
 export function promptModal(title: string, placeholder = ""): Promise<string | null> {
   return new Promise((resolve) => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
     overlay.innerHTML = `
-      <div class="modal">
+      <div class="modal" role="dialog" aria-modal="true">
         <div class="modal__text"></div>
         <input class="modal__input" type="text" />
         <div class="modal__actions">
@@ -437,11 +460,13 @@ export function promptModal(title: string, placeholder = ""): Promise<string | n
     const close = (result: string | null) => {
       overlay.remove();
       document.removeEventListener("keydown", onKey);
+      opener?.focus(); // фокус возвращается туда, откуда открыли (доступность)
       resolve(result);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close(null);
       else if (e.key === "Enter") close(input.value);
+      else trapTab(e, overlay);
     };
     overlay.addEventListener("click", (e) => {
       const t = e.target as HTMLElement;

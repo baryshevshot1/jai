@@ -22,7 +22,7 @@ import {
   settingsView,
   wizardView,
 } from "./dom";
-import { humanError } from "./util";
+import { humanError, makePressable } from "./util";
 import { addError, confirmModal, promptModal, stop } from "./ui";
 import { addDocument, projectDocCtx, refreshDocuments } from "./documents";
 import {
@@ -65,6 +65,7 @@ function renderProjectList() {
     item.appendChild(name);
 
     item.addEventListener("click", () => openProjectView(p.id));
+    makePressable(item); // открывается и с клавиатуры (Tab + Enter)
     projectListEl.appendChild(item);
   }
 }

@@ -267,7 +267,7 @@ function renderModelList() {
     const needsAction = !m.installed || upd === "update";
     if (needsAction) {
       const btn = document.createElement("button");
-      btn.className = "ep-btn ep-btn--icon";
+      btn.className = "ep-btn ep-btn--icon ep-btn--primary"; // главное действие — акцентом
       btn.innerHTML = m.installed
         ? `${ICON_REFRESH_CW}Обновить`
         : `${ICON_DOWNLOAD}Установить`;

@@ -107,7 +107,7 @@ async function renderSetupScreen() {
   wizardCard.appendChild(srcRefresh);
 
   const actions = el("div", "wizard-actions");
-  const installBtn = el("button", "ep-btn", "Установить выбранные");
+  const installBtn = el("button", "ep-btn ep-btn--primary", "Установить выбранные");
   installBtn.type = "button";
   const laterBtn = el("button", "ep-btn ep-btn--ghost", "Позже");
   laterBtn.type = "button";
@@ -353,7 +353,7 @@ async function renderInstallScreen(
 
   for (const n of notes) wizardCard.appendChild(el("div", "wizard-note", n));
   const actions = el("div", "wizard-actions");
-  const doneBtn = el("button", "ep-btn", "Начать работу");
+  const doneBtn = el("button", "ep-btn ep-btn--primary", "Начать работу");
   doneBtn.type = "button";
   doneBtn.addEventListener("click", closeWizard);
   actions.appendChild(doneBtn);
