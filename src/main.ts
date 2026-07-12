@@ -31,7 +31,7 @@ import {
 import { checkOllama, ensureEngine, loadHardware, loadModels, wireModels } from "./models";
 import { initConversations, wireConversations } from "./conversations";
 import { refreshProjects, wireProjects } from "./projects";
-import { initSidebar, initTheme, initThinking, wireSettings } from "./settings";
+import { initGentle, initSidebar, initTheme, initThinking, wireSettings } from "./settings";
 import { initOnline } from "./online";
 import { maybeOfferWizard, wireWizard } from "./wizard";
 
@@ -56,6 +56,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   initTheme(); // применяем сохранённую/системную тему как можно раньше
   initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
+  await initGentle(); // щадящий режим — ДО светофора железа (авто-решение учитывает выбор)
   initOnline(); // восстанавливаем онлайн-режим и настройки веб-поиска (по умолчанию офлайн)
   initSidebar(); // восстанавливаем ширину и состояние левой панели
 

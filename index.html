@@ -277,9 +277,23 @@
               <div class="settings-card__head">
                 <h2 class="settings-card__title">Движок и модели</h2>
                 <p class="settings-card__desc">
-                  Для работы без интернета укажите предзагруженный каталог моделей Ollama и, при
-                  необходимости, путь к движку. Пути сохраняются и применяются при запуске.
+                  Щадящий режим бережёт слабые компьютеры: нейросеть занимает только половину
+                  ядер процессора — ответы медленнее, зато машина не перегревается (на слабом
+                  железе режим включается сам). Ниже — офлайн-поставка: укажите предзагруженный
+                  каталог моделей Ollama и, при необходимости, путь к движку; пути сохраняются
+                  и применяются при запуске.
                 </p>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Щадящий режим</div>
+                  <div class="settings-field__value" id="gentle-state-text">…</div>
+                </div>
+                <button type="button" class="ep-btn" id="gentle-toggle">Включить</button>
               </div>
 
               <div class="settings-field">

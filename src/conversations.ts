@@ -3,7 +3,7 @@
 // чтобы projects.ts зависел от conversations.ts, а не наоборот — без циклов).
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Conversation, ConversationMeta } from "./types";
+import type { Conversation, ConversationMeta, Message } from "./types";
 import { history, shownSourceFiles, state } from "./state";
 import {
   chatProjectChip,
@@ -40,18 +40,21 @@ function titleFromHistory(): string {
 }
 
 // Сохраняет текущий диалог на диск и обновляет список. Пустой не сохраняем.
-export async function persist() {
+// draft — незавершённый ответ ассистента (автосейв во время генерации): пишется
+// в файл ПОВЕРХ истории, но в саму history не попадает — финальное сохранение
+// по завершении перезапишет файл начисто. Список диалогов черновик не трогает.
+export async function persist(draft?: Message) {
   if (!history.length || !state.currentId) return;
   const conv: Conversation = {
     id: state.currentId,
     title: titleFromHistory(),
     updated_at: Date.now(),
     ...(state.currentProjectId ? { project_id: state.currentProjectId } : {}),
-    messages: history,
+    messages: draft ? [...history, draft] : history,
   };
   try {
     await invoke("save_conversation", { conversation: conv });
-    await refreshConversationList();
+    if (!draft) await refreshConversationList();
   } catch (e) {
     console.error("save_conversation:", e);
   }

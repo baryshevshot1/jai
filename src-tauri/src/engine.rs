@@ -284,12 +284,25 @@ fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
         use std::os::unix::process::CommandExt;
         // своя группа процессов → на выходе гасим всю группу (включая runner-процессы)
         cmd.process_group(0);
+        // Пониженный приоритет (nice 5): под нагрузкой движок уступает интерфейсу
+        // и системе — слабые машины меньше греются и не «замерзают», а на свободной
+        // машине скорость почти не меняется. Наследуется runner-процессами Ollama.
+        // Неудача понижения не должна мешать запуску — результат не проверяем.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS as _, 0, 5);
+                Ok(())
+            });
+        }
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW); // без всплывающего окна консоли
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000; // без всплывающего окна консоли
+        // Пониженный класс приоритета — та же цель, что nice на Unix: движок
+        // уступает интерфейсу и системе, меньше перегрева на слабых машинах.
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd.spawn()
 }

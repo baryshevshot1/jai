@@ -28,6 +28,7 @@ import {
   epSetEngineBtn,
   epSetModelsBtn,
   feedEl,
+  gentleToggleBtn,
   inputEl,
   installFromDiskBtn,
   installLocalBtn,
@@ -49,7 +50,7 @@ import {
   wizardView,
 } from "./dom";
 import { humanError, ICON_REFRESH_CW } from "./util";
-import { confirmModal, showChatView } from "./ui";
+import { confirmModal, showChatView, updateGentleUi } from "./ui";
 import {
   flashIndexLabel,
   refreshDocuments,
@@ -522,6 +523,32 @@ export async function initThinking() {
     thinkToggleEl.classList.toggle("on", state.thinkEnabled);
     invoke("set_setting", { key: "thinking_enabled", value: String(state.thinkEnabled) }).catch((e) =>
       console.error("set_setting thinking_enabled:", e),
+    );
+  });
+}
+
+// ── Щадящий режим (защита слабых машин от перегрева) ─────────────────────────
+
+// Восстановление настройки. Если пользователь ещё не выбирал (ключа нет) — остаёмся
+// в авто-режиме: значение выставит светофор железа (models.ts, loadHardware).
+export async function initGentle() {
+  let saved: string | null = null;
+  try {
+    saved = await invoke<string | null>("get_setting", { key: "gentle_mode" });
+  } catch {
+    saved = null;
+  }
+  if (saved !== null) {
+    state.gentleAuto = false;
+    state.gentleMode = saved === "true";
+  }
+  updateGentleUi();
+  gentleToggleBtn.addEventListener("click", () => {
+    state.gentleMode = !state.gentleMode;
+    state.gentleAuto = false; // явный выбор пользователя — авто больше не трогает
+    updateGentleUi();
+    invoke("set_setting", { key: "gentle_mode", value: String(state.gentleMode) }).catch((e) =>
+      console.error("set_setting gentle_mode:", e),
     );
   });
 }
