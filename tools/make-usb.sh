@@ -64,13 +64,26 @@ if [ "$DO_INSTALLERS" = 1 ]; then
   mkdir -p "$OUT/Windows" "$OUT/Linux" "$OUT/macOS"
 
   # Список артефактов релиза: через gh, если есть, иначе — публичный API GitHub.
+  #
+  # ВАЖНО про черновики. `gh release list` показывает и ЧЕРНОВИКИ (владельцу репо),
+  # а публичный API /releases/latest — нет. Без фильтра эти две ветки давали РАЗНЫЕ
+  # релизы, и вариант с gh мог выбрать неопубликованный: файлы черновика по
+  # browser_download_url недоступны, и сборка падала на curl с невнятным 404.
+  # Поэтому: черновики и пререлизы отсеиваем, а явно указанный --version проверяем.
   note "Ищу релиз приложения…"
   if command -v gh >/dev/null; then
-    TAG="${VERSION:-$(gh release list --repo "$REPO" --limit 1 --json tagName -q '.[0].tagName')}"
+    TAG="${VERSION:-$(gh release list --repo "$REPO" --limit 30 \
+      --json tagName,isDraft,isPrerelease \
+      -q '[.[] | select(.isDraft == false and .isPrerelease == false)][0].tagName')}"
+    [ -n "$TAG" ] && [ "$TAG" != "null" ] || die "не нашёл ни одного опубликованного релиза в $REPO"
+    if [ "$(gh release view "$TAG" --repo "$REPO" --json isDraft -q '.isDraft')" = "true" ]; then
+      die "релиз $TAG — ЧЕРНОВИК: его файлы нельзя скачать по прямой ссылке.
+     Опубликуйте релиз на GitHub (Releases → Edit → Publish release) и повторите."
+    fi
     URLS=$(gh release view "$TAG" --repo "$REPO" --json assets -q '.assets[].url')
   else
     API="https://api.github.com/repos/$REPO/releases/${VERSION:+tags/}${VERSION:-latest}"
-    JSON=$(curl -fsSL "$API") || die "не удалось получить релиз ($API)"
+    JSON=$(curl -fsSL "$API") || die "не удалось получить релиз ($API). Если это черновик — опубликуйте его."
     TAG=$(printf '%s' "$JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4)
     URLS=$(printf '%s' "$JSON" | grep '"browser_download_url"' | cut -d'"' -f4)
   fi
