@@ -206,6 +206,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 .conv:focus-visible .conv-del,
 .conv:focus-within .conv-del { opacity: 0.55; }
 .conv-del:hover { opacity: 1; color: var(--danger); }
+/* пустой список чатов / поиск без результатов — подсказка вместо пустоты */
+.conv-empty {
+  padding: var(--s4) var(--s2);
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  text-align: center;
+}
 
 /* панель чатов растягивается, список внутри прокручивается */
 .tab-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -398,7 +406,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .model-row__icon svg { width: var(--icon-lg); height: var(--icon-lg); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .model-row__info { flex: 1; min-width: 0; }
-.model-row__title { font-size: var(--t-base); color: var(--text); display: flex; align-items: center; gap: 7px; }
+.model-row__title { font-size: var(--t-base); color: var(--text); display: flex; align-items: center; gap: 7px; min-width: 0; }
+.model-row__title > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-row__req {
   font-size: 10px;
   text-transform: uppercase;
@@ -653,7 +662,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: color 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
 }
 .chip:hover { color: var(--text); border-color: var(--border-strong); }
-.turn { display: flex; flex-direction: column; gap: var(--s2); }
+.turn { display: flex; flex-direction: column; gap: var(--s2); animation: turn-in 0.18s ease; }
+@keyframes turn-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
 
 /* пользователь — справа, в градиент-пузыре */
 .turn.me { align-items: flex-end; }
@@ -1438,6 +1451,11 @@ input:focus-visible,
   .composer-wrap { padding: var(--s3) var(--s4) var(--s4); }
   .settings-head { padding: var(--s3) var(--s4); }
   .chat-project-chip { max-width: 150px; }
+  /* пилюли композера — только иконки, бейдж онлайна — только пульсирующая точка */
+  .pill-label { display: none; }
+  .think-toggle { padding: 0 10px; }
+  .online-badge__text { display: none; }
+  .online-badge { padding: 5px 8px; }
 }
 
 /* Узкое окно: ещё компактнее; статус движка — только индикатор. */

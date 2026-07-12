@@ -258,13 +258,13 @@ async function setEnginePathDialog() {
 
 // «Сбросить»: вернуться к авто-разрешению (ресурс → PATH) и применить к движку.
 async function resetEnginePaths() {
-  if (!(await confirmModal("Сбросить override-пути движка и каталога моделей?", "Сбросить"))) return;
+  if (!(await confirmModal("Сбросить указанные вручную пути движка и каталога моделей?", "Сбросить"))) return;
   try {
     await invoke("clear_engine_overrides");
     await invoke("reload_engine");
     await refreshDocuments(sidebarDocCtx);
     await loadModels();
-    settingsStatus("Пути сброшены — авто-разрешение (ресурс → PATH).", false);
+    settingsStatus("Пути сброшены — движок и модели снова ищутся автоматически.", false);
   } catch (e) {
     settingsStatus(String(e), true);
   }

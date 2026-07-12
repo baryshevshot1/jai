@@ -81,7 +81,7 @@ export async function initOnline() {
       await invoke("clear_outbound_log");
       await refreshOutboundLog();
     } catch (e) {
-      showOnlineStatus(`Не удалось очистить журнал: ${e}`);
+      showOnlineStatus(`Не удалось очистить журнал: ${e}`, true);
     }
   });
 }
@@ -119,7 +119,8 @@ export async function refreshOutboundLog() {
   }
 }
 
-function showOnlineStatus(text: string) {
+function showOnlineStatus(text: string, isError = false) {
   onlineStatusEl.textContent = text;
+  onlineStatusEl.classList.toggle("settings-status--error", isError); // ошибки — красным, как у остальных карточек
   onlineStatusEl.hidden = false;
 }
