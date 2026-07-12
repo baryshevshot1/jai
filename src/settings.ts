@@ -393,7 +393,7 @@ function renderAppUpdateRow(update: Update) {
 
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = "ep-btn";
+  btn.className = "ep-btn ep-btn--primary"; // главное действие — акцентом
   btn.textContent = "Установить";
   btn.addEventListener("click", () => installAppUpdate(update, btn));
 

@@ -73,7 +73,7 @@ export async function refreshDocuments(ctx: DocCtx) {
         "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или импортируйте с флешки/диска (каталог моделей Ollama) — без терминала.";
       installEmbedBtn.hidden = false;
       installEmbedBtn.disabled = false;
-      installEmbedBtn.textContent = "Скачать (~1.2 ГБ)";
+      installEmbedBtn.textContent = "Установить (~1.2 ГБ)"; // единый глагол установки
       installLocalBtn.hidden = false;
       installLocalBtn.disabled = false;
     }

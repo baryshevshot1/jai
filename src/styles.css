@@ -8,6 +8,8 @@
   --lh-base: 1.55; --lh-relaxed: 1.65;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px;
   --r-sm: 8px; --r: 10px; --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;
+  /* Шкала контурных иконок: три размера вместо россыпи 14/15/16/17/18px. */
+  --icon-sm: 14px; --icon: 16px; --icon-lg: 18px;
   --side-w: 264px; --read-w: 720px;
 }
 :root[data-theme="light"] {
@@ -134,7 +136,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 .newchat:hover { border-color: var(--accent); color: var(--accent); }
-.newchat svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+.newchat svg { width: var(--icon); height: var(--icon); stroke: currentColor; fill: none; stroke-width: 2; }
 
 .search { margin: var(--s2) var(--s3) var(--s3); position: relative; }
 .search input {
@@ -187,7 +189,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .conv:hover { background: var(--hover); color: var(--text); }
 .conv.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 :root[data-theme="dark"] .conv.active { color: var(--text); }
-.conv svg { width: 15px; height: 15px; flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
+.conv svg { width: var(--icon); height: var(--icon); flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
 .conv .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-del {
   border: none;
@@ -197,10 +199,12 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
   font-size: 1.05em;
   line-height: 1;
-  padding: 0 2px;
+  padding: 4px 6px; /* кликзона ближе к рекомендуемым 24px */
   flex-shrink: 0;
 }
-.conv:hover .conv-del { opacity: 0.55; }
+.conv:hover .conv-del,
+.conv:focus-visible .conv-del,
+.conv:focus-within .conv-del { opacity: 0.55; }
 .conv-del:hover { opacity: 1; color: var(--danger); }
 
 /* панель чатов растягивается, список внутри прокручивается */
@@ -223,11 +227,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 .doc-item__sub { font-size: var(--t-xs); color: var(--muted); }
 .doc-item__del {
   border: none; background: transparent; color: var(--muted);
-  opacity: 0; cursor: pointer; font-size: 1.05em; line-height: 1; padding: 0 2px; flex-shrink: 0;
+  opacity: 0; cursor: pointer; font-size: 1.05em; line-height: 1; padding: 4px 6px; flex-shrink: 0;
 }
-.doc-item:hover .doc-item__del { opacity: 0.6; }
+.doc-item:hover .doc-item__del,
+.doc-item:focus-within .doc-item__del { opacity: 0.6; }
 .doc-item__del:hover { opacity: 1; color: var(--danger); }
-.doc-empty { padding: var(--s4) var(--s3); color: var(--faint); font-size: var(--t-sm); text-align: center; line-height: 1.5; }
+.doc-empty { padding: var(--s4) var(--s3); color: var(--muted); font-size: var(--t-sm); text-align: center; line-height: 1.5; }
 
 /* карточка установки модели эмбеддингов / подсказка */
 .doc-status {
@@ -242,27 +247,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   gap: 8px;
 }
 .doc-status__text { color: var(--muted); }
-.doc-install-btn {
-  align-self: flex-start;
-  padding: 6px 12px;
-  border: none;
-  border-radius: var(--r-sm);
-  background: var(--accent);
-  color: #fff;
-  font-size: var(--t-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.12s ease;
-}
-.doc-install-btn:hover { background: var(--accent-hover); }
-.doc-install-btn:disabled { opacity: 0.6; cursor: default; }
 .doc-status__actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.doc-install-btn--ghost {
-  background: transparent;
-  color: var(--accent);
-  border: 1px solid var(--border-strong);
-}
-.doc-install-btn--ghost:hover { background: var(--hover); color: var(--text); }
 
 /* ===================== СТРАНИЦА НАСТРОЕК (на месте ленты) ===================== */
 .settings-view {
@@ -318,7 +303,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--accent-soft);
   color: var(--accent);
 }
-.settings-field__icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.settings-field__icon svg { width: var(--icon-lg); height: var(--icon-lg); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .settings-field__info { flex: 1; min-width: 0; }
 .settings-field__label { font-size: var(--t-base); color: var(--text); margin-bottom: 2px; }
 .settings-field__value {
@@ -344,12 +329,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .ep-btn:hover { background: var(--hover); border-color: var(--border-strong); }
 .ep-btn--icon { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.ep-btn--icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.ep-btn--icon svg { width: var(--icon-sm); height: var(--icon-sm); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 /* кнопка «Проверить обновления» с цветным итогом проверки */
 .ep-btn.check-ok { background: var(--green-soft); color: var(--green); border-color: transparent; }
 .ep-btn.check-ok:hover { background: color-mix(in srgb, var(--green) 16%, var(--surface)); }
 :root[data-theme="dark"] .ep-btn.check-ok { color: var(--text); }
 .ep-btn.check-update { background: color-mix(in srgb, #d9a441 18%, var(--surface)); color: #b9831f; border-color: transparent; }
+:root[data-theme="dark"] .ep-btn.check-update { color: #e7b357; }
 .ep-btn.check-update:hover { background: color-mix(in srgb, #d9a441 26%, var(--surface)); }
 .ep-btn.check-err { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 /* живое вращение стрелок во время проверки (360°, как у «обновить») */
@@ -358,6 +344,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ep-btn.checking { opacity: 0.85; cursor: progress; }
 .ep-btn--ghost { background: transparent; color: var(--muted); font-weight: 400; }
 .ep-btn--ghost:hover { color: var(--danger); background: var(--danger-soft); }
+/* Главное действие (Установить/Скачать/Обновить) — единый акцентный вид во всех
+   карточках: список моделей, документы (bge-m3), обновление приложения, мастер. */
+.ep-btn--primary { background: var(--accent); border-color: transparent; color: #fff; }
+.ep-btn--primary:hover { background: var(--accent-hover); border-color: transparent; }
+.ep-btn--primary:disabled { opacity: 0.6; cursor: default; }
 .settings-status {
   margin-top: var(--s4);
   padding: 10px 12px;
@@ -405,7 +396,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--accent-soft);
   color: var(--accent);
 }
-.model-row__icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.model-row__icon svg { width: var(--icon-lg); height: var(--icon-lg); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .model-row__info { flex: 1; min-width: 0; }
 .model-row__title { font-size: var(--t-base); color: var(--text); display: flex; align-items: center; gap: 7px; }
 .model-row__req {
@@ -435,6 +426,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .model-badge--ok { background: var(--green-soft); color: var(--green); }
 .model-badge--update { background: color-mix(in srgb, #d9a441 16%, var(--surface)); color: #b9831f; }
+:root[data-theme="dark"] .model-badge--update { color: #e7b357; }
 .model-badge--missing { background: var(--hover); color: var(--muted); }
 .model-badge--err { background: var(--danger-soft); color: var(--danger); }
 :root[data-theme="dark"] .model-badge--ok { color: var(--text); }
@@ -582,7 +574,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .model-pick:disabled { opacity: 0.6; cursor: default; }
 .spacer { margin-left: auto; }
 .engine { display: flex; align-items: center; gap: 7px; font-size: var(--t-sm); color: var(--muted); }
-.engine .led { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.engine .led { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .engine--down { color: var(--danger); }
 .engine--down .led { background: var(--faint); }
 .iconbtn {
@@ -599,7 +591,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .iconbtn:hover { background: var(--surface); color: var(--text); border-color: var(--border); }
 .iconbtn:disabled { opacity: 0.5; cursor: default; }
-.iconbtn svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 2; }
+.iconbtn svg { width: var(--icon-lg); height: var(--icon-lg); stroke: currentColor; fill: none; stroke-width: 2; }
 .divider-v { width: 1px; height: 22px; background: var(--border); }
 
 /* ===================== ЛЕНТА СООБЩЕНИЙ ===================== */
@@ -687,7 +679,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .msg-act {
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 3px 8px;
   margin-left: -8px; /* текст кнопки — вровень с левым краем ответа */
   font-family: inherit;
@@ -814,7 +806,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   align-self: center;
   max-width: 90%;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--danger-soft);
   color: var(--danger);
   font-size: 0.9em;
@@ -824,7 +816,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   align-self: center;
   max-width: 90%;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--accent-soft);
   color: var(--muted);
   font-size: 0.9em;
@@ -838,7 +830,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   margin-left: 8px;
   padding: 2px 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1066,13 +1058,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .tool:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
 .tool:disabled { opacity: 0.5; cursor: default; }
-.tool svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+.tool svg { width: var(--icon); height: var(--icon); stroke: currentColor; fill: none; stroke-width: 2; }
 
 .think-toggle {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 13px 7px 11px;
+  height: 34px; /* единая высота ряда композера (как у .tool) */
+  padding: 0 13px 0 11px;
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: transparent;
@@ -1086,7 +1079,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .think-toggle:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
 .think-toggle:disabled { opacity: 0.5; cursor: default; }
-.think-toggle svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+.think-toggle svg { width: var(--icon); height: var(--icon); stroke: currentColor; fill: none; stroke-width: 2; }
 .think-toggle.on {
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
@@ -1145,7 +1138,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-size: var(--t-base);
 }
 .online-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
-.online-hint { margin: var(--s2) 0 0; font-size: var(--t-xs); color: var(--faint); line-height: 1.5; }
+.online-hint { margin: var(--s2) 0 0; font-size: var(--t-xs); color: var(--muted); line-height: 1.5; }
 
 /* Журнал обращений в интернет (прозрачность постфактум). */
 .online-log-head {
@@ -1164,7 +1157,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   max-height: 220px;
   overflow-y: auto;
 }
-.online-log__empty { padding: var(--s3); color: var(--faint); font-size: var(--t-sm); text-align: center; }
+.online-log__empty { padding: var(--s3); color: var(--muted); font-size: var(--t-sm); text-align: center; }
 .online-log__row { padding: var(--s2) var(--s3); border-top: 1px solid var(--border); }
 .online-log__row:first-child { border-top: none; }
 .online-log__meta { font-size: var(--t-xs); color: var(--muted); }
@@ -1189,7 +1182,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .send:hover { background: var(--accent-hover); }
 .send:disabled { opacity: 0.5; cursor: default; }
-.send svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2.2; }
+.send svg { width: var(--icon-lg); height: var(--icon-lg); stroke: currentColor; fill: none; stroke-width: 2; }
 .send--stop { background: var(--danger); }
 .send--stop:hover { background: var(--danger); filter: brightness(0.92); }
 
@@ -1198,7 +1191,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   margin: var(--s2) auto 0;
   text-align: center;
   font-size: var(--t-xs);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* ===================== МОДАЛЬНОЕ ОКНО ===================== */
@@ -1286,7 +1279,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 .side-section__add:hover { background: var(--hover); color: var(--text); }
-.side-section__add svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+.side-section__add svg { width: var(--icon); height: var(--icon); stroke: currentColor; fill: none; stroke-width: 2; }
 
 /* ----- Список проектов (строки по образцу .conv) ----- */
 .project-list {
@@ -1311,7 +1304,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .project:hover { background: var(--hover); color: var(--text); }
 .project.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 :root[data-theme="dark"] .project.active { color: var(--text); }
-.project svg { width: 15px; height: 15px; flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
+.project svg { width: var(--icon); height: var(--icon); flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
 .project .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-empty {
   padding: var(--s2) calc(var(--s2) + 2px) var(--s3);
@@ -1332,7 +1325,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--accent-soft);
   color: var(--accent);
 }
-.project-head__icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.project-head__icon svg { width: var(--icon-lg); height: var(--icon-lg); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 /* крупное поле имени — выглядит как заголовок; рамка/фон появляются в фокусе */
 .project-name-input {
   flex: 1;
@@ -1402,23 +1395,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .chat-project-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ===================== ФОКУС-КОЛЬЦА (навигация с клавиатуры) ===================== */
-.newchat:focus-visible,
-.iconbtn:focus-visible,
-.tool:focus-visible,
-.think-toggle:focus-visible,
-.send:focus-visible,
-.model-pick:focus-visible,
-.modal__btn:focus-visible,
-.conv-del:focus-visible,
-.reason-toggle:focus-visible,
-.msg-act:focus-visible,
-.copy:focus-visible,
-.chip:focus-visible,
-.search input:focus-visible,
-.side-section__add:focus-visible,
-.project:focus-visible,
-.chat-project-chip:focus-visible,
-.conv:focus-visible {
+/* Общее правило вместо перечня классов: ЛЮБОЙ интерактивный элемент получает
+   видимый фокус (раньше половина кнопок и все поля настроек выпадали из списка).
+   Поля с собственной подсветкой рамки при :focus (поиск, онлайн-поля) кольцо
+   не дублируют — у них outline уже снят своим правилом. */
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

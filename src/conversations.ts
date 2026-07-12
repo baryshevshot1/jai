@@ -26,6 +26,7 @@ import {
   stop,
 } from "./ui";
 import { refreshCurrentDocsCount } from "./documents";
+import { makePressable } from "./util";
 
 // Кэш списка диалогов и текущий фильтр поиска (для отрисовки боковой панели).
 let convMetas: ConversationMeta[] = [];
@@ -134,6 +135,7 @@ function renderConvList() {
     item.appendChild(del);
 
     item.addEventListener("click", () => openConversation(m.id));
+    makePressable(item); // открывается и с клавиатуры (Tab + Enter)
     convListEl.appendChild(item);
   }
 }
@@ -169,6 +171,7 @@ export function renderProjectChats(projectId: string) {
     item.appendChild(del);
 
     item.addEventListener("click", () => openConversation(m.id));
+    makePressable(item); // открывается и с клавиатуры (Tab + Enter)
     projectChatListEl.appendChild(item);
   }
 }

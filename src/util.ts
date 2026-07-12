@@ -80,6 +80,20 @@ export function imageDataUrl(b64: string): string {
   return `data:${imageMime(b64)};base64,${b64}`;
 }
 
+// Делает div-«кнопку» доступной с клавиатуры: Tab-фокус, роль и активация
+// Enter/Space (обработчик клика навешивает вызывающий код). Для строк списков
+// (чаты, проекты), которые исторически не <button> из-за вложенных кнопок «×».
+export function makePressable(el: HTMLElement) {
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      el.click();
+    }
+  });
+}
+
 // Общие контурные иконки (список моделей, кнопки проверок, диагностика, обновления).
 export const ICON_DOWNLOAD = '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>';
 export const ICON_REFRESH_CW = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>';
