@@ -19,6 +19,7 @@
   --accent: #2f6be0; --accent-hover: #2659c2; --accent-soft: #ebf1fd; --accent-ring: rgba(47, 107, 224, 0.14);
   --code-bg: #f6f3ed; --code-border: #e8e4db;
   --user-grad-a: #2f6be0; --user-grad-b: #3d78ea; --user-text: #fff;
+  --brand-grad-a: #2f6be0; --brand-grad-b: #7b5cf0;
   --green: #3e9b6b; --green-soft: #e7f3eb;
   --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.05);
   --shadow: 0 1px 3px rgba(60, 50, 30, 0.05), 0 8px 24px rgba(60, 50, 30, 0.07);
@@ -31,6 +32,7 @@
   --accent: #6293f2; --accent-hover: #79a2f4; --accent-soft: #1e293c; --accent-ring: rgba(98, 147, 242, 0.18);
   --code-bg: #15140f; --code-border: #312e29;
   --user-grad-a: #3a6fd8; --user-grad-b: #4a7ce6; --user-text: #fff;
+  --brand-grad-a: #6293f2; --brand-grad-b: #9d7bff;
   --green: #5fb98a; --green-soft: #1b2a21;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.34);
@@ -553,12 +555,41 @@ body.resizing { cursor: col-resize; user-select: none; }
   padding: 0 var(--s6);
   border-bottom: 1px solid var(--border);
 }
-.brand {
+.brand { display: inline-flex; align-items: center; gap: 9px; }
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--brand-grad-a), var(--brand-grad-b));
+  box-shadow: 0 2px 8px var(--accent-ring), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  color: #fff;
+}
+.brand-logo svg { width: 15px; height: 15px; fill: currentColor; stroke: none; }
+.brand-name {
   font-family: var(--font-display);
   font-size: var(--t-brand);
   font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1;
+  /* градиентный логотип-текст: от цвета текста к акценту */
+  background: linear-gradient(90deg, var(--text) 20%, var(--brand-grad-a) 75%, var(--brand-grad-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.brand-ai {
+  margin-left: 7px;
+  padding: 2.5px 6px;
+  border-radius: 6px;
+  font-family: var(--font-ui);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  background: linear-gradient(135deg, var(--brand-grad-a), var(--brand-grad-b));
+  color: #fff;
+  vertical-align: 3px;
 }
 .model-pick {
   appearance: none;
@@ -627,13 +658,28 @@ body.resizing { cursor: col-resize; user-select: none; }
   padding: var(--s6);
   pointer-events: none; /* не перехватывать прокрутку ленты */
 }
+.empty-state__logo {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--brand-grad-a), var(--brand-grad-b));
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--brand-grad-a) 30%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  color: #fff;
+  margin-bottom: var(--s2);
+}
+.empty-state__logo svg { width: 26px; height: 26px; fill: currentColor; stroke: none; }
 .empty-state__title {
   font-family: var(--font-display);
   font-size: 30px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  color: var(--text);
   line-height: 1.1;
+  background: linear-gradient(90deg, var(--text) 30%, var(--brand-grad-a) 85%, var(--brand-grad-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .empty-state__hint {
   max-width: 380px;
@@ -678,7 +724,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   padding: var(--s3) var(--s4);
   font-size: var(--t-lg);
   line-height: 1.5;
-  box-shadow: 0 2px 10px var(--accent-ring);
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--user-grad-a) 22%, transparent);
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -688,7 +734,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .msg { font-size: var(--t-lg); line-height: var(--lh-relaxed); color: var(--text); max-width: 100%; }
 
 /* действия под ответом ассистента: «Копировать», «Повторить» */
-.msg-actions { display: flex; gap: var(--s2); margin-top: 2px; }
+.msg-actions { display: flex; gap: var(--s2); margin-top: 2px; opacity: 0; transition: opacity 0.15s ease; }
+/* появляются при наведении на ход или при клавиатурном фокусе внутри него */
+.turn:hover .msg-actions,
+.turn:focus-within .msg-actions { opacity: 1; }
 .msg-act {
   background: none;
   border: none;
@@ -1420,6 +1469,9 @@ input:focus-visible,
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* Поле ввода чата подсвечивает рамка самого композера (:focus-within) —
+   внутреннее кольцо давало бы некрасивую двойную рамку. */
+.composer textarea:focus-visible { outline: none; }
 
 /* ===================== СКРОЛЛБАРЫ ===================== */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

@@ -73,7 +73,12 @@
           <button type="button" class="iconbtn" id="sidebar-toggle" title="Скрыть/показать панель" aria-label="Скрыть или показать панель">
             <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" /></svg>
           </button>
-          <span class="brand">Jarvis AI</span>
+          <span class="brand">
+            <span class="brand-logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z" /></svg>
+            </span>
+            <span class="brand-name">Jarvis<span class="brand-ai">AI</span></span>
+          </span>
           <button type="button" class="chat-project-chip" id="chat-project-chip" hidden title="Открыть проект этого чата">
             <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             <span id="chat-project-chip-name"></span>
@@ -103,6 +108,9 @@
         <div class="feed" id="feed">
           <div class="thread" id="messages"></div>
           <div class="empty-state" id="empty-state" hidden>
+            <div class="empty-state__logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z" /></svg>
+            </div>
             <div class="empty-state__title">Чем помочь?</div>
             <div class="empty-state__hint">
               Работаю офлайн на вашем компьютере — ваши данные остаются только у вас.
