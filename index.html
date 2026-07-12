@@ -138,11 +138,11 @@
               </button>
               <button type="button" class="think-toggle" id="think-toggle" title="Режим рассуждений модели (медленнее, но точнее)" aria-label="Режим рассуждений">
                 <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2z" /><path d="M9 21h6" /></svg>
-                Размышления
+                <span class="pill-label">Размышления</span>
               </button>
               <button type="button" class="think-toggle online-toggle" id="online-toggle" title="Онлайн-режим: разрешить модели искать в интернете. Данные запроса при поиске уходят на внешний сервер. По умолчанию выключено." aria-label="Онлайн-режим">
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18" /></svg>
-                Онлайн
+                <span class="pill-label">Онлайн</span>
               </button>
               <button type="submit" class="send" id="send-btn" title="Отправить" aria-label="Отправить">
                 <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
@@ -189,6 +189,58 @@
               </div>
 
               <div class="settings-status" id="models-status" hidden></div>
+            </section>
+
+            <section class="settings-card">
+              <div class="settings-card__head">
+                <h2 class="settings-card__title">Движок и модели</h2>
+                <p class="settings-card__desc">
+                  Щадящий режим бережёт слабые компьютеры: нейросеть занимает только половину
+                  ядер процессора — ответы медленнее, зато машина не перегревается (на слабом
+                  железе режим включается сам). Ниже — офлайн-поставка: укажите предзагруженный
+                  каталог моделей Ollama и, при необходимости, путь к движку; пути сохраняются
+                  и применяются при запуске.
+                </p>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Щадящий режим</div>
+                  <div class="settings-field__value" id="gentle-state-text">…</div>
+                </div>
+                <button type="button" class="ep-btn" id="gentle-toggle">Включить</button>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Каталог моделей</div>
+                  <div class="settings-field__value" id="ep-models">по умолчанию</div>
+                </div>
+                <button type="button" class="ep-btn" id="ep-set-models">Указать…</button>
+              </div>
+
+              <div class="settings-field">
+                <div class="settings-field__icon">
+                  <svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></svg>
+                </div>
+                <div class="settings-field__info">
+                  <div class="settings-field__label">Движок Ollama</div>
+                  <div class="settings-field__value" id="ep-engine">по умолчанию</div>
+                </div>
+                <button type="button" class="ep-btn" id="ep-set-engine">Указать…</button>
+              </div>
+
+              <div class="settings-card__actions">
+                <button type="button" class="ep-btn ep-btn--ghost" id="ep-reset">Сбросить пути (искать автоматически)</button>
+              </div>
+
+              <div class="settings-status" id="settings-status" hidden></div>
             </section>
 
             <section class="settings-card">
@@ -249,7 +301,7 @@
                 <input class="online-input" id="ws-provider" type="text" placeholder="tavily" spellcheck="false" autocapitalize="off" />
               </div>
               <div class="online-field">
-                <label class="online-field__label" for="ws-url">Адрес провайдера (эндпоинт)</label>
+                <label class="online-field__label" for="ws-url">Адрес поискового сервиса</label>
                 <input class="online-input" id="ws-url" type="text" placeholder="https://api.tavily.com/search" spellcheck="false" autocapitalize="off" />
               </div>
               <div class="online-field">
@@ -258,7 +310,7 @@
               </div>
               <p class="online-hint">
                 Tavily — бесплатный ключ на app.tavily.com. Без ключа веб-поиск недоступен;
-                офлайн-чат при этом работает как обычно. Бэкенд можно сменить, указав другого провайдера и эндпоинт.
+                офлайн-чат при этом работает как обычно. Поисковый сервис можно сменить, указав другого провайдера и его адрес.
               </p>
 
               <div class="online-log-head">
@@ -273,57 +325,7 @@
               <div class="settings-status" id="online-status" hidden></div>
             </section>
 
-            <section class="settings-card">
-              <div class="settings-card__head">
-                <h2 class="settings-card__title">Движок и модели</h2>
-                <p class="settings-card__desc">
-                  Щадящий режим бережёт слабые компьютеры: нейросеть занимает только половину
-                  ядер процессора — ответы медленнее, зато машина не перегревается (на слабом
-                  железе режим включается сам). Ниже — офлайн-поставка: укажите предзагруженный
-                  каталог моделей Ollama и, при необходимости, путь к движку; пути сохраняются
-                  и применяются при запуске.
-                </p>
-              </div>
-
-              <div class="settings-field">
-                <div class="settings-field__icon">
-                  <svg viewBox="0 0 24 24"><path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0z" /></svg>
-                </div>
-                <div class="settings-field__info">
-                  <div class="settings-field__label">Щадящий режим</div>
-                  <div class="settings-field__value" id="gentle-state-text">…</div>
-                </div>
-                <button type="button" class="ep-btn" id="gentle-toggle">Включить</button>
-              </div>
-
-              <div class="settings-field">
-                <div class="settings-field__icon">
-                  <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
-                </div>
-                <div class="settings-field__info">
-                  <div class="settings-field__label">Каталог моделей</div>
-                  <div class="settings-field__value" id="ep-models">по умолчанию</div>
-                </div>
-                <button type="button" class="ep-btn" id="ep-set-models">Указать…</button>
-              </div>
-
-              <div class="settings-field">
-                <div class="settings-field__icon">
-                  <svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></svg>
-                </div>
-                <div class="settings-field__info">
-                  <div class="settings-field__label">Движок Ollama</div>
-                  <div class="settings-field__value" id="ep-engine">по умолчанию</div>
-                </div>
-                <button type="button" class="ep-btn" id="ep-set-engine">Указать…</button>
-              </div>
-
-              <div class="settings-card__actions">
-                <button type="button" class="ep-btn ep-btn--ghost" id="ep-reset">Сбросить к авто-разрешению</button>
-              </div>
-
-              <div class="settings-status" id="settings-status" hidden></div>
-            </section>
+            
 
             <section class="settings-card">
               <div class="settings-card__head models-head">
@@ -432,7 +434,7 @@
                 </button>
               </div>
               <p class="settings-card__desc models-desc">
-                Документы этого проекта. Чаты внутри проекта ищут ответы только по ним (RAG).
+                Документы этого проекта. Чаты внутри проекта ищут ответы только по ним (поиск по смыслу).
               </p>
 
               <div class="index-progress" id="project-index-progress" hidden>

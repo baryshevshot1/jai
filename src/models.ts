@@ -56,8 +56,10 @@ export async function loadModels() {
 
   if (models.length === 0) {
     showModelHint("Модели не установлены");
+    // Без команд терминала (принцип продукта): ведём в настройки или мастер.
     addError(
-      "Модели не установлены. Установите модель командой, например: ollama pull qwen3.5:9b",
+      "Модели не установлены. Откройте Настройки → «Модели» и нажмите «Установить» " +
+        "у нужной модели, либо запустите «Мастер установки…» — он всё сделает сам.",
     );
     return;
   }
@@ -417,15 +419,19 @@ export async function ensureEngine(): Promise<boolean> {
   return false;
 }
 
-// Мягкая проверка движка: спрашиваем версию Ollama и показываем её в шапке.
+// Мягкая проверка движка. В шапке — человекочитаемое состояние («Готов к работе»),
+// а не версия Ollama: заказчику она ничего не говорит. Техдетали (версия) — в
+// подсказке при наведении и в «Проверке системы» настроек.
 // Неблокирующая — при недоступности просто показываем статус, приложение работает.
 export async function checkOllama() {
   try {
     const version = await invoke<string>("ollama_version");
-    statusEl.textContent = `Ollama ${version}`;
+    statusEl.textContent = "Готов к работе";
+    engineEl.title = `Движок Ollama ${version}`;
     engineEl.classList.remove("engine--down");
   } catch {
-    statusEl.textContent = "Ollama недоступна";
+    statusEl.textContent = "Движок не отвечает";
+    engineEl.removeAttribute("title");
     engineEl.classList.add("engine--down");
   }
 }

@@ -104,6 +104,18 @@ function renderConvList() {
     .filter((m) => !m.project_id) // только вне проектов
     .filter((m) => !f || (m.title || "").toLowerCase().includes(f));
 
+  // Пустой список не должен выглядеть поломкой: у первого запуска — подсказка,
+  // у поиска без результатов — честное «ничего не найдено».
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "conv-empty";
+    empty.textContent = f
+      ? "По запросу ничего не найдено."
+      : "Чатов пока нет. Нажмите «Новый чат» и задайте первый вопрос.";
+    convListEl.appendChild(empty);
+    return;
+  }
+
   let lastGroup = "";
   for (const m of items) {
     const group = dateGroup(m.updated_at);

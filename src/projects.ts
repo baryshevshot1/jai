@@ -102,7 +102,7 @@ function projectStatus(text: string, isError: boolean) {
   projectStatusEl.hidden = false;
   projectStatusEl.textContent = text;
   projectStatusEl.classList.toggle("settings-status--error", isError);
-  window.setTimeout(() => (projectStatusEl.hidden = true), 2500);
+  window.setTimeout(() => (projectStatusEl.hidden = true), 3500);
 }
 
 // Открыть полноэкранный экран проекта: инструкции, знания (документы), чаты проекта.
