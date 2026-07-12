@@ -9,6 +9,8 @@ import {
   composerWrapEl,
   emptyStateEl,
   feedEl,
+  gentleStateTextEl,
+  gentleToggleBtn,
   inputEl,
   messagesEl,
   modelsStatusEl,
@@ -266,6 +268,16 @@ export function setStreaming(on: boolean) {
 export function setComposerEnabled(on: boolean) {
   inputEl.disabled = !on;
   sendBtn.disabled = !on;
+}
+
+// Подпись щадящего режима в настройках: включён/выключен (+пометка, если решение
+// принял светофор железа, а не пользователь). Живёт здесь, а не в settings.ts,
+// чтобы models.ts (авто-режим по железу) не тянул settings — без циклов импортов.
+export function updateGentleUi() {
+  gentleStateTextEl.textContent = state.gentleMode
+    ? `включён — половина ядер, без перегрева${state.gentleAuto ? " (по оценке железа)" : ""}`
+    : "выключен — полная скорость";
+  gentleToggleBtn.textContent = state.gentleMode ? "Выключить" : "Включить";
 }
 
 export function stop() {

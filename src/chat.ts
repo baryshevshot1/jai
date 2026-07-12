@@ -298,6 +298,9 @@ async function generate() {
   const renderAnswer = (text: string) => renderMarkdownInto(ui.msg, text);
 
   const webSources: WebSource[] = []; // источники из веб-поиска (онлайн-режим)
+  // Автосейв черновика ответа (безопасная сессия): не чаще раза в DRAFT_SAVE_MS.
+  const DRAFT_SAVE_MS = 5000;
+  let lastDraftTs = Date.now();
   const onEvent = new Channel<ChatEvent>();
   onEvent.onmessage = (msg) => {
     if (myGen !== state.generation) return; // нажали «Стоп» — игнорируем хвост
@@ -335,6 +338,13 @@ async function generate() {
             liveTimer = null;
             if (myGen === state.generation) paintLive();
           }, LIVE_RENDER_MS - since);
+        }
+        // Автосейв черновика: раз в DRAFT_SAVE_MS частичный ответ пишется на диск —
+        // внезапная перезагрузка (перегрев, питание) не теряет сгенерированный текст.
+        // Финальный persist() по завершении перезапишет черновик начисто.
+        if (Date.now() - lastDraftTs >= DRAFT_SAVE_MS) {
+          lastDraftTs = Date.now();
+          persist({ role: "assistant", content: answer });
         }
       }
       scrollToBottom();
@@ -517,6 +527,7 @@ async function generate() {
       // вернёт ошибку «не умеет размышлять»).
       think: state.thinkEnabled && (thinkingByModel.get(useModel) ?? false),
       numCtx: useCtx, // рычаг смягчения (Rust: undefined → 8192)
+      gentle: state.gentleMode, // щадящий режим: половина потоков CPU (защита от перегрева)
       onEvent,
     });
     if (myGen === state.generation) {

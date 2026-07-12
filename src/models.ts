@@ -34,7 +34,7 @@ import {
   ICON_REFRESH_CW,
   plural,
 } from "./util";
-import { addError, setComposerEnabled } from "./ui";
+import { addError, setComposerEnabled, updateGentleUi } from "./ui";
 import { cancelActivePull, runPull } from "./pull";
 import { refreshDocuments, sidebarDocCtx } from "./documents";
 
@@ -383,6 +383,14 @@ export async function loadHardware() {
   hwModelEl.hidden = false;
   hwBarEl.className = `hwchip hwchip--${hw.tier}`;
   hwBarEl.hidden = false;
+
+  // Щадящий режим по умолчанию на слабом железе (yellow/red): бережём машину от
+  // перегрева, пока пользователь сам не решил иначе (явный выбор в настройках
+  // снимает авто-режим и дальше уважается).
+  if (state.gentleAuto) {
+    state.gentleMode = hw.tier !== "green";
+    updateGentleUi();
+  }
 }
 
 // ── Движок: обеспечение при старте и мягкая проверка ─────────────────────────

@@ -62,6 +62,8 @@ export let docStatusTextEl: HTMLElement;
 export let installEmbedBtn: HTMLButtonElement;
 export let installLocalBtn: HTMLButtonElement;
 export let pullCancelBtn: HTMLButtonElement;
+export let gentleToggleBtn: HTMLButtonElement;
+export let gentleStateTextEl: HTMLElement;
 export let epModelsEl: HTMLElement;
 export let epEngineEl: HTMLElement;
 export let epSetModelsBtn: HTMLButtonElement;
@@ -172,6 +174,8 @@ export function initDom(): void {
   installEmbedBtn = document.querySelector("#install-embed-btn")!;
   installLocalBtn = document.querySelector("#install-local-btn")!;
   pullCancelBtn = document.querySelector("#pull-cancel-btn")!;
+  gentleToggleBtn = document.querySelector("#gentle-toggle")!;
+  gentleStateTextEl = document.querySelector("#gentle-state-text")!;
   epModelsEl = document.querySelector("#ep-models")!;
   epEngineEl = document.querySelector("#ep-engine")!;
   epSetModelsBtn = document.querySelector("#ep-set-models")!;

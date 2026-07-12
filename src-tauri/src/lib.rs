@@ -93,6 +93,29 @@ const PULL_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 const WATCHDOG_INTERVAL_MS: u64 = 1500;
 const SWAP_TRIP_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Порог перегрева (°C) и выдержка (число подряд замеров) до мягкой остановки
+/// генерации. Порог высокий сознательно: под нагрузкой 85–95° — штатная работа
+/// современных CPU, аварийное выключение ОС начинается ~105° — рубим только
+/// устойчивый выход за 97°. Датчики: Linux (hwmon) — да, macOS — частично,
+/// Windows sysinfo температур не отдаёт (там защита остаётся по свопу).
+const TEMP_TRIP_C: f32 = 97.0;
+const TEMP_TRIP_TICKS: u32 = 3; // 3 × 1.5 с ≈ 5 секунд устойчивого перегрева
+
+/// Число потоков генерации в «щадящем режиме»: половина ядер, минимум 2 —
+/// нейросеть не выедает все ядра, системе и охлаждению остаётся запас.
+fn gentle_threads() -> u64 {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u64;
+    (cores / 2).max(2)
+}
+
+/// Применить «щадящий режим» к телу запроса /api/chat: ограничить потоки CPU.
+/// Пер-запросная опция — действует на любой движок (наш или системный).
+fn apply_gentle(body: &mut serde_json::Value, gentle: Option<bool>) {
+    if gentle.unwrap_or(false) {
+        body["options"]["num_thread"] = serde_json::json!(gentle_threads());
+    }
+}
+
 /// Сериализует доступ к settings.json. set_setting делает read-modify-write всего
 /// файла; без этого лока две близкие записи (тема/модель/Thinking) могли бы прочитать
 /// старое состояние и затереть ключи друг друга. Лок держим на время чтения+записи.
@@ -160,13 +183,14 @@ async fn chat_stream(
     messages: Vec<ChatMessage>,
     think: bool,
     num_ctx: Option<u64>,
+    gentle: Option<bool>,
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
 ) -> Result<String, String> {
     let my_cancel = cancel.begin(); // свой флаг отмены на этот запрос (без гонок)
     // Контекст — рычаг смягчения (S2): меньше num_ctx → меньше KV-кэш → меньше памяти.
     let ctx = num_ctx.unwrap_or(8192);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
@@ -179,6 +203,7 @@ async fn chat_stream(
             "num_ctx": ctx
         },
     });
+    apply_gentle(&mut body, gentle);
     // Стриминг вынесен в общий помощник: его же переиспользует агентный цикл
     // (онлайн-режим) для финального ответа — поведение офлайн-чата неизменно.
     stream_chat_response(body, &on_event, &my_cancel, ctx).await
@@ -208,9 +233,10 @@ async fn stream_chat_response(
         return Err(ollama_chat_error(status, &text));
     }
 
-    // Watchdog (S3): лёгкая задача следит за РОСТОМ свопа во время генерации (своп —
-    // триггер зависания). При опасном пороге взводит тот же CancelFlag (как «Стоп»),
-    // чтобы прервать запрос ДО неотзывчивости, и записывает причину.
+    // Watchdog (S3): лёгкая задача следит во время генерации за РОСТОМ свопа (своп —
+    // триггер зависания) и за ПЕРЕГРЕВОМ (устойчиво выше TEMP_TRIP_C — риск аварийного
+    // выключения слабой машины). При опасном пороге взводит тот же CancelFlag (как
+    // «Стоп»), чтобы прервать запрос ДО неотзывчивости/ребута, и записывает причину.
     let wd_flag = cancel.clone();
     let wd_reason: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let wd_reason_task = wd_reason.clone();
@@ -218,6 +244,10 @@ async fn stream_chat_response(
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
         let base_swap = sys.used_swap();
+        // Датчики температуры: Linux — hwmon, macOS — частично; на Windows sysinfo
+        // отдаёт пустой список, и температурная ветка сама по себе бездействует.
+        let mut components = sysinfo::Components::new_with_refreshed_list();
+        let mut hot_ticks: u32 = 0; // подряд замеров с перегревом (выдержка против пиков)
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(WATCHDOG_INTERVAL_MS)).await;
             if wd_flag.load(Ordering::Relaxed) {
@@ -226,10 +256,36 @@ async fn stream_chat_response(
             sys.refresh_memory();
             let growth = sys.used_swap().saturating_sub(base_swap);
             if growth > SWAP_TRIP_BYTES {
-                *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some("недостаточно оперативной памяти".to_string());
+                *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                    "недостаточно оперативной памяти — попробуйте модель полегче или \
+                     меньший контекст"
+                        .to_string(),
+                );
                 wd_flag.store(true, Ordering::Relaxed); // прерываем тем же механизмом
                 break;
+            }
+            // Перегрев: берём максимум по всем датчикам (CPU или GPU — неважно, что
+            // именно горячее). Один пик не считается — ждём TEMP_TRIP_TICKS подряд.
+            components.refresh(false);
+            let hottest = components
+                .iter()
+                .filter_map(|c| c.temperature())
+                .fold(None::<f32>, |m, t| Some(m.map_or(t, |m| m.max(t))));
+            if let Some(t) = hottest {
+                if t >= TEMP_TRIP_C {
+                    hot_ticks += 1;
+                    if hot_ticks >= TEMP_TRIP_TICKS {
+                        *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
+                            "компьютер перегревается ({t:.0}°C) — генерация остановлена, \
+                             чтобы машина не выключилась. Дайте компьютеру остыть; \
+                             «щадящий режим» в настройках снижает нагрев"
+                        ));
+                        wd_flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                } else {
+                    hot_ticks = 0; // остыло — счётчик заново
+                }
             }
         }
     });
@@ -345,11 +401,10 @@ async fn stream_chat_response(
     if let Some(e) = stream_err {
         return Err(format!("Ollama прервал генерацию: {e}"));
     }
-    // Если прервал watchdog (а не пользователь) — отдаём точную причину как ошибку.
+    // Если прервал watchdog (а не пользователь) — отдаём точную причину как ошибку
+    // (совет, что делать, входит в текст самой причины).
     if let Some(reason) = wd_reason.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        return Err(format!(
-            "Запрос остановлен: {reason}. Попробуйте модель полегче или меньший контекст."
-        ));
+        return Err(format!("Запрос остановлен: {reason}."));
     }
     Ok(full)
 }
@@ -459,6 +514,7 @@ async fn agentic_chat(
     messages: Vec<serde_json::Value>,
     think: bool,
     num_ctx: Option<u64>,
+    gentle: Option<bool>,
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
 ) -> Result<String, String> {
@@ -490,6 +546,7 @@ async fn agentic_chat(
             "think": false,
             "options": { "num_ctx": ctx },
         });
+        apply_gentle(&mut body, gentle);
         if searches_done < MAX_SEARCHES || reads_done < MAX_READS {
             body["tools"] = serde_json::json!(tool_specs);
         }
@@ -642,13 +699,14 @@ async fn agentic_chat(
 
     // Финальный ответ — СТРИМИМ существующим механизмом (без инструментов, чтобы
     // модель дала текст), с рассуждениями по тумблеру пользователя.
-    let final_body = serde_json::json!({
+    let mut final_body = serde_json::json!({
         "model": model,
         "messages": msgs,
         "stream": true,
         "think": think,
         "options": { "num_ctx": ctx },
     });
+    apply_gentle(&mut final_body, gentle);
     stream_chat_response(final_body, &on_event, &my_cancel, ctx).await
 }
 
@@ -2279,12 +2337,27 @@ fn conversations_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
     Ok(dir)
 }
 
-/// Атомарная запись: пишем во временный файл и переименовываем. При падении в
-/// момент записи исходный файл не повреждается (важно для истории и настроек).
+/// Атомарная и ДОЛГОВЕЧНАЯ запись: пишем во временный файл, доводим его до диска
+/// (fsync) и переименовываем. Атомарность защищает от половинчатого файла при
+/// падении приложения; fsync — от потери данных при внезапной перезагрузке ОС
+/// (перегрев, питание): без него содержимое могло остаться в кеше ОС. На Unix
+/// дополнительно синхронизируем каталог, чтобы пережило ребут само переименование.
 fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, content).map_err(|e| format!("Не удалось записать файл: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Не удалось сохранить файл: {e}"))
+    std::fs::File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("Не удалось довести файл до диска: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("Не удалось сохранить файл: {e}"))?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        // Ошибку не поднимаем: данные уже на диске, fsync каталога — только про
+        // долговечность самого rename (некоторые ФС и так его журналируют).
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 
 /// Защита от обхода путей: id формируем сами (UUID), но всё равно проверяем.
