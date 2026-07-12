@@ -1,6 +1,6 @@
-// Модели и движок: выпадающий список в шапке, каталог набора в настройках
-// (состояния, установка/обновление, проверка обновлений), «светофор» железа,
-// обеспечение/проверка движка Ollama.
+// Модели и движок: АВТО-подбор модели под задачу и железо (ручной выбор — в настройках),
+// каталог набора в настройках (состояния, установка/обновление, проверка обновлений),
+// «светофор» железа, обеспечение/проверка движка Ollama.
 
 import { invoke } from "@tauri-apps/api/core";
 import type { HardwareInfo, ModelInfo, ModelState } from "./types";
@@ -8,18 +8,21 @@ import { state, thinkingByModel, toolsByModel, updateByTag, visionByModel } from
 import {
   checkUpdatesBtn,
   engineEl,
+  engineMetaEl,
+  engineVersionEl,
   hwBarEl,
   hwModelEl,
   hwModelNameEl,
   hwSpecsEl,
   hwWordEl,
   inputEl,
+  modelChoiceEl,
+  modelChoiceStateEl,
   modelListEl,
   modelProgressEl,
   modelProgressFill,
   modelProgressLabel,
   modelPullCancelBtn,
-  modelSelectEl,
   modelsStatusEl,
   refreshBtn,
   statusEl,
@@ -40,71 +43,179 @@ import { refreshDocuments, sidebarDocCtx } from "./documents";
 
 let modelStates: ModelState[] = [];
 
-// ── Список моделей в шапке ───────────────────────────────────────────────────
+// Установленные модели, умеющие отвечать (эмбеддинги bge-m3 отсеивает Rust).
+let installed: ModelInfo[] = [];
+// Список не удалось получить (движок не отвечает) — это НЕ то же самое, что
+// «моделей нет»: в подписи к выбору модели говорим об этом честно.
+let listFailed = false;
 
-// Тянет список установленных моделей из Ollama (через Rust-команду list_models)
-// и заполняет выпадающий список в шапке.
+// ── Авто-выбор модели ────────────────────────────────────────────────────────
+// Модель в шапке больше НЕ выбирают: приложение подбирает её само.
+//   • роль — по задаче: вопрос с картинкой → зрение, обычный вопрос → текст;
+//   • вес — по железу: сильная машина → старшая модель, слабая → лёгкая;
+//   • не хватает памяти прямо сейчас → Rust (plan_inference) сам снизит контекст
+//     либо возьмёт модель полегче той же роли — уже на конкретном запросе.
+// Ручной выбор в настройках («Модель для ответов») перекрывает ТЕКСТОВУЮ роль;
+// ход с картинкой всё равно уйдёт на модель зрения — иначе на него нечем ответить.
+
+// Старшая и лёгкая модель каждой роли (теги набора — см. MODEL_SET в Rust).
+const PREFER = {
+  text: { strong: "qwen3.5:9b", light: "qwen3.5:4b" },
+  vision: { strong: "qwen3-vl:8b", light: "qwen3-vl:4b" },
+} as const;
+
+// Лучшая УСТАНОВЛЕННАЯ модель роли под текущее железо. Сначала точные теги набора
+// (порядок — по «светофору»: зелёный → старшая, иначе лёгкая), затем любая
+// подходящая из установленных (пользователь мог поставить свою). "" — такой нет.
+function bestOfRole(role: "text" | "vision"): string {
+  const names = installed.map((m) => m.name);
+  const { strong, light } = PREFER[role];
+  // Всё, что не зелёный уровень (жёлтый/красный/ещё не измерено), считаем слабым.
+  const order = state.hwTier === "green" ? [strong, light] : [light, strong];
+  for (const tag of order) if (names.includes(tag)) return tag;
+
+  const isVision = (n: string) => visionByModel.get(n) ?? false;
+  const isCode = (n: string) => /coder/i.test(n);
+  const pool =
+    role === "vision"
+      ? names.filter(isVision)
+      : names.filter((n) => !isVision(n) && !isCode(n));
+  if (pool.length) {
+    const family = role === "vision" ? "qwen3-vl" : "qwen3.5";
+    return pool.find((n) => n.startsWith(family)) ?? pool[0];
+  }
+  // Роли нет вовсе. Текст: отвечаем хоть чем-то (модель зрения тоже умеет говорить).
+  // Зрение: честное «нет» — attachments.ts предложит установить qwen3-vl.
+  return role === "text" ? (names[0] ?? "") : "";
+}
+
+// Модель для хода с картинкой (chat.ts, attachments.ts). "" — модели зрения нет.
+export function pickVisionModel(): string {
+  return bestOfRole("vision");
+}
+
+// Применить выбор модели: ручной (если такая ещё установлена) либо авто-подбор.
+// Идемпотентна и дёшева — зовут и loadModels (список изменился), и loadHardware
+// (уточнён уровень железа), и настройки (пользователь сменил выбор).
+export function applyModelChoice() {
+  const names = installed.map((m) => m.name);
+  // Выбранную вручную модель могли удалить — тогда честно возвращаемся к авто.
+  if (state.modelChoice !== "auto" && !names.includes(state.modelChoice) && names.length) {
+    state.modelChoice = "auto";
+    invoke("set_setting", { key: "model_choice", value: "auto" }).catch(() => {});
+  }
+  const manual = state.modelChoice !== "auto" && names.includes(state.modelChoice);
+  state.selectedModel = manual ? state.modelChoice : bestOfRole("text");
+
+  // Во время генерации композером распоряжается setStreaming (поле ввода заблокировано);
+  // не перебиваем его — иначе открытие настроек посреди ответа разблокирует ввод.
+  if (!state.streaming) setComposerEnabled(Boolean(state.selectedModel));
+  updateThinkAvailability();
+  renderModelChoice(manual);
+  renderActiveModel(manual);
+}
+
+// Поле «Модель для ответов» в настройках: «Автоматически» + установленные модели.
+function renderModelChoice(manual: boolean) {
+  modelChoiceEl.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "auto";
+  auto.textContent = "Автоматически";
+  modelChoiceEl.appendChild(auto);
+  for (const m of installed) {
+    const opt = document.createElement("option");
+    opt.value = m.name;
+    opt.textContent = m.name;
+    modelChoiceEl.appendChild(opt);
+  }
+  modelChoiceEl.value = manual ? state.modelChoice : "auto";
+  modelChoiceEl.disabled = installed.length === 0;
+
+  if (!state.selectedModel) {
+    modelChoiceStateEl.textContent = listFailed
+      ? "движок не отвечает — список моделей недоступен"
+      : "моделей нет — установите их ниже";
+    return;
+  }
+  const vis = pickVisionModel();
+  const visPart = vis && vis !== state.selectedModel ? `, с картинкой — ${vis}` : "";
+  modelChoiceStateEl.textContent = manual
+    ? `вручную: ${state.selectedModel}${visPart}`
+    : `сейчас ${state.selectedModel}${visPart}`;
+}
+
+// Строка активной модели в блоке железа (внизу слева) — единственное место, где
+// имя модели видно на экране чата. Заказчику имя ни о чём не говорит, поэтому
+// оно не в шапке, но остаётся доступным для поддержки/диагностики.
+function renderActiveModel(manual: boolean) {
+  if (!state.selectedModel) {
+    hwModelEl.hidden = true;
+    return;
+  }
+  hwModelNameEl.textContent = state.selectedModel;
+  hwModelEl.title = manual
+    ? "Модель выбрана вручную в настройках"
+    : "Модель подобрана автоматически — по задаче и по вашему железу";
+  hwModelEl.hidden = false;
+}
+
+// Тянет список установленных моделей из Ollama (Rust-команда list_models) и
+// пересчитывает активную модель.
+let warnedNoModels = false;
 export async function loadModels() {
   let models: ModelInfo[];
   try {
     models = await invoke<ModelInfo[]>("list_models");
   } catch (err) {
-    showModelHint("Ollama недоступна");
+    installed = [];
+    listFailed = true;
+    applyModelChoice(); // композер выключен, поле в настройках честно пустое
     addError(`Не удалось получить список моделей: ${humanError(err)}`);
     return;
   }
 
-  if (models.length === 0) {
-    showModelHint("Модели не установлены");
-    // Без команд терминала (принцип продукта): ведём в настройки или мастер.
-    addError(
-      "Модели не установлены. Откройте Настройки → «Модели» и нажмите «Установить» " +
-        "у нужной модели, либо запустите «Мастер установки…» — он всё сделает сам.",
-    );
-    return;
-  }
-
+  installed = models;
+  listFailed = false;
   thinkingByModel.clear();
   visionByModel.clear();
   toolsByModel.clear();
-  modelSelectEl.innerHTML = "";
   for (const m of models) {
     thinkingByModel.set(m.name, m.thinking);
     visionByModel.set(m.name, m.vision);
     toolsByModel.set(m.name, m.tools);
-    const opt = document.createElement("option");
-    opt.value = m.name;
-    opt.textContent = m.name;
-    modelSelectEl.appendChild(opt);
   }
-  // Предпочитаем целевую базовую модель, если она установлена; иначе — первую.
-  const names = models.map((m) => m.name);
-  // Сохраняем текущий выбор пользователя при «Обновить»; при старте (selectedModel
-  // пуст) восстанавливаем сохранённую модель из settings.json; иначе целевая/первая.
-  if (!state.selectedModel || !names.includes(state.selectedModel)) {
-    let saved: string | null = null;
-    if (!state.selectedModel) {
-      try {
-        saved = await invoke<string | null>("get_setting", { key: "selected_model" });
-      } catch {
-        saved = null;
-      }
+  applyModelChoice();
+
+  if (!state.selectedModel) {
+    // Без команд терминала (принцип продукта): ведём в настройки или мастер.
+    // Предупреждаем один раз, а не на каждый повтор проверки.
+    if (!warnedNoModels) {
+      warnedNoModels = true;
+      addError(
+        "Модели не установлены. Откройте Настройки → «Модели» и нажмите «Установить» " +
+          "у нужной модели, либо запустите «Мастер установки…» — он всё сделает сам.",
+      );
     }
-    if (saved && names.includes(saved)) {
-      state.selectedModel = saved; // сохранённая модель ещё установлена
-    } else {
-      const preferred = "qwen3.5:9b"; // откат: целевая, иначе первая в списке
-      state.selectedModel = names.includes(preferred) ? preferred : names[0];
-    }
+    return;
   }
-  modelSelectEl.value = state.selectedModel;
-  modelSelectEl.disabled = false;
-  setComposerEnabled(true);
-  updateThinkAvailability();
+  warnedNoModels = false;
   inputEl.focus();
 }
 
-// Включает/выключает тумблер «Размышления» по возможностям выбранной модели.
+// Восстановить выбор модели из settings.json (по умолчанию — «Автоматически»).
+// Прежний ключ selected_model (модель, выбранная в шапке) намеренно НЕ переносим:
+// теперь модель подбирается сама, а старый выбор молча запирал бы пользователя
+// на одной модели.
+export async function initModelChoice() {
+  try {
+    const saved = await invoke<string | null>("get_setting", { key: "model_choice" });
+    if (saved) state.modelChoice = saved;
+  } catch {
+    /* настройки недоступны — остаёмся на «Автоматически» */
+  }
+}
+
+// Включает/выключает тумблер «Размышления» по возможностям активной модели.
 export function updateThinkAvailability() {
   const supports = thinkingByModel.get(state.selectedModel) ?? false;
   thinkToggleEl.disabled = !supports;
@@ -112,17 +223,6 @@ export function updateThinkAvailability() {
     ? "Режим рассуждений модели (медленнее, но точнее)"
     : "Эта модель не поддерживает режим рассуждений";
   thinkToggleEl.classList.toggle("on", supports && state.thinkEnabled);
-}
-
-// Показывает в списке одиночную подсказку и блокирует ввод (нет моделей / нет Ollama).
-function showModelHint(text: string) {
-  modelSelectEl.innerHTML = "";
-  const opt = document.createElement("option");
-  opt.textContent = text;
-  modelSelectEl.appendChild(opt);
-  modelSelectEl.disabled = true;
-  state.selectedModel = "";
-  setComposerEnabled(false);
 }
 
 // ── Каталог набора моделей (страница настроек, M4) ───────────────────────────
@@ -347,8 +447,8 @@ async function pullModelTag(tag: string, isUpdate: boolean) {
 
 // ── «Светофор» железа ────────────────────────────────────────────────────────
 
-// Словесная оценка + характеристики с подписями. Уровень, числа и рекомендуемую
-// модель берём из detect_hardware (логику НЕ меняем).
+// Словесная оценка + характеристики с подписями. Уровень и числа берём из
+// detect_hardware (логику НЕ меняем). Уровень же задаёт вес авто-модели.
 export async function loadHardware() {
   let hw: HardwareInfo;
   try {
@@ -356,16 +456,17 @@ export async function loadHardware() {
   } catch {
     hwWordEl.textContent = "Конфигурация не определена";
     hwSpecsEl.textContent = "";
-    hwModelEl.hidden = true;
     hwBarEl.className = "hwchip hwchip--unknown";
     hwBarEl.hidden = false;
+    // Железо неизвестно — берём осторожный (лёгкий) вариант модели, но выбор
+    // всё равно применяем: иначе поле в настройках осталось бы неотрисованным.
+    applyModelChoice();
     return;
   }
 
-  // Цвет — у кружка (классы hwchip--*); статус и рекомендованная модель — текстом в блоке.
+  // Цвет — у кружка (классы hwchip--*); статус — текстом в блоке.
   const word =
     hw.tier === "green" ? "Оптимально" : hw.tier === "yellow" ? "Достаточно" : "Ограничено";
-  const model = hw.tier === "green" ? "qwen3.5:9b" : "qwen3.5:4b";
 
   // Внутри характеристики — неразрывные пробелы (не рвётся); перенос только между ними.
   const nb = " ";
@@ -381,10 +482,13 @@ export async function loadHardware() {
 
   hwWordEl.textContent = word; // строка 1: статус
   hwSpecsEl.textContent = specs.join(" · "); // строка 2: характеристики (перенос по « · »)
-  hwModelNameEl.textContent = `Рекомендуется ${model}`; // строка 3: модель — прямо в блоке
-  hwModelEl.hidden = false;
   hwBarEl.className = `hwchip hwchip--${hw.tier}`;
   hwBarEl.hidden = false;
+
+  // Уровень железа решает, какую модель берёт авто-выбор (старшую или лёгкую), —
+  // пересчитываем активную модель (список моделей мог загрузиться раньше железа).
+  state.hwTier = hw.tier;
+  applyModelChoice();
 
   // Щадящий режим по умолчанию на слабом железе (yellow/red): бережём машину от
   // перегрева, пока пользователь сам не решил иначе (явный выбор в настройках
@@ -399,8 +503,17 @@ export async function loadHardware() {
 
 // Обеспечить движок при старте: приложение само переиспользует запущенную Ollama
 // или поднимает свою (терминал пользователю не нужен). Возвращает, готов ли движок.
+// Пока движок не подтвердил, что жив, подпись «на чём работает» не показываем:
+// висящая версия при погасшем индикаторе выглядела бы как враньё.
+function hideEngineMeta() {
+  engineMetaEl.hidden = true;
+  engineVersionEl.textContent = "";
+  engineEl.removeAttribute("title");
+}
+
 export async function ensureEngine(): Promise<boolean> {
   statusEl.textContent = "Запуск движка…";
+  hideEngineMeta();
   engineEl.classList.remove("engine--down");
   let res: { status: string; message: string };
   try {
@@ -419,19 +532,23 @@ export async function ensureEngine(): Promise<boolean> {
   return false;
 }
 
-// Мягкая проверка движка. В шапке — человекочитаемое состояние («Готов к работе»),
-// а не версия Ollama: заказчику она ничего не говорит. Техдетали (версия) — в
-// подсказке при наведении и в «Проверке системы» настроек.
+// Мягкая проверка движка. В шапке — сначала человеческое состояние («Готов к работе»),
+// и тихой серой подписью рядом — на чём именно оно работает: «Ollama 0.30.8». Заказчик
+// видит и что всё в порядке, и что под капотом (это часть доверия: движок локальный).
 // Неблокирующая — при недоступности просто показываем статус, приложение работает.
 export async function checkOllama() {
   try {
     const version = await invoke<string>("ollama_version");
     statusEl.textContent = "Готов к работе";
-    engineEl.title = `Движок Ollama ${version}`;
+    engineVersionEl.textContent = version;
+    engineMetaEl.hidden = false;
+    engineEl.title =
+      `Нейросеть работает прямо на этом компьютере — через локальный движок Ollama ${version}. ` +
+      "Ничего не уходит в интернет.";
     engineEl.classList.remove("engine--down");
   } catch {
     statusEl.textContent = "Движок не отвечает";
-    engineEl.removeAttribute("title");
+    hideEngineMeta();
     engineEl.classList.add("engine--down");
   }
 }
@@ -448,14 +565,15 @@ async function refreshAll() {
   }
 }
 
-// Обработчики: выбор модели, «обновить», проверка обновлений, отмена pull.
+// Обработчики: ручной выбор модели (настройки), «обновить», проверка обновлений,
+// отмена установки.
 export function wireModels() {
-  modelSelectEl.addEventListener("change", () => {
-    state.selectedModel = modelSelectEl.value;
-    updateThinkAvailability(); // у новой модели могут быть другие возможности
+  modelChoiceEl.addEventListener("change", () => {
+    state.modelChoice = modelChoiceEl.value || "auto";
+    applyModelChoice(); // у новой модели другие возможности (размышления, зрение)
     // запоминаем выбор между запусками (settings.json — единый источник истины)
-    invoke("set_setting", { key: "selected_model", value: state.selectedModel }).catch((e) =>
-      console.error("set_setting selected_model:", e),
+    invoke("set_setting", { key: "model_choice", value: state.modelChoice }).catch((e) =>
+      console.error("set_setting model_choice:", e),
     );
   });
   refreshBtn.addEventListener("click", refreshAll);

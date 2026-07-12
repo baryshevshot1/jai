@@ -19,9 +19,11 @@ import {
   appUpdateProgressLabel,
   appUpdateStatusEl,
   appVersionEl,
+  brandHomeBtn,
   composerWrapEl,
   diagListEl,
   diagRunBtn,
+  diagSummaryEl,
   epEngineEl,
   epModelsEl,
   epResetBtn,
@@ -49,7 +51,7 @@ import {
   thinkToggleEl,
   wizardView,
 } from "./dom";
-import { humanError, ICON_REFRESH_CW } from "./util";
+import { humanError, ICON_REFRESH_CW, plural } from "./util";
 import { confirmModal, showChatView, updateGentleUi } from "./ui";
 import {
   flashIndexLabel,
@@ -57,7 +59,13 @@ import {
   showIndexProgress,
   sidebarDocCtx,
 } from "./documents";
-import { loadModelStates, loadModels, modelsStatus, resetCheckButton } from "./models";
+import {
+  applyModelChoice,
+  loadModelStates,
+  loadModels,
+  modelsStatus,
+  resetCheckButton,
+} from "./models";
 import { closeProjectView } from "./projects";
 import { refreshOutboundLog } from "./online";
 import { runImport } from "./pull";
@@ -74,14 +82,19 @@ function openSettings() {
   settingsBtn.classList.add("active");
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
   refreshDocuments(sidebarDocCtx); // свежий список общей базы (карточка «Документы»)
+  applyModelChoice(); // поле «Модель для ответов» — всегда в актуальном состоянии
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
   resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
   refreshOutboundLog(); // актуальный журнал обращений в интернет
   runDiagnostics(); // самопроверка при каждом открытии (локально, дёшево)
 }
 
-// Вернуться назад: страница скрывается, лента и поле ввода возвращаются.
-function closeSettings() {
+// «На главную»: закрывает ЛЮБУЮ полноэкранную страницу (настройки, проект, мастер) и
+// возвращает ленту с полем ввода. Одна точка и для кнопки «Назад» в настройках, и для
+// клика по бренду в шапке — поведение обязано быть одинаковым.
+// Имя проекта и его инструкции сохраняются по blur, а клик по кнопке снимает фокус, —
+// поэтому уход с экрана проекта ничего не теряет.
+function goHome() {
   showChatView();
   resetCheckButton(); // уход со страницы — кнопка к исходному (итог в сессии сохранён)
   if (!state.streaming && state.selectedModel) inputEl.focus();
@@ -293,51 +306,103 @@ function diagBadge(status: string): { cls: string; text: string } {
   return { cls: "model-badge--err", text: "Проблема" };
 }
 
+// Итог проверки под списком: время и сводка. Обновляется на КАЖДЫЙ запуск — иначе
+// повторная проверка выглядит как «ничего не произошло» (список-то тот же).
+function diagSummary(text: string, isError: boolean) {
+  diagSummaryEl.textContent = text;
+  diagSummaryEl.classList.toggle("diag-summary--error", isError);
+  diagSummaryEl.hidden = false;
+}
+
+// Проверка локальная и отрабатывает за миллисекунды: без выдержки кнопка мигает
+// быстрее, чем глаз успевает заметить, и кажется, что она не работает.
+const DIAG_MIN_SPIN_MS = 600;
+let diagRunning = false;
+
+// Довести длительность нажатия до DIAG_MIN_SPIN_MS (чтобы «Проверка…» было видно).
+// startedAt === null → выдержка не нужна (проверка на открытии настроек).
+function diagMinDelay(startedAt: number | null): Promise<void> {
+  if (startedAt === null) return Promise.resolve();
+  const left = DIAG_MIN_SPIN_MS - (Date.now() - startedAt);
+  return left > 0 ? new Promise((r) => setTimeout(r, left)) : Promise.resolve();
+}
+
 // Запустить самопроверку и нарисовать результат (строки — как список моделей).
-async function runDiagnostics() {
+// Зовётся и по кнопке (byClick), и при каждом открытии настроек. Выдержку держим
+// ТОЛЬКО для нажатия: на открытии она бы просто заблокировала кнопку на пол-секунды.
+async function runDiagnostics(byClick = false) {
+  if (diagRunning) return; // повторное нажатие во время проверки — не дублируем
+  diagRunning = true;
   diagRunBtn.disabled = true;
   diagRunBtn.classList.add("checking");
   diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
+  diagSummaryEl.hidden = true; // итог прошлой проверки убираем — он уже неактуален
+  const startedAt = byClick ? Date.now() : null; // null → без выдержки
   try {
     const checks = await invoke<DiagCheck[]>("run_diagnostics");
-    diagListEl.innerHTML = "";
-    for (const c of checks) {
-      const row = document.createElement("div");
-      row.className = "model-row";
-
-      const icon = document.createElement("span");
-      icon.className = "model-row__icon";
-      icon.innerHTML = diagIcon(c.id);
-
-      const info = document.createElement("div");
-      info.className = "model-row__info";
-      const title = document.createElement("div");
-      title.className = "model-row__title";
-      title.textContent = c.title;
-      const detail = document.createElement("div");
-      detail.className = "model-row__tag";
-      detail.textContent = c.detail;
-      info.append(title, detail);
-
-      const badge = document.createElement("span");
-      const b = diagBadge(c.status);
-      badge.className = `model-badge ${b.cls}`;
-      badge.textContent = b.text;
-
-      row.append(icon, info, badge);
-      diagListEl.appendChild(row);
-    }
+    await diagMinDelay(startedAt);
+    renderDiagnostics(checks);
   } catch (e) {
+    await diagMinDelay(startedAt);
     diagListEl.innerHTML = "";
     const err = document.createElement("div");
     err.className = "model-row__tag";
     err.textContent = `Не удалось выполнить проверку: ${e}`;
     diagListEl.appendChild(err);
+    diagSummary("Проверка не выполнена", true);
   } finally {
+    diagRunning = false;
     diagRunBtn.disabled = false;
     diagRunBtn.classList.remove("checking");
     diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверить`;
   }
+}
+
+// Строки проверок + сводка с временем (видимый отклик на каждое нажатие).
+function renderDiagnostics(checks: DiagCheck[]) {
+  diagListEl.innerHTML = "";
+  for (const c of checks) {
+    const row = document.createElement("div");
+    row.className = "model-row model-row--fade"; // проявление строк — видно, что список свежий
+
+    const icon = document.createElement("span");
+    icon.className = "model-row__icon";
+    icon.innerHTML = diagIcon(c.id);
+
+    const info = document.createElement("div");
+    info.className = "model-row__info";
+    const title = document.createElement("div");
+    title.className = "model-row__title";
+    title.textContent = c.title;
+    const detail = document.createElement("div");
+    detail.className = "model-row__tag";
+    detail.textContent = c.detail;
+    info.append(title, detail);
+
+    const badge = document.createElement("span");
+    const b = diagBadge(c.status);
+    badge.className = `model-badge ${b.cls}`;
+    badge.textContent = b.text;
+
+    row.append(icon, info, badge);
+    diagListEl.appendChild(row);
+  }
+
+  const warn = checks.filter((c) => c.status === "warn").length;
+  const fail = checks.filter((c) => c.status !== "ok" && c.status !== "warn").length;
+  const at = new Date().toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
+  if (!warn && !fail) {
+    const n = checks.length;
+    diagSummary(
+      `Проверено в ${at} · всё в порядке (${n} ${plural(n, "проверка", "проверки", "проверок")})`,
+      false,
+    );
+    return;
+  }
+  const bits: string[] = [];
+  if (fail) bits.push(`проблем: ${fail}`);
+  if (warn) bits.push(`замечаний: ${warn}`);
+  diagSummary(`Проверено в ${at} · ${bits.join(", ")}`, fail > 0);
 }
 
 // ── Обновления приложения: онлайн-проверка (по кнопке) и установка с диска ────
@@ -607,7 +672,8 @@ export async function initSidebar() {
 // Обработчики страницы настроек, темы, панели, диагностики и обновлений.
 export function wireSettings() {
   settingsBtn.addEventListener("click", openSettings);
-  settingsBackBtn.addEventListener("click", closeSettings);
+  settingsBackBtn.addEventListener("click", goHome);
+  brandHomeBtn.addEventListener("click", goHome); // бренд в шапке = «на главную»
   epSetModelsBtn.addEventListener("click", settingsPickModels);
   epSetEngineBtn.addEventListener("click", setEnginePathDialog);
   epResetBtn.addEventListener("click", resetEnginePaths);
@@ -616,7 +682,9 @@ export function wireSettings() {
   themeBtn.addEventListener("click", toggleTheme);
   sidebarResizer.addEventListener("pointerdown", startSidebarResize);
   sidebarToggleBtn.addEventListener("click", toggleSidebar);
-  diagRunBtn.addEventListener("click", runDiagnostics);
+  // Именно () => runDiagnostics(true): передать функцию напрямую нельзя — в byClick
+  // прилетел бы объект события (истинный, но не по смыслу).
+  diagRunBtn.addEventListener("click", () => runDiagnostics(true));
   appUpdateCheckBtn.addEventListener("click", checkAppUpdate);
   appUpdateDiskBtn.addEventListener("click", installAppUpdateFromDisk);
   getVersion()
