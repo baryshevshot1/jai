@@ -66,3 +66,43 @@ describe("plural", () => {
     expect(plural(0, "ядро", "ядра", "ядер")).toBe("ядер");
   });
 });
+
+describe("humanError: ошибка с кодом причины из Rust", () => {
+  it("узнаёт причину по коду, не заглядывая в текст", () => {
+    // Текст намеренно не содержит ни одного маркера, по которому сработал бы
+    // разбор строк, — значит сработал именно код.
+    expect(humanError({ code: "engine_down", message: "какой угодно текст" })).toContain(
+      "Движок не отвечает",
+    );
+    expect(humanError({ code: "timeout", message: "…" })).toContain("время ожидания");
+    expect(humanError({ code: "model_missing", message: "…" })).toContain(
+      "Модель не установлена",
+    );
+    expect(humanError({ code: "out_of_memory", message: "…" })).toContain("Не хватает памяти");
+  });
+
+  it("код важнее текста: текст про «refused» не перебивает код таймаута", () => {
+    const out = humanError({ code: "timeout", message: "connection refused" });
+    expect(out).toContain("время ожидания");
+    expect(out).not.toContain("Движок не отвечает");
+  });
+
+  it("незнакомый код показывает сообщение из Rust, а не «неизвестная ошибка»", () => {
+    // Бэкенд может оказаться новее интерфейса — сообщение уже человеческое.
+    expect(humanError({ code: "disk_full", message: "На диске нет места." })).toBe(
+      "На диске нет места.",
+    );
+  });
+
+  it("код unknown означает «причина не распознана» — показываем текст как есть", () => {
+    expect(humanError({ code: "unknown", message: "Странный сбой." })).toBe("Странный сбой.");
+  });
+
+  it("объект не той формы разбирается по-старому, а не как [object Object]", () => {
+    // Страховка на время миграции: пока часть команд шлёт строки, а часть — объекты.
+    expect(humanError({ message: "operation timed out" })).toContain("время ожидания");
+    expect(humanError(new Error("model x not found, try pulling it first"))).toContain(
+      "Модель не установлена",
+    );
+  });
+});

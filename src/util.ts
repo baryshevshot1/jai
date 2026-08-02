@@ -3,11 +3,44 @@
 
 import type { DocAttachment } from "./types";
 
-// Сырые технические ошибки (reqwest/serde/Ollama) → короткий человеческий текст.
-// Детали остаются в console для диагностики; пользователю — понятная суть.
-// Известные случаи распознаются по устойчивым маркерам конкретных сбоев; всё
-// нераспознанное показываем как есть (обрезав): ложная догадка хуже сырой
-// строки — она уводит диагностику в сторону.
+// Технические ошибки → короткий человеческий текст. Детали остаются в console для
+// диагностики; пользователю — понятная суть.
+//
+// Ошибка из Rust приходит в одном из двух видов:
+//   { code, message } — причину назвал сам бэкенд в точке отказа (см. error.rs);
+//   строка           — участок ещё не переведён на коды.
+// Первый вид разбираем по коду, второй — по устойчивым маркерам текста. Разбор
+// текста остаётся временно и должен исчезнуть по мере перевода команд: угадывание
+// по формулировке ломается от любой правки текста в Rust.
+
+// Тексты для кодов причин. Ключи — ровно значения ErrorCode в src-tauri/src/error.rs.
+const BY_CODE: Record<string, string> = {
+  engine_down:
+    "Движок не отвечает. Нажмите кнопку обновления в шапке или откройте Настройки → «Проверка системы».",
+  timeout: "Превышено время ожидания ответа движка.",
+  model_missing: "Модель не установлена. Откройте Настройки → «Модели».",
+  out_of_memory:
+    "Не хватает памяти для модели. Закройте тяжёлые программы или установите модель полегче: Настройки → «Модели».",
+};
+
+// Форму проверяем, а не доверяем типу: на проводе IPC может оказаться что угодно —
+// строка, объект с кодом, объект без кода, Error, вообще произвольное значение.
+function errorCode(e: unknown): string | null {
+  if (typeof e !== "object" || e === null) return null;
+  const code = (e as Record<string, unknown>).code;
+  return typeof code === "string" && code ? code : null;
+}
+
+// Текст ошибки в любом её виде. Без этого объект без кода превратился бы в
+// «[object Object]», и сообщение потерялось бы целиком.
+function errorText(e: unknown): string {
+  if (typeof e === "object" && e !== null) {
+    const message = (e as Record<string, unknown>).message;
+    if (typeof message === "string" && message) return message;
+  }
+  return String(e);
+}
+
 const KNOWN_ERRORS: ReadonlyArray<[RegExp, string]> = [
   // Движок не запущен или порт закрыт: «connection refused», tcp connect error…
   [
@@ -31,10 +64,25 @@ const KNOWN_ERRORS: ReadonlyArray<[RegExp, string]> = [
 ];
 
 export function humanError(e: unknown): string {
-  const s = String(e);
-  console.error(s);
-  for (const [re, text] of KNOWN_ERRORS) if (re.test(s)) return text;
-  // Обрезаем по кодовым точкам: slice по UTF-16-единицам мог бы разрубить эмодзи.
+  const code = errorCode(e);
+  const text = errorText(e);
+  console.error(code ? `[${code}] ${text}` : text);
+
+  // Причину назвал бэкенд — верим ему и текст не разбираем.
+  if (code && BY_CODE[code]) return BY_CODE[code];
+
+  // Кода нет вовсе либо он "unknown" (участок ещё не переведён и честно говорит
+  // «не знаю») — остаётся временный разбор текста по устойчивым маркерам.
+  // Код, которого нет в таблице, — бэкенд новее интерфейса: его сообщение уже
+  // человеческое и на русском, показываем как есть.
+  if (!code || code === "unknown") {
+    for (const [re, human] of KNOWN_ERRORS) if (re.test(text)) return human;
+  }
+  return clip(text);
+}
+
+// Обрезаем по кодовым точкам: slice по UTF-16-единицам мог бы разрубить эмодзи.
+function clip(s: string): string {
   const cps = [...s];
   return cps.length > 200 ? cps.slice(0, 200).join("") + "…" : s;
 }
