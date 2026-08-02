@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { DocAttachment } from "./types";
-import { state, visionByModel } from "./state";
+import { autoTagsForRole, state, visionByModel } from "./state";
 import {
   attachBtn,
   composerWrapEl,
@@ -207,16 +207,30 @@ export function ensureVisionModel() {
   }
 }
 
-// Нет модели зрения → предложить установить qwen3-vl через единый runPull.
+// Нет модели зрения → предложить установить её через единый runPull.
 // Ставим ЛЁГКИЙ вариант независимо от «светофора»: уровень green даётся уже за 16 ГБ ОЗУ
 // (VRAM может быть всего 6 ГБ), а 8B на 6 ГБ видеопамяти — впритык (CLAUDE.md). Навязывать
 // лишние 3 ГБ загрузки ради зрения не стоит. Старшую модель приложение всё равно возьмёт,
 // если пользователь поставил её сам из настроек (см. bestOfRole в models.ts).
-const VISION_MODEL = "qwen3-vl:4b";
+// Тег берём из набора (последний в лестнице роли = самый лёгкий), своего списка
+// моделей здесь не держим: он разошёлся бы с MODEL_SET в Rust при первой же правке.
+function visionInstallTag(): string {
+  const ladder = autoTagsForRole("vision");
+  return ladder[ladder.length - 1] ?? "";
+}
 
 async function offerInstallVision() {
   if (state.pullingTag) {
     addNotice(`Дождитесь завершения установки «${state.pullingTag}» — затем можно ставить модель зрения.`);
+    return;
+  }
+  const VISION_MODEL = visionInstallTag();
+  if (!VISION_MODEL) {
+    // Набор ещё не получен от движка — предлагать конкретную модель не из чего.
+    addNotice(
+      "Не удалось определить, какую модель зрения предложить: движок не отвечает. " +
+        "Нажмите кнопку обновления в шапке и попробуйте снова.",
+    );
     return;
   }
   const ok = await confirmModal(

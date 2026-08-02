@@ -77,3 +77,30 @@ export const shownSourceFiles = new Set<string>();
 // Модели, про которые уже показано примечание плана (напр., «тесно в свободной
 // видеопамяти») — раз на модель за сессию, чтобы плашка не спамила каждый запрос.
 export const vramNotedModels = new Set<string>();
+
+// ── Набор моделей приложения ─────────────────────────────────────────────────
+// Задаётся ОДНИМ списком MODEL_SET в Rust и приезжает сюда командой model_states.
+// Второго списка тегов на фронтенде быть не должно: при правке набора в Rust он
+// молча разойдётся, и приложение продолжит предлагать модель, которой уже нет.
+// Заполняет models.ts при загрузке списка; читают models/attachments/documents.
+export const modelSet = new Map<
+  string,
+  { role: string; approxGb: number; autoPick: boolean }
+>();
+
+// Теги роли, участвующие в АВТОМАТИЧЕСКОМ подборе, от старшей модели к лёгкой.
+// Профили под ручной выбор (auto_pick: false) сюда не попадают — приложение не
+// должно назначать их само. Пустой массив = набор ещё не загружен.
+export function autoTagsForRole(role: string): string[] {
+  return [...modelSet.entries()]
+    .filter(([, v]) => v.role === role && v.autoPick)
+    .sort((a, b) => b[1].approxGb - a[1].approxGb)
+    .map(([tag]) => tag);
+}
+
+// Тег модели заданной роли — для ролей, где модель в наборе одна (эмбеддинги).
+// "" = набор ещё не загружен.
+export function tagForRole(role: string): string {
+  for (const [tag, v] of modelSet) if (v.role === role) return tag;
+  return "";
+}

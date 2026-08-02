@@ -4,7 +4,15 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { HardwareInfo, ModelInfo, ModelState } from "./types";
-import { state, thinkingByModel, toolsByModel, updateByTag, visionByModel } from "./state";
+import {
+  autoTagsForRole,
+  modelSet,
+  state,
+  thinkingByModel,
+  toolsByModel,
+  updateByTag,
+  visionByModel,
+} from "./state";
 import {
   checkUpdatesBtn,
   engineEl,
@@ -55,10 +63,13 @@ let listFailed = false;
 // второго списка не заводим: разойдутся — пользователь увидит разное в разных местах.
 const titleByTag = new Map<string, string>();
 
-// Запомнить имена набора. true — что-то изменилось (подписи стоит перерисовать).
+// Запомнить набор: имена для показа и роль/вес/участие в авто-подборе (последнее —
+// в общем modelSet, его читают и другие модули). true — имена изменились и подписи
+// стоит перерисовать.
 function rememberTitles(list: ModelState[]): boolean {
   let changed = false;
   for (const m of list) {
+    modelSet.set(m.tag, { role: m.role, approxGb: m.approx_gb, autoPick: m.auto_pick });
     if (titleByTag.get(m.tag) !== m.title) {
       titleByTag.set(m.tag, m.title);
       changed = true;
@@ -97,22 +108,19 @@ function humanModel(tag: string): string {
 // Ручной выбор в настройках («Модель для ответов») перекрывает ТЕКСТОВУЮ роль;
 // ход с картинкой всё равно уйдёт на модель зрения — иначе на него нечем ответить.
 
-// Старшая и лёгкая модель каждой роли (теги набора — см. MODEL_SET в Rust).
-const PREFER = {
-  text: { strong: "qwen3.5:9b", light: "qwen3.5:4b" },
-  vision: { strong: "qwen3-vl:8b", light: "qwen3-vl:4b" },
-} as const;
-
-// Лучшая УСТАНОВЛЕННАЯ модель роли под текущее железо. Сначала точные теги набора
+// Лучшая УСТАНОВЛЕННАЯ модель роли под текущее железо. Сначала теги набора
 // (порядок — по «светофору»: зелёный → старшая, иначе лёгкая), затем любая
 // подходящая из установленных (пользователь мог поставить свою). "" — такой нет.
 function bestOfRole(role: "text" | "vision"): string {
   const names = installed.map((m) => m.name);
-  const { strong, light } = PREFER[role];
   // Всё, что не зелёный уровень (жёлтый/красный/ещё не измерено), считаем слабым.
-  const order = state.hwTier === "green" ? [strong, light] : [light, strong];
+  const heavyFirst = autoTagsForRole(role);
+  const order = state.hwTier === "green" ? heavyFirst : [...heavyFirst].reverse();
   for (const tag of order) if (names.includes(tag)) return tag;
 
+  // Набор недоступен (движок не ответил на model_states) или из него ничего не
+  // установлено: выбираем среди установленных по их же возможностям — эти признаки
+  // приходят от движка, своего списка моделей тут по-прежнему нет.
   const isVision = (n: string) => visionByModel.get(n) ?? false;
   const isCode = (n: string) => /coder/i.test(n);
   const pool =
@@ -120,8 +128,10 @@ function bestOfRole(role: "text" | "vision"): string {
       ? names.filter(isVision)
       : names.filter((n) => !isVision(n) && !isCode(n));
   if (pool.length) {
-    const family = role === "vision" ? "qwen3-vl" : "qwen3.5";
-    return pool.find((n) => n.startsWith(family)) ?? pool[0];
+    // При прочих равных предпочитаем семейство из набора — но только если набор
+    // известен: захардкоженного имени семейства здесь быть не должно.
+    const family = heavyFirst[0]?.split(":")[0];
+    return (family && pool.find((n) => n.startsWith(family))) || pool[0];
   }
   // Роли нет вовсе. Текст: отвечаем хоть чем-то (модель зрения тоже умеет говорить).
   // Зрение: честное «нет» — attachments.ts предложит установить qwen3-vl.
