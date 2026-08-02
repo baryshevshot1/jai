@@ -22,6 +22,7 @@ import {
 } from "./dom";
 import { docSubline, fileFormat, imageDataUrl, plural } from "./util";
 import {
+  activeScreen,
   addError,
   addNotice,
   confirmModal,
@@ -310,7 +311,7 @@ async function wireDragDrop() {
       }
       // Открыты настройки, экран проекта или мастер — композера на экране нет,
       // принимать файл некуда (и сообщение в ленте было бы не видно).
-      if (composerWrapEl.hidden) return;
+      if (activeScreen() !== "chat") return;
       if (ev.type === "drop") {
         setDragOver(false);
         void acceptDroppedFiles(ev.paths);
@@ -368,7 +369,7 @@ const MAX_IMAGE_SIDE = 2048; // модели зрения всё равно уж
 
 function wirePaste() {
   document.addEventListener("paste", (e) => {
-    if (composerWrapEl.hidden) return;
+    if (activeScreen() !== "chat") return;
     const img = clipboardImage(e.clipboardData);
     if (!img) return; // в буфере текст — вставка работает как обычно
     e.preventDefault();

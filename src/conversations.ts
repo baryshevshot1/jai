@@ -15,9 +15,9 @@ import {
   messagesEl,
   newChatBtn,
   projectChatListEl,
-  projectView,
 } from "./dom";
 import {
+  activeScreen,
   addBubble,
   addError,
   confirmModal,
@@ -111,7 +111,8 @@ export async function refreshConversationList() {
     return;
   }
   renderConvList();
-  if (!projectView.hidden && state.viewingProjectId) renderProjectChats(state.viewingProjectId);
+  if (activeScreen() === "project" && state.viewingProjectId)
+    renderProjectChats(state.viewingProjectId);
 }
 
 // Шкала времени списка диалогов: полоса «от какого момента» и её подпись.
@@ -324,7 +325,8 @@ export async function deleteConversation(id: string) {
   } else {
     await refreshConversationList();
   }
-  if (!projectView.hidden && state.viewingProjectId) renderProjectChats(state.viewingProjectId);
+  if (activeScreen() === "project" && state.viewingProjectId)
+    renderProjectChats(state.viewingProjectId);
 }
 
 // Очистка всех диалогов (вся история стирается с диска).

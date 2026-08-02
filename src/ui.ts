@@ -397,18 +397,57 @@ export function stop() {
   setStreaming(false);
 }
 
-// Показать экран чата, спрятав настройки и экран проекта (идемпотентно). Общая
-// точка для conversations/settings — без импорта их модулей (разрыв циклов).
+// ── Переключение экранов ─────────────────────────────────────────────────────
+// Место ленты диалогов занимают ещё три полноэкранные страницы: настройки, экран
+// проекта и мастер установки. Раньше каждая при открытии сама гасила все остальные
+// вручную — четыре набора флагов hidden, разбросанных по четырём модулям. Забыть
+// один флаг означало показать два экрана сразу или ни одного, и добавление пятого
+// экрана требовало правки в каждом из мест.
+//
+// Здесь видимость решается ОДНОЙ функцией: она знает про все экраны сразу, поэтому
+// «забыть погасить» технически невозможно. Побочные действия открытия (обновить
+// пути движка, перечитать документы и т. п.) остаются у самих модулей — роутер
+// отвечает только за то, что видно на экране.
+export type Screen = "chat" | "settings" | "project" | "wizard";
+
+let currentScreen: Screen = "chat";
+
+export function activeScreen(): Screen {
+  return currentScreen;
+}
+
+export function showScreen(next: Screen) {
+  currentScreen = next;
+
+  // Лента и поле ввода — только на экране чата; остальные страницы занимают их место.
+  const chat = next === "chat";
+  feedEl.hidden = !chat;
+  composerWrapEl.hidden = !chat;
+
+  settingsView.hidden = next !== "settings";
+  projectView.hidden = next !== "project";
+  wizardView.hidden = next !== "wizard";
+
+  // Кнопка настроек подсвечена ровно тогда, когда настройки открыты.
+  settingsBtn.classList.toggle("active", next === "settings");
+  // Итог операции из настроек не должен «переезжать» на другой экран.
+  if (next !== "settings") modelsStatusEl.hidden = true;
+
+  // Уходим с экрана проекта — снимаем и выбор, и подсветку строки в панели.
+  // Класс снимаем напрямую: renderProjectList живёт в projects.ts, который сам
+  // импортирует ui.ts, и обратный импорт замкнул бы цикл.
+  if (next !== "project") {
+    state.viewingProjectId = null;
+    projectListEl
+      .querySelectorAll(".project.active")
+      .forEach((el) => el.classList.remove("active"));
+  }
+}
+
+// Показать экран чата (идемпотентно). Общая точка для conversations/settings —
+// без импорта их модулей (разрыв циклов).
 export function showChatView() {
-  settingsView.hidden = true;
-  settingsBtn.classList.remove("active");
-  modelsStatusEl.hidden = true;
-  projectView.hidden = true;
-  wizardView.hidden = true;
-  state.viewingProjectId = null;
-  projectListEl.querySelectorAll(".project.active").forEach((el) => el.classList.remove("active"));
-  feedEl.hidden = false;
-  composerWrapEl.hidden = false;
+  showScreen("chat");
 }
 
 // ── Источники под ответом ────────────────────────────────────────────────────

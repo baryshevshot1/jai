@@ -7,18 +7,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { HardwareInfo, ModelAssessment, ModelSource } from "./types";
 import {
-  composerWrapEl,
-  feedEl,
   openWizardBtn,
-  projectView,
-  settingsBtn,
-  settingsView,
   wizardCard,
   wizardCloseBtn,
-  wizardView,
 } from "./dom";
 import { humanError, plural } from "./util";
-import { showChatView, showStatus, type StatusKind } from "./ui";
+import { showChatView, showStatus, type StatusKind, showScreen} from "./ui";
 import { cancelActivePull, runImport, runPull } from "./pull";
 import { loadModels, loadModelStates } from "./models";
 import { refreshCurrentDocsCount, refreshDocuments, sidebarDocCtx } from "./documents";
@@ -40,12 +34,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 
 export async function openWizard() {
   // Мастер занимает место ленты (как настройки/экран проекта) и взаимоисключаем с ними.
-  feedEl.hidden = true;
-  composerWrapEl.hidden = true;
-  settingsView.hidden = true;
-  settingsBtn.classList.remove("active");
-  projectView.hidden = true;
-  wizardView.hidden = false;
+  showScreen("wizard");
   await renderSetupScreen();
 }
 
