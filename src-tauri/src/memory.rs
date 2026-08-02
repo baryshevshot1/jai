@@ -29,7 +29,9 @@ fn available_ram_gb() -> f64 {
     sys.available_memory() as f64 / GB
 }
 
-/// Всего оперативной памяти, ГБ.
+/// Всего оперативной памяти, ГБ. Нужна только на macOS — на Linux и Windows
+/// достаточно точного `available`, поэтому там функции просто нет.
+#[cfg(target_os = "macos")]
 fn total_ram_gb() -> f64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
