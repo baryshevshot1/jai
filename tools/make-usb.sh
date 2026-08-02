@@ -152,20 +152,28 @@ if [ "$DO_INSTALLERS" = 1 ]; then
 
   note "Скачиваю установщики движка Ollama ($OLLAMA_VER)…"
   fetch "$OLLAMA_WIN_URL" "$OUT/Windows"
-  fetch "$OLLAMA_LINUX_URL" "$OUT/Linux"
 
   # Ollama раздаёт Linux-сборку только в .tar.zst, а zstd на машине клиента может
   # не оказаться — и поставить его офлайн неоткуда. Поэтому перепаковываем здесь,
   # на машине сборки: на флешку уезжает .tgz, который распаковывает штатный tar
   # без единой дополнительной программы. Нет zstd у нас — оставляем .tar.zst,
   # install.sh его тоже умеет и честно скажет клиенту, чего не хватает.
-  if [ -f "$OUT/Linux/ollama-linux-amd64.tar.zst" ] && [ ! -f "$OUT/Linux/ollama-linux-amd64.tgz" ]; then
+  #
+  # Готовый .tgz проверяем ДО скачивания: иначе повторный запуск сборки заново тянул
+  # бы гигабайтный .tar.zst (его-то мы после перепаковки удалили) и оставлял на
+  # флешке сразу два архива движка.
+  ZST="$OUT/Linux/ollama-linux-amd64.tar.zst"
+  TGZ="$OUT/Linux/ollama-linux-amd64.tgz"
+  if [ -f "$TGZ" ]; then
+    note "  есть: ollama-linux-amd64.tgz"
+    rm -f "$ZST" # с прошлых сборок: две копии движка флешке ни к чему
+  else
+    fetch "$OLLAMA_LINUX_URL" "$OUT/Linux"
     if command -v zstd >/dev/null 2>&1; then
       note "  перепаковываю движок в .tgz (клиенту не понадобится zstd)…"
-      zstd -dc "$OUT/Linux/ollama-linux-amd64.tar.zst" \
-        | gzip -1 > "$OUT/Linux/ollama-linux-amd64.tgz.part"
-      mv "$OUT/Linux/ollama-linux-amd64.tgz.part" "$OUT/Linux/ollama-linux-amd64.tgz"
-      rm -f "$OUT/Linux/ollama-linux-amd64.tar.zst" # две копии движка флешке ни к чему
+      zstd -dc "$ZST" | gzip -1 > "$TGZ.part"
+      mv "$TGZ.part" "$TGZ"
+      rm -f "$ZST"
     else
       note "  ВНИМАНИЕ: нет zstd — на флешку уедет .tar.zst, и на машине клиента"
       note "  потребуется пакет zstd (офлайн его поставить будет неоткуда)."
