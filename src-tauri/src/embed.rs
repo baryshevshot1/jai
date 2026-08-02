@@ -7,6 +7,8 @@
 
 use serde::Deserialize;
 
+use crate::error::{AppError, AppResult, ErrorCode};
+
 /// Модель эмбеддингов. Тег не указываем — Ollama сам резолвит в `:latest`.
 pub const EMBED_MODEL: &str = "bge-m3";
 
@@ -30,7 +32,7 @@ struct EmbedResponse {
 
 /// Эмбеддинги батчем: на каждый текст — по вектору, в исходном порядке.
 /// Пустой вход → пустой выход (без запроса). Размерность определяется из ответа.
-pub async fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+pub async fn embed_batch(texts: &[String]) -> AppResult<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -46,46 +48,53 @@ pub async fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        .map_err(|e| AppError::from_reqwest(&e, "Поиск по документам недоступен"))?;
 
     // Модель эмбеддингов не установлена — Ollama отвечает 404. Сообщаем понятно,
     // не падая: установку bge-m3 добавим в провижининг моделей отдельным этапом.
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(format!(
-            "Модель эмбеддингов «{EMBED_MODEL}» не установлена. \
-             Для работы с документами установите её командой: ollama pull {EMBED_MODEL}"
+        return Err(AppError::new(
+            ErrorCode::ModelMissing,
+            format!(
+                "Модель поиска по документам «{EMBED_MODEL}» не установлена. \
+                 Установите её в настройках: «Документы»."
+            ),
         ));
     }
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Ollama вернул ошибку {status} при эмбеддинге: {text}"));
+        return Err(AppError::unknown(format!(
+            "Движок вернул ошибку {status} при поиске по документам: {text}"
+        )));
     }
 
     let parsed: EmbedResponse = resp
         .json()
         .await
-        .map_err(|e| format!("Не удалось разобрать ответ эмбеддингов: {e}"))?;
+        .map_err(|e| AppError::unknown(format!("Не удалось разобрать ответ движка: {e}")))?;
 
     // Контроль соответствия: на каждый текст ровно один непустой вектор.
     if parsed.embeddings.len() != texts.len() {
-        return Err(format!(
-            "Ollama вернул {} векторов вместо {}",
+        return Err(AppError::unknown(format!(
+            "Движок вернул {} векторов вместо {}",
             parsed.embeddings.len(),
             texts.len()
-        ));
+        )));
     }
     let dim = parsed.embeddings.first().map(|v| v.len()).unwrap_or(0);
     if dim == 0 || parsed.embeddings.iter().any(|v| v.len() != dim) {
-        return Err("Ollama вернул некорректные (пустые/разной длины) векторы".to_string());
+        return Err(AppError::unknown(
+            "Движок вернул некорректные (пустые или разной длины) векторы",
+        ));
     }
     Ok(parsed.embeddings)
 }
 
 /// Эмбеддинг одного текста (вопрос пользователя при поиске). Размерность — из ответа.
-pub async fn embed_one(text: &str) -> Result<Vec<f32>, String> {
+pub async fn embed_one(text: &str) -> AppResult<Vec<f32>> {
     let mut v = embed_batch(std::slice::from_ref(&text.to_string())).await?;
-    v.pop().ok_or_else(|| "Пустой ответ эмбеддинга".to_string())
+    v.pop().ok_or_else(|| AppError::unknown("Движок вернул пустой ответ на запрос поиска"))
 }
 
 /// Установлена ли модель эмбеддингов (для UI: можно ли индексировать/искать).

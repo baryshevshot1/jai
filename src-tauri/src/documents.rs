@@ -6,6 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
 
+use crate::error::{AppError, AppResult};
 use crate::{chunk, docstore, embed, now_ms};
 
 /// Установлена ли модель эмбеддингов (для интерфейса базы документов): можно ли
@@ -230,7 +231,7 @@ pub(crate) async fn index_document(
     path: String,
     project_id: Option<String>,
     on_progress: Channel<IndexProgress>,
-) -> Result<IndexResult, String> {
+) -> AppResult<IndexResult> {
     // 1–2) sha256 + извлечение текста + чанкинг: на крупном PDF это секунды–минуты
     // процессора и диска — уводим из async-воркера в пул блокирующих потоков, чтобы
     // не подвешивать стрим чата и остальные команды. Паника разборщика приходит как
@@ -252,7 +253,7 @@ pub(crate) async fn index_document(
         .map_err(|e| format!("Не удалось разобрать документ: {e}"))??
     };
     if chunks.is_empty() {
-        return Err("Не удалось разбить документ на фрагменты".to_string());
+        return Err(AppError::unknown("Не удалось разбить документ на фрагменты"));
     }
     let total = chunks.len();
     let _ = on_progress.send(IndexProgress {
@@ -383,7 +384,7 @@ pub(crate) async fn search_documents(
     query: String,
     k: usize,
     project_id: Option<String>,
-) -> Result<Vec<docstore::RetrievedChunk>, String> {
+) -> AppResult<Vec<docstore::RetrievedChunk>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -406,12 +407,15 @@ pub(crate) async fn search_documents(
         return Ok(Vec::new());
     }
     let qvec = embed::embed_one(q).await?;
+    // Сама база — не движок: её сбои остаются без кода причины (Unknown), и
+    // сообщение показывается как есть.
     tauri::async_runtime::spawn_blocking(move || {
         let conn = docstore::open(&db)?;
         docstore::search(&conn, &qvec, k, project_id.as_deref())
     })
     .await
-    .map_err(|e| format!("Сбой поиска по базе: {e}"))?
+    .map_err(|e| AppError::unknown(format!("Сбой поиска по базе: {e}")))?
+    .map_err(AppError::from)
 }
 
 #[cfg(test)]
