@@ -33,7 +33,7 @@ sysinfo = "0.33"
 # Извлечение текста из документов (Фаза A). Чистый Rust (без C/Python), MIT/Apache-2.0.
 # zip: только deflate (miniz_oxide), чтобы не тянуть C-крейты bzip2/zstd.
 pdf-extract = "0.12"
-quick-xml = "0.40"
+quick-xml = "0.41"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
 # Обновления приложения: онлайн-проверка выпусков GitHub (только по явной кнопке
