@@ -1418,6 +1418,47 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tool:disabled { opacity: 0.5; cursor: default; }
 .tool svg { width: var(--icon); height: var(--icon); stroke: currentColor; fill: none; stroke-width: 2; }
 
+/* ── Диктовка: микрофон и подпись состояния ──
+   Открытый микрофон обязан быть заметен: пока кнопку держат, она подсвечена,
+   а рядом горит живая точка. Красный здесь — не «ошибка», а привычный знак
+   идущей записи; в остальное время кнопка не отличается от соседних. */
+.voice-btn.is-recording {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+.voice-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--t-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  user-select: none;
+}
+.voice-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.voice-state--rec { color: var(--danger); }
+.voice-state--rec::before { animation: voice-pulse 1.6s ease-out infinite; }
+/* Распознавание на процессоре занимает секунды — точка «дышит», чтобы ожидание
+   читалось как работа, а не как зависшее приложение. */
+.voice-state--busy::before { animation: voice-wait 1.2s ease-in-out infinite; }
+@keyframes voice-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 45%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes voice-wait {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
 .think-toggle {
   display: flex;
   align-items: center;

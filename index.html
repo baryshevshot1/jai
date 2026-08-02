@@ -155,6 +155,12 @@
               <button type="button" class="tool" id="image-btn" title="Прикрепить изображение (PNG, JPG, WEBP)" aria-label="Прикрепить изображение">
                 <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" /></svg>
               </button>
+              <!-- Диктовка. Кнопка скрыта, пока не установлена модель распознавания:
+                   нерабочая кнопка хуже отсутствующей (см. voice.ts → initVoice). -->
+              <button type="button" class="tool voice-btn" id="voice-btn" hidden title="Продиктовать вопрос: нажмите и удерживайте, говорите, отпустите" aria-label="Продиктовать вопрос">
+                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0" /><path d="M12 18v3" /><path d="M9 21h6" /></svg>
+              </button>
+              <span class="voice-state" id="voice-state" hidden aria-live="polite"></span>
               <button type="button" class="think-toggle" id="think-toggle" title="Режим рассуждений модели (медленнее, но точнее)" aria-label="Режим рассуждений">
                 <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2z" /><path d="M9 21h6" /></svg>
                 <span class="pill-label">Размышления</span>

@@ -24,6 +24,10 @@ export let hwModelNameEl: HTMLElement;
 export let convListEl: HTMLElement;
 export let newChatBtn: HTMLButtonElement;
 export let thinkToggleEl: HTMLButtonElement;
+// Диктовка: кнопка микрофона в композере и подпись состояния рядом с ней.
+// Кнопки не видно, пока не установлена модель распознавания речи.
+export let voiceBtn: HTMLButtonElement;
+export let voiceStateEl: HTMLElement;
 // Онлайн-режим (агентный): тумблер в композере, поля и журнал в настройках.
 // Отдельного индикатора в шапке нет — состояние видно по самому тумблеру,
 // по источникам под ответом и по журналу обращений в настройках.
@@ -144,6 +148,8 @@ export function initDom(): void {
   convListEl = document.querySelector("#conv-list")!;
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
+  voiceBtn = document.querySelector("#voice-btn")!;
+  voiceStateEl = document.querySelector("#voice-state")!;
   onlineToggleEl = document.querySelector("#online-toggle")!;
   onlineStateTextEl = document.querySelector("#online-state-text")!;
   onlineMasterToggleEl = document.querySelector("#online-master-toggle")!;

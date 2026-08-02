@@ -40,6 +40,7 @@ import { initConversations, wireConversations } from "./conversations";
 import { refreshProjects, wireProjects } from "./projects";
 import { initGentle, initSidebar, initTheme, initThinking, wireSettings } from "./settings";
 import { initOnline } from "./online";
+import { initVoice } from "./voice";
 import { maybeOfferWizard, wireWizard } from "./wizard";
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -66,6 +67,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   await initGentle(); // щадящий режим — ДО светофора железа (авто-решение учитывает выбор)
   await initModelChoice(); // «Автоматически» или ручной выбор — ДО подбора модели ниже
   initOnline(); // восстанавливаем онлайн-режим и настройки веб-поиска (по умолчанию офлайн)
+  initVoice(); // кнопка диктовки — появится, только если стоит модель распознавания
   initSidebar(); // восстанавливаем ширину и состояние левой панели
 
   setComposerEnabled(false); // включим, когда загрузится список моделей

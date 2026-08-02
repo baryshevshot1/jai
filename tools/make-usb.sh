@@ -10,11 +10,15 @@
 #     macOS/    Jarvis.AI_….dmg
 #     models/   каталог моделей Ollama (manifests/ + blobs/) — приложение
 #               найдёт его само и предложит импорт (мастер установки)
+#     models-stt/ модель распознавания речи (ggml-small.bin) для голосового
+#               ввода. Отдельно от models/ намеренно: это модель whisper, у неё
+#               другой формат хранения, и в каталоге Ollama ей не место
 #
-# Части НЕЗАВИСИМЫ — можно заказать только инсталляторы или только модели:
+# Части НЕЗАВИСИМЫ — можно заказать только инсталляторы, только модели, только голос:
 #   tools/make-usb.sh --out /Volumes/JAI --installers
 #   tools/make-usb.sh --out /Volumes/JAI --models "qwen3.5:9b bge-m3"
-#   tools/make-usb.sh --out /Volumes/JAI --installers --models "qwen3.5:9b qwen3.5:4b bge-m3"
+#   tools/make-usb.sh --out /Volumes/JAI --voice
+#   tools/make-usb.sh --out /Volumes/JAI --installers --models "qwen3.5:9b qwen3.5:4b bge-m3" --voice
 #
 # Флаги:
 #   --out DIR         куда собирать (корень флешки); ОБЯЗАТЕЛЬНЫЙ
@@ -22,6 +26,8 @@
 #                     или --version app-vX.Y.Z) и движка Ollama + скрипты usb/
 #   --models "TAGS"   вытянуть модели (ollama pull) и выборочно скопировать
 #                     их blobs/manifests в models/ (нужны ollama и jq)
+#   --voice           положить модель распознавания речи в models-stt/ (~465 МБ,
+#                     скачивается с Hugging Face; нужен только curl)
 #   --version TAG     конкретный тег релиза (по умолчанию — последний)
 #
 # ВАЖНО: флешку форматировать в exFAT — блоб модели 9B это ОДИН файл ~6 ГБ,
@@ -40,8 +46,17 @@ OLLAMA_REL="https://github.com/ollama/ollama/releases/download/$OLLAMA_VER"
 OLLAMA_WIN_URL="$OLLAMA_REL/OllamaSetup.exe"
 OLLAMA_LINUX_URL="$OLLAMA_REL/ollama-linux-amd64.tar.zst"
 
+# Модель распознавания речи (голосовой ввод): официальный репозиторий whisper.cpp
+# на Hugging Face. Размер и sha256 зафиксированы — те же значения зашиты в
+# приложение (src-tauri/src/voice.rs), поэтому битую копию оно отвергнет и здесь,
+# и у клиента. Меняете модель — правьте ОБА места.
+VOICE_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+VOICE_SIZE=487601967
+VOICE_SHA="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+
 OUT=""
 DO_INSTALLERS=0
+DO_VOICE=0
 MODELS=""
 VERSION=""
 
@@ -56,18 +71,44 @@ while [ $# -gt 0 ]; do
     --out) OUT="${2:-}"; shift 2 ;;
     --installers) DO_INSTALLERS=1; shift ;;
     --models) MODELS="${2:-}"; shift 2 ;;
+    --voice) DO_VOICE=1; shift ;;
     --version) VERSION="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) die "неизвестный флаг: $1 (см. --help)" ;;
   esac
 done
 
 [ -n "$OUT" ] || die "укажите --out <каталог флешки>"
-[ "$DO_INSTALLERS" = 1 ] || [ -n "$MODELS" ] || die "нечего делать: добавьте --installers и/или --models"
+[ "$DO_INSTALLERS" = 1 ] || [ -n "$MODELS" ] || [ "$DO_VOICE" = 1 ] \
+  || die "нечего делать: добавьте --installers, --models и/или --voice"
 mkdir -p "$OUT"
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 USB_TPL="$SELF_DIR/../usb"
+
+# Скачивание файла на флешку: fetch <url> <каталог> [размер в байтах] [sha256]
+# Общий для установщиков и модели распознавания.
+# Во временное имя + mv: оборванная закачка не должна при перезапуске сойти за
+# готовый файл и уехать на флешку (у клиента перекачать её нечем).
+# -C -: докачка уцелевшего куска вместо старта с нуля.
+fetch() {
+  local name dst; name="$(basename "$1")"; dst="$2/$name"
+  if [ -f "$dst" ]; then note "  есть: $name"; return 0; fi
+  note "  скачиваю: $name"
+  curl -fL --progress-bar -C - -o "$dst.part" "$1"
+  if [ -n "${3:-}" ]; then
+    local got; got=$(wc -c < "$dst.part")
+    if [ "$got" -ne "$3" ]; then
+      rm -f "$dst.part"
+      die "размер $name: $got байт вместо $3 — файл битый, запустите сборку ещё раз"
+    fi
+  fi
+  if [ -n "${4:-}" ] && [ "$(sha256_of "$dst.part")" != "${4#sha256:}" ]; then
+    rm -f "$dst.part"
+    die "sha256 $name не совпал с ожидаемым — файл записался с ошибкой, повторите"
+  fi
+  mv "$dst.part" "$dst"
+}
 
 # ── Установщики ──────────────────────────────────────────────────────────────
 if [ "$DO_INSTALLERS" = 1 ]; then
@@ -119,27 +160,6 @@ if [ "$DO_INSTALLERS" = 1 ]; then
     done
   done
 
-  fetch() { # fetch <url> <куда> [размер в байтах] [sha256:… из релиза]
-    local name dst; name="$(basename "$1")"; dst="$2/$name"
-    if [ -f "$dst" ]; then note "  есть: $name"; return 0; fi
-    note "  скачиваю: $name"
-    # Во временное имя + mv: оборванная закачка не должна при перезапуске сойти
-    # за готовый файл и уехать на флешку (у клиента перекачать её нечем).
-    # -C -: докачка уцелевшего куска вместо старта с нуля.
-    curl -fL --progress-bar -C - -o "$dst.part" "$1"
-    if [ -n "${3:-}" ]; then
-      local got; got=$(wc -c < "$dst.part")
-      if [ "$got" -ne "$3" ]; then
-        rm -f "$dst.part"
-        die "размер $name: $got байт вместо $3 — файл битый, запустите сборку ещё раз"
-      fi
-    fi
-    if [ -n "${4:-}" ] && [ "$(sha256_of "$dst.part")" != "${4#sha256:}" ]; then
-      rm -f "$dst.part"
-      die "sha256 $name не совпал с релизом — файл записался с ошибкой, повторите"
-    fi
-    mv "$dst.part" "$dst"
-  }
   while read -r u size digest; do
     [ -n "$u" ] || continue
     case "$(basename "$u")" in
@@ -234,6 +254,18 @@ if [ -n "$MODELS" ]; then
     done
   done
   note "Каталог моделей готов: $DEST"
+fi
+
+# ── Модель распознавания речи (голосовой ввод) ────────────────────────────────
+# Кладём в ОТДЕЛЬНЫЙ каталог models-stt/: это модель whisper, а не Ollama, — в
+# каталоге движка (models/) посторонний файл только мешал бы. Приложение ищет её
+# там само («Настройки → Голосовой ввод → С флешки…»).
+if [ "$DO_VOICE" = 1 ]; then
+  command -v curl >/dev/null || die "нужен curl"
+  note "Модель распознавания речи (~465 МБ)…"
+  mkdir -p "$OUT/models-stt"
+  fetch "$VOICE_URL" "$OUT/models-stt" "$VOICE_SIZE" "$VOICE_SHA"
+  note "Модель распознавания готова: $OUT/models-stt"
 fi
 
 note "Готово. Проверьте, что флешка отформатирована в exFAT (блобы бывают >4 ГБ)."

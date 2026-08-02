@@ -76,18 +76,24 @@ if [ "$WITH_LINUX" = 1 ]; then
   else
     docker build -q -f tools/check-linux.dockerfile -t jai-check-linux . >/dev/null
     # Кэш cargo — томом: без него каждый прогон пересобирает все зависимости.
-    try "clippy под Linux" docker run --rm \
+    # Голосовой ввод из проверки под Linux исключён: whisper.cpp не собирается на
+    # ARM64 (контейнер на Apple Silicon) — системный GCC не включает fp16-инструкции.
+    # Целевые платформы продукта — x86_64 Linux и Windows, там сборка штатная; здесь
+    # же важнее проверить ВЕСЬ остальной Linux-код, чем потерять проверку целиком.
+    # Сам модуль голоса проверяется на macOS, где он собирается полностью.
+    VOICE_OFF="--no-default-features"
+    try "clippy под Linux (без голосового ввода)" docker run --rm \
       -v "$ROOT":/work -v jai-cargo-registry:/usr/local/cargo/registry \
       -v jai-linux-target:/work/src-tauri/target-linux \
       -e CARGO_TARGET_DIR=/work/src-tauri/target-linux \
       jai-check-linux \
-      cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-    try "тесты Rust под Linux" docker run --rm \
+      cargo clippy --manifest-path src-tauri/Cargo.toml $VOICE_OFF --all-targets -- -D warnings
+    try "тесты Rust под Linux (без голосового ввода)" docker run --rm \
       -v "$ROOT":/work -v jai-cargo-registry:/usr/local/cargo/registry \
       -v jai-linux-target:/work/src-tauri/target-linux \
       -e CARGO_TARGET_DIR=/work/src-tauri/target-linux \
       jai-check-linux \
-      cargo test --manifest-path src-tauri/Cargo.toml
+      cargo test --manifest-path src-tauri/Cargo.toml $VOICE_OFF
   fi
 fi
 

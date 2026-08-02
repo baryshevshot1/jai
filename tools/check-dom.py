@@ -15,9 +15,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# id, которых нет и не должно быть в index.html: элементы создаются кодом
-# (карточка «Оформление» в настройках строится в settings.ts).
-DYNAMIC = {"ui-scale-state", "ui-scale-toggle"}
+# id, которых нет и не должно быть в index.html: элементы создаются кодом и ищутся
+# в СОБСТВЕННОМ поддереве (card.querySelector), а не в документе — уронить старт они
+# не могут. Карточки «Оформление» и «Голосовой ввод» в настройках строятся в
+# settings.ts. Добавляя сюда id, убедись, что поиск идёт именно по своему узлу.
+DYNAMIC = {
+    "ui-scale-state",
+    "ui-scale-toggle",
+    "voice-model-state",
+    "voice-model-install",
+    "voice-model-import",
+    "voice-model-progress",
+    "voice-model-progress-fill",
+    "voice-model-progress-label",
+    "voice-model-cancel",
+}
 
 
 def main() -> int:

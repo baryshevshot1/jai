@@ -206,6 +206,9 @@ pub fn run() {
             voice::voice_available,
             voice::voice_start,
             voice::voice_stop,
+            voice::voice_model_download,
+            provision::import_voice_model,
+            provision::find_voice_model_source,
             update::install_update_from_disk
         ])
         .build(tauri::generate_context!())

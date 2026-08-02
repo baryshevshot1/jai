@@ -2,12 +2,12 @@
 // и каталога моделей), диагностика «Проверка системы», обновления приложения,
 // а также пользовательские предпочтения — тема, «Размышления», боковая панель.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import type { DiagCheck } from "./types";
+import type { DiagCheck, PullEvent, PullOutcome } from "./types";
 import { state } from "./state";
 import {
   appEl,
@@ -46,7 +46,7 @@ import {
   themeIconEl,
   thinkToggleEl,
 } from "./dom";
-import { humanError, ICON_REFRESH_CW, plural } from "./util";
+import { gb, humanError, ICON_REFRESH_CW, plural, ruPullStatus } from "./util";
 import {
   confirmModal,
   hideStatus,
@@ -71,6 +71,7 @@ import {
 } from "./models";
 import { refreshOutboundLog } from "./online";
 import { runImport } from "./pull";
+import { initVoice } from "./voice";
 
 // ── Страница настроек (на месте ленты диалогов) ──────────────────────────────
 
@@ -78,6 +79,7 @@ import { runImport } from "./pull";
 function openSettings() {
   showScreen("settings"); // экран проекта и мастер гаснут сами — они взаимоисключаемы
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
+  refreshVoiceCard(); // модель распознавания могли поставить и с другого экрана
   refreshDocuments(sidebarDocCtx); // свежий список общей базы (карточка «Документы»)
   applyModelChoice(); // поле «Модель для ответов» — всегда в актуальном состоянии
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
@@ -636,6 +638,199 @@ function buildAppearanceCard() {
   applyUiScale(uiScale); // подписи — под уже применённый размер
 }
 
+// ── Голосовой ввод: установка модели распознавания речи ──────────────────────
+// Сценарий тот же, что у модели документов (bge-m3) в карточке «Документы»: статус,
+// установка из интернета и импорт с носителя. Разница одна — модель распознавания
+// живёт не в каталоге Ollama, а в данных приложения, поэтому у неё свои команды.
+// Разметку собираем кодом (как карточку «Оформление»).
+
+// Честный объём загрузки: на медленном интернете полгигабайта — это решение, которое
+// принимают заранее, а не обнаруживают в процессе.
+const VOICE_SIZE_HINT = "около 470 МБ";
+
+const VOICE_CARD = `
+  <div class="settings-card__head">
+    <h2 class="settings-card__title">Голосовой ввод</h2>
+    <p class="settings-card__desc">
+      Диктовка вместо набора: нажали кнопку микрофона в строке ввода, сказали — текст
+      появился в поле. Речь распознаётся прямо на этом компьютере, запись никуда не
+      уходит. Для этого нужна отдельная модель распознавания — её ставят один раз:
+      с флешки, а если есть интернет — из интернета.
+    </p>
+  </div>
+  <div class="doc-status">
+    <div class="doc-status__text" id="voice-model-state"></div>
+    <div class="doc-status__actions">
+      <button type="button" class="ep-btn ep-btn--primary" id="voice-model-install" hidden>Установить (${VOICE_SIZE_HINT})</button>
+      <button type="button" class="ep-btn ep-btn--ghost" id="voice-model-import" hidden>С флешки/диска…</button>
+    </div>
+  </div>
+  <div class="index-progress" id="voice-model-progress" hidden>
+    <div class="index-progress__bar"><i id="voice-model-progress-fill"></i></div>
+    <div class="index-progress__label" id="voice-model-progress-label"></div>
+    <button type="button" class="pull-cancel-btn" id="voice-model-cancel" hidden>Отмена</button>
+  </div>`;
+
+interface VoiceCard {
+  state: HTMLElement;
+  install: HTMLButtonElement;
+  import: HTMLButtonElement;
+  progress: HTMLElement;
+  fill: HTMLElement;
+  label: HTMLElement;
+  cancel: HTMLButtonElement;
+}
+let voiceCard: VoiceCard | null = null;
+
+// Карточка встаёт сразу за «Документами»: обе про то, чем ассистента кормят —
+// документами и голосом.
+function buildVoiceCard() {
+  const after = installLocalBtn.closest(".settings-card");
+  if (!after) return;
+  const card = document.createElement("section");
+  card.className = "settings-card";
+  card.innerHTML = VOICE_CARD;
+  after.insertAdjacentElement("afterend", card);
+  voiceCard = {
+    state: card.querySelector("#voice-model-state")!,
+    install: card.querySelector("#voice-model-install")!,
+    import: card.querySelector("#voice-model-import")!,
+    progress: card.querySelector("#voice-model-progress")!,
+    fill: card.querySelector("#voice-model-progress-fill")!,
+    label: card.querySelector("#voice-model-progress-label")!,
+    cancel: card.querySelector("#voice-model-cancel")!,
+  };
+  voiceCard.install.addEventListener("click", downloadVoiceModel);
+  voiceCard.import.addEventListener("click", importVoiceModel);
+  voiceCard.cancel.addEventListener("click", () => {
+    voiceCard!.cancel.disabled = true;
+    invoke("cancel_pull").catch(() => {}); // итог придёт результатом самой команды
+  });
+  refreshVoiceCard();
+}
+
+// Состояние модели распознавания: есть — кнопки установки не нужны.
+async function refreshVoiceCard() {
+  const card = voiceCard;
+  if (!card) return;
+  let installed = false;
+  try {
+    installed = await invoke<boolean>("voice_available");
+  } catch {
+    installed = false; // не смогли спросить — считаем, что ставить ещё нужно
+  }
+  card.state.textContent = installed
+    ? "Модель распознавания речи установлена — можно диктовать."
+    : "Модель распознавания речи не установлена, голосовой ввод пока не работает. " +
+      `Поставьте её с флешки или скачайте (${VOICE_SIZE_HINT}).`;
+  card.install.hidden = installed;
+  card.import.hidden = installed;
+}
+
+// Общий ход обеих установок: гейт от параллельных операций, прогресс в карточке и
+// честный итог по результату команды — после отмены «установлено» не пишем.
+async function runVoiceInstall(
+  what: string,
+  exec: (onEvent: Channel<PullEvent>) => Promise<PullOutcome>,
+) {
+  const card = voiceCard;
+  if (!card) return;
+  // Установки в приложении идут по одной (в Rust они делят общую регистрацию);
+  // здесь — мгновенный местный гейт, чтобы не идти в отказ.
+  if (state.pullingTag) {
+    card.state.textContent = `Сейчас идёт установка «${state.pullingTag}» — дождитесь её завершения.`;
+    return;
+  }
+  state.pullingTag = "модель распознавания речи";
+  card.install.disabled = true;
+  card.import.disabled = true;
+  card.progress.hidden = false;
+  card.cancel.hidden = false;
+  card.cancel.disabled = false;
+  card.fill.style.width = "2%";
+  card.label.textContent = `${what}…`;
+
+  // Канал и результат команды — разные пути доставки: после итога гасим запоздавшие
+  // сообщения прогресса, чтобы они не затирали финальную надпись.
+  let settled = false;
+  const onEvent = new Channel<PullEvent>();
+  onEvent.onmessage = (e) => {
+    if (settled) return;
+    const frac = e.total > 0 ? e.completed / e.total : 0;
+    const tail =
+      e.total > 0 ? ` ${Math.round(frac * 100)}% (${gb(e.completed)} из ${gb(e.total)})` : "";
+    card.fill.style.width = `${Math.max(2, Math.round(frac * 100))}%`;
+    card.label.textContent = `${ruPullStatus(e.status)}${tail}`;
+  };
+
+  let outcomeText = "";
+  try {
+    const outcome = await exec(onEvent);
+    settled = true;
+    if (outcome === "cancelled") {
+      outcomeText = "Установка отменена — модель распознавания речи не установлена.";
+    } else {
+      outcomeText = "Готово: модель распознавания речи установлена.";
+      // Кнопка микрофона появляется только при наличии модели, а решение об этом
+      // принимается один раз при запуске. Пересобираем диктовку здесь, иначе
+      // пользователю пришлось бы перезапускать приложение после установки.
+      try {
+        await initVoice();
+      } catch {
+        /* сборка без голосового ввода — карточка всё равно отработала честно */
+      }
+    }
+  } catch (e) {
+    settled = true;
+    outcomeText = humanError(e);
+  } finally {
+    state.pullingTag = null;
+    card.progress.hidden = true;
+    card.cancel.hidden = true;
+    card.install.disabled = false;
+    card.import.disabled = false;
+    await refreshVoiceCard(); // кнопки — по новому состоянию…
+    card.state.textContent = outcomeText; // …а надпись рассказывает, чем всё кончилось
+  }
+}
+
+// Скачивание из интернета (изолированный https-клиент в Rust; офлайн-ядра не касается).
+async function downloadVoiceModel() {
+  await runVoiceInstall("Скачивание модели распознавания речи", (onEvent) =>
+    invoke<PullOutcome>("voice_model_download", { onEvent }),
+  );
+}
+
+// Установка с носителя: сначала ищем флешку сами (основной сценарий поставки
+// «под ключ»), не нашли или пользователь отказался — обычный выбор файла.
+async function importVoiceModel() {
+  let path: string | null = null;
+  try {
+    const found = await invoke<string | null>("find_voice_model_source");
+    if (found) {
+      const ok = await confirmModal(
+        `Найдена модель распознавания речи: ${found}. Установить с этого носителя?`,
+        "Установить",
+      );
+      if (ok) path = found;
+    }
+  } catch {
+    /* поиск носителей не критичен — выберем файл вручную */
+  }
+  if (!path) {
+    const sel = await open({
+      multiple: false,
+      title: "Файл модели распознавания речи (ggml-small.bin)",
+      filters: [{ name: "Модель распознавания", extensions: ["bin"] }],
+    }).catch(() => null);
+    path = typeof sel === "string" ? sel : null;
+  }
+  if (!path) return;
+  await runVoiceInstall("Копирование модели с носителя", (onEvent) =>
+    invoke<PullOutcome>("import_voice_model", { path, onEvent }),
+  );
+}
+
 // ── Тумблер «Размышления» ────────────────────────────────────────────────────
 
 // Восстановление тумблера «Размышления» из settings.json (единый источник истины).
@@ -750,6 +945,7 @@ export async function initSidebar() {
 // Обработчики страницы настроек, темы, панели, диагностики и обновлений.
 export function wireSettings() {
   buildAppearanceCard(); // карточка «Оформление» — до первого открытия настроек
+  buildVoiceCard(); // карточка «Голосовой ввод» — там же ставится модель распознавания
   settingsBtn.addEventListener("click", openSettings);
   settingsBackBtn.addEventListener("click", goHome);
   brandHomeBtn.addEventListener("click", goHome); // бренд в шапке = «на главную»
