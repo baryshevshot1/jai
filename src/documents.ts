@@ -6,7 +6,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { DocCtx, DocumentMeta, IndexProgress, PullOutcome } from "./types";
-import { state } from "./state";
+import { state, tagForRole } from "./state";
 import {
   addDocBtn,
   docListEl,
@@ -287,7 +287,10 @@ export async function installEmbeddingModel(): Promise<PullOutcome | "error"> {
   pullCancelBtn.disabled = false;
   showIndexProgress("Подготовка установки…", 0.02, ctx);
 
-  const outcome = await runPull("bge-m3", {
+  // Тег модели поиска берём из набора в Rust; литерал — только на случай, когда
+  // набор ещё не получен (движок молчал), чтобы кнопка не оказалась мёртвой.
+  const embedTag = tagForRole("embed") || "bge-m3";
+  const outcome = await runPull(embedTag, {
     progress: (t, f) => {
       if (myOp === ctx.opGen) showIndexProgress(t, f, ctx);
     },

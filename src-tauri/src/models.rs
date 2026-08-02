@@ -273,19 +273,24 @@ pub(crate) struct ModelSpec {
     /// Приблизительный вес на диске, ГБ — для оценки посильности и места ДО установки
     /// (после установки берётся точный размер из /api/tags). Источник: реестр Ollama.
     pub(crate) approx_gb: f64,
+    /// Участвует ли модель в АВТОМАТИЧЕСКОМ подборе по задаче и железу. false —
+    /// профиль под ручной выбор: приложение само его не назначит, даже если он
+    /// установлен и подходит по роли (так задуман русский профиль T-lite).
+    pub(crate) auto_pick: bool,
 }
 
 /// Нужный набор моделей приложения. Расширяется правкой ОДНОГО этого списка.
 /// Теги — реальные (фактически устанавливаемые), не абстрактные.
 pub(crate) const MODEL_SET: &[ModelSpec] = &[
-    ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true, approx_gb: 6.6 },
-    ModelSpec { tag: "qwen3.5:4b", role: "text", title: "Текстовая (лёгкая, для слабого железа)", required: false, approx_gb: 3.0 },
+    ModelSpec { tag: "qwen3.5:9b", role: "text", title: "Базовая текстовая (чат)", required: true, approx_gb: 6.6, auto_pick: true },
+    ModelSpec { tag: "qwen3.5:4b", role: "text", title: "Текстовая (лёгкая, для слабого железа)", required: false, approx_gb: 3.0, auto_pick: true },
     // Русский профиль — на Hugging Face (в реестре Ollama под t-tech/ его нет).
-    ModelSpec { tag: "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M", role: "text", title: "Русский профиль (T-lite)", required: false, approx_gb: 5.1 },
-    ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true, approx_gb: 1.2 },
-    ModelSpec { tag: "qwen3-vl:8b", role: "vision", title: "Зрение и OCR", required: false, approx_gb: 6.5 },
-    ModelSpec { tag: "qwen3-vl:4b", role: "vision", title: "Зрение (лёгкая)", required: false, approx_gb: 3.5 },
-    ModelSpec { tag: "qwen3-coder:latest", role: "code", title: "Код", required: false, approx_gb: 19.0 },
+    // auto_pick: false — его назначают вручную в настройках, сам он не подставляется.
+    ModelSpec { tag: "hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M", role: "text", title: "Русский профиль (T-lite)", required: false, approx_gb: 5.1, auto_pick: false },
+    ModelSpec { tag: "bge-m3:latest", role: "embed", title: "Поиск по документам (RAG)", required: true, approx_gb: 1.2, auto_pick: false },
+    ModelSpec { tag: "qwen3-vl:8b", role: "vision", title: "Зрение и OCR", required: false, approx_gb: 6.5, auto_pick: true },
+    ModelSpec { tag: "qwen3-vl:4b", role: "vision", title: "Зрение (лёгкая)", required: false, approx_gb: 3.5, auto_pick: true },
+    ModelSpec { tag: "qwen3-coder:latest", role: "code", title: "Код", required: false, approx_gb: 19.0, auto_pick: false },
 ];
 
 /// Локальное состояние одной модели набора (без сети). digest/size/date — если установлена.
@@ -294,6 +299,11 @@ pub(crate) struct ModelState {
     pub(crate) tag: String,
     role: String,
     title: String,
+    /// Вес и признак авто-подбора уходят на фронт не для показа, а чтобы он сам
+    /// строил лестницу «старшая → лёгкая» внутри роли. Иначе этот порядок пришлось
+    /// бы держать вторым списком в TypeScript, и он молча разошёлся бы с набором.
+    approx_gb: f64,
+    auto_pick: bool,
     pub(crate) required: bool,
     pub(crate) installed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -336,6 +346,8 @@ pub(crate) async fn model_states() -> Result<ModelStatesResult, String> {
             tag: spec.tag.to_string(),
             role: spec.role.to_string(),
             title: spec.title.to_string(),
+            approx_gb: spec.approx_gb,
+            auto_pick: spec.auto_pick,
             required: spec.required,
             installed: m.is_some(),
             digest: m.and_then(|m| m.get("digest")).and_then(|d| d.as_str()).map(str::to_string),
@@ -476,4 +488,57 @@ pub(crate) async fn installed_sizes() -> std::collections::HashMap<String, u64> 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MODEL_SET объявлен единственным местом правки набора, и на него опирается
+    /// фронтенд (роль, вес и auto_pick уезжают в model_states). Тест ловит опечатки
+    /// в этом списке до того, как они превратятся в «приложение предлагает не ту
+    /// модель» на машине клиента.
+    #[test]
+    fn model_set_is_consistent() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in MODEL_SET {
+            assert!(seen.insert(spec.tag), "тег «{}» встречается дважды", spec.tag);
+            assert!(!spec.tag.is_empty(), "пустой тег в наборе");
+            assert!(!spec.title.is_empty(), "у «{}» нет имени для человека", spec.tag);
+            assert!(spec.approx_gb > 0.0, "у «{}» нулевой вес", spec.tag);
+            assert!(
+                matches!(spec.role, "text" | "embed" | "vision" | "code"),
+                "неизвестная роль «{}» у «{}»",
+                spec.role,
+                spec.tag
+            );
+        }
+
+        // Роли, которые подбираются автоматически, обязаны иметь хотя бы одну модель:
+        // пустая лестница означала бы, что подбирать не из чего и чат молча не работает.
+        for role in ["text", "vision"] {
+            assert!(
+                MODEL_SET.iter().any(|s| s.role == role && s.auto_pick),
+                "в роли «{role}» не осталось ни одной модели для авто-подбора"
+            );
+        }
+
+        // Внутри роли веса должны различаться — иначе «старшая» и «лёгкая»
+        // неотличимы, и порядок лестницы станет случайным.
+        for role in ["text", "vision"] {
+            let mut weights: Vec<String> = MODEL_SET
+                .iter()
+                .filter(|s| s.role == role && s.auto_pick)
+                .map(|s| format!("{:.2}", s.approx_gb))
+                .collect();
+            let total = weights.len();
+            weights.sort();
+            weights.dedup();
+            assert_eq!(weights.len(), total, "в роли «{role}» есть модели с одинаковым весом");
+        }
+
+        // Модель поиска по документам ровно одна: фронт берёт её как tagForRole("embed").
+        let embed = MODEL_SET.iter().filter(|s| s.role == "embed").count();
+        assert_eq!(embed, 1, "модель эмбеддингов должна быть ровно одна, найдено {embed}");
+    }
 }

@@ -97,6 +97,8 @@ export interface ModelState {
   tag: string;
   role: string;
   title: string;
+  approx_gb: number; // ориентировочный вес: по нему фронт различает старшую и лёгкую
+  auto_pick: boolean; // участвует в авто-подборе (false — профиль под ручной выбор)
   required: boolean;
   installed: boolean;
   size?: number;
