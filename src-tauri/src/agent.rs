@@ -9,6 +9,7 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 
 use crate::chat::{apply_gentle, ollama_chat_error, stream_chat_response, ChatEvent};
+use crate::error::AppResult;
 use crate::settings::read_settings;
 use crate::{now_ms, tools, with_cancel, write_atomic, CancelFlag, HTTP};
 
@@ -76,7 +77,7 @@ pub(crate) async fn agentic_chat(
     gentle: Option<bool>,
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
-) -> Result<String, String> {
+) -> AppResult<String> {
     // Серверный гейт онлайн-режима (152-ФЗ): данные уходят наружу только при явно
     // включённом пользователем тумблере. Фронтенд проверяет то же самое, но
     // авторитет — здесь: при выключенной настройке команда отказывает ДО единого

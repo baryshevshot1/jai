@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::diagnostics::detect_vram;
 use crate::engine;
 use crate::models::{installed_sizes, ModelSpec, MODEL_SET};
+use crate::error::{AppError, AppResult};
 use crate::{HTTP, OLLAMA_META_TIMEOUT};
 
 // ── Стабильность (S1): оценка памяти по формуле (вес + KV + буфер + запас) ─────
@@ -108,7 +109,7 @@ async fn estimate(
     kv_bytes_per_elem: f64,
     vram_gb: Option<f64>,
     vram_free_gb: Option<f64>,
-) -> Result<MemoryEstimate, String> {
+) -> AppResult<MemoryEstimate> {
     // Что сейчас в памяти (/api/ps) — первым. Прочие модели при MAX_LOADED_MODELS=1
     // выгрузятся под новую → их размер (и занятая ими видеопамять) прибавляется к
     // доступному. У целевой запоминаем контекст загруженного экземпляра.
@@ -175,7 +176,7 @@ async fn estimate(
         .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("Ollama недоступна: {e}"))?
+        .map_err(|e| AppError::from_reqwest(&e, "Движок недоступен"))?
         .json()
         .await
         .map_err(|e| e.to_string())?;
@@ -198,7 +199,7 @@ async fn estimate(
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
-        .map_err(|e| format!("Ollama недоступна: {e}"))?
+        .map_err(|e| AppError::from_reqwest(&e, "Движок недоступен"))?
         .json()
         .await
         .map_err(|e| e.to_string())?;
@@ -286,7 +287,7 @@ fn vram_note(est: &MemoryEstimate) -> Option<String> {
 pub(crate) async fn plan_inference(
     model: String,
     engine: tauri::State<'_, engine::EngineState>,
-) -> Result<InferencePlan, String> {
+) -> AppResult<InferencePlan> {
     // Честный KV: q8_0 действует, только когда движок подняли мы (env-переменные
     // экономного режима); внешний движок по умолчанию держит KV в f16 (~вдвое больше).
     let kv_bytes = if engine::was_started_by_us(&engine) { KV_BYTES_Q8 } else { KV_BYTES_F16 };

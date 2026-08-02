@@ -283,7 +283,7 @@ pub(crate) async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
                         format!("Не хватает обязательных: {}", missing.join(", "))));
                 }
             }
-            Err(e) => out.push(diag("models", "Модели", "fail", e)),
+            Err(e) => out.push(diag("models", "Модели", "fail", e.message)),
         }
     } else {
         out.push(diag("models", "Модели", "fail",

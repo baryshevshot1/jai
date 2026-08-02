@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::{tools, with_cancel, CancelFlag, HTTP};
 
 /// Watchdog (S3): период замеров и порог роста свопа, при котором прерываем запрос.
@@ -103,7 +104,7 @@ pub(crate) async fn chat_stream(
     gentle: Option<bool>,
     on_event: Channel<ChatEvent>,
     cancel: tauri::State<'_, CancelFlag>,
-) -> Result<String, String> {
+) -> AppResult<String> {
     let my_cancel = cancel.begin(); // свой флаг отмены на этот запрос (без гонок)
     // Контекст — рычаг смягчения (S2): меньше num_ctx → меньше KV-кэш → меньше памяти.
     let ctx = num_ctx.unwrap_or(8192);
@@ -135,12 +136,12 @@ pub(crate) async fn stream_chat_response(
     on_event: &Channel<ChatEvent>,
     cancel: &Arc<AtomicBool>,
     num_ctx: u64,
-) -> Result<String, String> {
+) -> AppResult<String> {
     // «Стоп» должен действовать уже НА ПОДКЛЮЧЕНИИ: холодная загрузка модели может
     // длиться десятки секунд, заголовков ещё нет — ждём send() с опросом отмены.
     let send_fut = HTTP.post("http://127.0.0.1:11434/api/chat").json(&body).send();
     let mut resp = match with_cancel(send_fut, cancel).await {
-        Some(r) => r.map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?,
+        Some(r) => r.map_err(|e| AppError::from_reqwest(&e, "Не удалось подключиться к движку"))?,
         None => return Ok(String::new()), // отменено до ответа — как обычная отмена стрима
     };
 
@@ -155,7 +156,10 @@ pub(crate) async fn stream_chat_response(
     // выключения слабой машины). При опасном пороге взводит тот же CancelFlag (как
     // «Стоп»), чтобы прервать запрос ДО неотзывчивости/ребута, и записывает причину.
     let wd_flag = cancel.clone();
-    let wd_reason: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    // Причина остановки — вместе с кодом: сторож точно знает, память это или перегрев,
+    // и интерфейсу незачем угадывать это по формулировке.
+    let wd_reason: Arc<std::sync::Mutex<Option<(ErrorCode, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let wd_reason_task = wd_reason.clone();
     let watchdog = tauri::async_runtime::spawn(async move {
         let mut sys = sysinfo::System::new();
@@ -173,11 +177,12 @@ pub(crate) async fn stream_chat_response(
             sys.refresh_memory();
             let growth = sys.used_swap().saturating_sub(base_swap);
             if growth > SWAP_TRIP_BYTES {
-                *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+                    ErrorCode::OutOfMemory,
                     "недостаточно оперативной памяти — попробуйте модель полегче или \
                      меньший контекст"
                         .to_string(),
-                );
+                ));
                 wd_flag.store(true, Ordering::Relaxed); // прерываем тем же механизмом
                 break;
             }
@@ -192,10 +197,13 @@ pub(crate) async fn stream_chat_response(
                 if t >= TEMP_TRIP_C {
                     hot_ticks += 1;
                     if hot_ticks >= TEMP_TRIP_TICKS {
-                        *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
-                            "компьютер перегревается ({t:.0}°C) — генерация остановлена, \
-                             чтобы машина не выключилась. Дайте компьютеру остыть; \
-                             «щадящий режим» в настройках снижает нагрев"
+                        *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+                            ErrorCode::Unknown,
+                            format!(
+                                "компьютер перегревается ({t:.0}°C) — генерация остановлена, \
+                                 чтобы машина не выключилась. Дайте компьютеру остыть; \
+                                 «щадящий режим» в настройках снижает нагрев"
+                            ),
                         ));
                         wd_flag.store(true, Ordering::Relaxed);
                         break;
@@ -288,7 +296,7 @@ pub(crate) async fn stream_chat_response(
             Ok(Ok(None)) => break,       // поток корректно завершился
             Ok(Err(e)) => {
                 stop_watchdog();
-                return Err(e.to_string());
+                return Err(AppError::from_reqwest(&e, "Ответ движка оборвался"));
             }
         };
         buf.extend_from_slice(&chunk);
@@ -316,12 +324,17 @@ pub(crate) async fn stream_chat_response(
     stop_watchdog(); // генерация закончилась — watchdog больше не нужен
     // Ошибка, присланная самим Ollama в потоке — сообщаем пользователю явно.
     if let Some(e) = stream_err {
-        return Err(format!("Ollama прервал генерацию: {e}"));
+        // Движок прислал ошибку прямо в потоке — причину называем той же логикой,
+        // что и для ответа с HTTP-ошибкой: место одно, поведение одинаковое.
+        return Err(AppError::new(
+            classify_ollama_message(&e),
+            format!("Движок прервал генерацию: {e}"),
+        ));
     }
     // Если прервал watchdog (а не пользователь) — отдаём точную причину как ошибку
     // (совет, что делать, входит в текст самой причины).
-    if let Some(reason) = wd_reason.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        return Err(format!("Запрос остановлен: {reason}."));
+    if let Some((code, reason)) = wd_reason.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        return Err(AppError::new(code, format!("Запрос остановлен: {reason}.")));
     }
     Ok(full)
 }
@@ -343,7 +356,26 @@ pub(crate) fn cancel_stream(cancel: tauri::State<'_, CancelFlag>) {
 /// причём текст бывает ЕЩЁ одним JSON от нового движка ({"error":{"message":…}}) —
 /// пользователь видел сырое месиво из кавычек. Разворачиваем до двух слоёв и
 /// переводим известные случаи на понятный язык.
-pub(crate) fn ollama_chat_error(status: reqwest::StatusCode, body: &str) -> String {
+/// Причина сбоя по тексту сообщения ДВИЖКА. Разбор текста тут неизбежен — движок
+/// не присылает машинных кодов, — но он живёт в одном месте и применяется только к
+/// сообщениям Ollama, а не к произвольной строке, как было на фронтенде.
+fn classify_ollama_message(msg: &str) -> ErrorCode {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("try pulling") || (lower.contains("model") && lower.contains("not found")) {
+        return ErrorCode::ModelMissing;
+    }
+    if lower.contains("out of memory")
+        || lower.contains("not enough memory")
+        || lower.contains("requires more")
+        || lower.contains("failed to allocate")
+        || lower.contains("cudamalloc")
+    {
+        return ErrorCode::OutOfMemory;
+    }
+    ErrorCode::Unknown
+}
+
+pub(crate) fn ollama_chat_error(status: reqwest::StatusCode, body: &str) -> AppError {
     let mut msg = body.trim().to_string();
     for _ in 0..2 {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg) else { break };
@@ -357,40 +389,99 @@ pub(crate) fn ollama_chat_error(status: reqwest::StatusCode, body: &str) -> Stri
                 .unwrap_or_else(|| other.to_string()),
         };
     }
+    // Причину называем ЗДЕСЬ, где виден и статус, и распакованное тело: интерфейсу
+    // достаётся код, а не текст на разбор регулярками.
+    match classify_ollama_message(&msg) {
+        ErrorCode::ModelMissing => {
+            return AppError::new(
+                ErrorCode::ModelMissing,
+                format!("Модель недоступна в движке: {msg}"),
+            )
+        }
+        ErrorCode::OutOfMemory => {
+            return AppError::new(
+                ErrorCode::OutOfMemory,
+                format!("Не хватило памяти под модель: {msg}"),
+            )
+        }
+        _ if status == reqwest::StatusCode::NOT_FOUND => {
+            return AppError::new(
+                ErrorCode::ModelMissing,
+                format!("Модель недоступна в движке: {msg}"),
+            )
+        }
+        _ => {}
+    }
     if msg.contains("Failed to load image or audio file") {
-        return "Модель не смогла прочитать приложенное изображение. Попробуйте сохранить \
-                картинку в PNG или JPG и прикрепить снова."
-            .into();
+        return AppError::unknown(
+            "Модель не смогла прочитать приложенное изображение. Попробуйте сохранить \
+             картинку в PNG или JPG и прикрепить снова.",
+        );
     }
     if msg.contains("does not support images") {
-        return "Выбранная модель не работает с изображениями — установите модель зрения \
-                (например, qwen3-vl) в настройках."
-            .into();
+        return AppError::unknown(
+            "Выбранная модель не работает с изображениями — установите модель зрения \
+             (например, qwen3-vl) в настройках.",
+        );
     }
     if msg.is_empty() {
-        return format!("Ollama вернул ошибку {status}");
+        return AppError::unknown(format!("Ollama вернул ошибку {status}"));
     }
-    format!("Ollama вернул ошибку {status}: {msg}")
+    AppError::unknown(format!("Ollama вернул ошибку {status}: {msg}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ollama_chat_error;
+    use super::{classify_ollama_message, ollama_chat_error};
+    use crate::error::ErrorCode;
 
     // Вложенный JSON-эрзац от нового движка разворачивается в человеческий текст.
     #[test]
     fn ollama_chat_error_unwraps_nested_json() {
         let body = r#"{"error":"{\"error\":{\"code\":400,\"message\":\"Failed to load image or audio file\",\"type\":\"invalid_request_error\"}}"}"#;
-        let msg = ollama_chat_error(reqwest::StatusCode::BAD_REQUEST, body);
-        assert!(msg.contains("изображение"), "{msg}");
-        assert!(!msg.contains("Failed"), "сырой текст не должен доходить до пользователя: {msg}");
-
-        let msg =
-            ollama_chat_error(reqwest::StatusCode::NOT_FOUND, r#"{"error":"model not found"}"#);
-        assert_eq!(msg, "Ollama вернул ошибку 404 Not Found: model not found");
+        let e = ollama_chat_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert!(e.message.contains("изображение"), "{}", e.message);
+        assert!(
+            !e.message.contains("Failed"),
+            "сырой текст не должен доходить до пользователя: {}",
+            e.message
+        );
 
         // Не-JSON тело показываем как есть (со статусом).
-        let msg = ollama_chat_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
-        assert!(msg.contains("boom"));
+        let e = ollama_chat_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(e.message.contains("boom"));
+        assert_eq!(e.code, ErrorCode::Unknown);
+    }
+
+    // Причину сбоя называет бэкенд: интерфейс получает код и не разбирает текст.
+    #[test]
+    fn ollama_chat_error_reports_reason_code() {
+        let e = ollama_chat_error(reqwest::StatusCode::NOT_FOUND, r#"{"error":"model not found"}"#);
+        assert_eq!(e.code, ErrorCode::ModelMissing);
+
+        // 404 без внятного тела — всё равно «модели нет»: именно этим статусом
+        // Ollama отвечает на запрос к неустановленной модели.
+        let e = ollama_chat_error(reqwest::StatusCode::NOT_FOUND, "");
+        assert_eq!(e.code, ErrorCode::ModelMissing);
+
+        let e = ollama_chat_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"model requires more system memory (9.2 GiB) than is available"}"#,
+        );
+        assert_eq!(e.code, ErrorCode::OutOfMemory);
+    }
+
+    #[test]
+    fn classify_knows_missing_model_and_memory() {
+        assert_eq!(
+            classify_ollama_message("model \"qwen3.5:9b\" not found, try pulling it first"),
+            ErrorCode::ModelMissing
+        );
+        assert_eq!(classify_ollama_message("CUDA error: cudaMalloc failed"), ErrorCode::OutOfMemory);
+        assert_eq!(classify_ollama_message("something odd happened"), ErrorCode::Unknown);
+        // «runtime» не должен сойти за таймаут, а «no such file» — за отсутствие модели:
+        // ровно на этих ложных срабатываниях ломался прежний разбор на фронтенде.
+        assert_eq!(classify_ollama_message("panic in runtime"), ErrorCode::Unknown);
+        assert_eq!(classify_ollama_message("no such file or directory"), ErrorCode::Unknown);
     }
 }

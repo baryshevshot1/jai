@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
 
+use crate::error::{AppError, AppResult};
 use crate::{tools, with_cancel, HTTP, OLLAMA_META_TIMEOUT};
 
 /// Активная установка модели (одна на процесс): имя тега + флаг отмены ИМЕННО этой
@@ -217,16 +218,16 @@ pub(crate) struct ModelInfo {
 /// Список установленных моделей из Ollama: GET 127.0.0.1:11434/api/tags.
 /// Возвращаем имя и поддержку рассуждений (по полю capabilities). Только localhost.
 #[tauri::command]
-pub(crate) async fn list_models() -> Result<Vec<ModelInfo>, String> {
+pub(crate) async fn list_models() -> AppResult<Vec<ModelInfo>> {
     let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
         .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        .map_err(|e| AppError::from_reqwest(&e, "Список моделей недоступен"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("Ollama вернул ошибку {}", resp.status()));
+        return Err(AppError::unknown(format!("Движок вернул ошибку {}", resp.status())));
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -313,15 +314,15 @@ pub(crate) struct ModelStatesResult {
 /// Локальные состояния моделей набора по `/api/tags` (без сети): установлена ли,
 /// локальный digest/размер/дата. Статус обновления считается отдельно (M2, онлайн).
 #[tauri::command]
-pub(crate) async fn model_states() -> Result<ModelStatesResult, String> {
+pub(crate) async fn model_states() -> AppResult<ModelStatesResult> {
     let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
         .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        .map_err(|e| AppError::from_reqwest(&e, "Список моделей недоступен"))?;
     if !resp.status().is_success() {
-        return Err(format!("Ollama вернул ошибку {}", resp.status()));
+        return Err(AppError::unknown(format!("Движок вернул ошибку {}", resp.status())));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let empty: Vec<serde_json::Value> = Vec::new();
@@ -369,13 +370,13 @@ pub(crate) struct UpdateStatus {
 }
 
 /// Локальные digest по тегам из `/api/tags` (без сети).
-async fn local_digests() -> Result<std::collections::HashMap<String, String>, String> {
+async fn local_digests() -> AppResult<std::collections::HashMap<String, String>> {
     let resp = HTTP
         .get("http://127.0.0.1:11434/api/tags")
         .timeout(OLLAMA_META_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?;
+        .map_err(|e| AppError::from_reqwest(&e, "Список моделей недоступен"))?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let mut map = std::collections::HashMap::new();
     if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
@@ -416,7 +417,7 @@ async fn registry_digest(client: &reqwest::Client, tag: &str) -> Result<String, 
 /// Проверить обновления моделей набора (онлайн, по запросу). Для установленных
 /// сравнивает локальный digest с реестром. Без сети — каждая модель отдаёт "error".
 #[tauri::command]
-pub(crate) async fn check_model_updates() -> Result<Vec<UpdateStatus>, String> {
+pub(crate) async fn check_model_updates() -> AppResult<Vec<UpdateStatus>> {
     // Наружу — только изолированным веб-клиентом (rustls, https_only, таймауты);
     // localhost-метаданные идут общим клиентом HTTP. Пути не смешиваются.
     let web = tools::web_client()?;
