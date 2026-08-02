@@ -1,2 +1,5 @@
 [toolchain]
-channel = "stable"
+# Точная версия вместо «stable»: сборка релиза должна быть воспроизводимой,
+# а смена компилятора — осознанным шагом. Держать синхронно со входом
+# `toolchain:` у dtolnay/rust-toolchain в .github/workflows/{ci,release}.yml.
+channel = "1.96.0"

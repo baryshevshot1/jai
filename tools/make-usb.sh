@@ -29,8 +29,16 @@
 set -euo pipefail
 
 REPO="baryshevshot1/jai"
-OLLAMA_WIN_URL="https://ollama.com/download/OllamaSetup.exe"
-OLLAMA_LINUX_URL="https://ollama.com/download/ollama-linux-amd64.tgz"
+# Версия движка зафиксирована: клиенту уезжает ровно та связка «приложение +
+# Ollama», на которой шло тестирование, а прямая ссылка на релиз не ломается при
+# смене схемы имён на ollama.com (так уже было: ollama-linux-amd64.tgz → .tar.zst).
+# Поднимать осознанно, вместе с проверкой на целевом железе; версии в именах
+# файлов движка нет, поэтому после подъёма удалите с флешки старые OllamaSetup.exe
+# и ollama-linux-amd64.* — иначе они будут считаться уже скачанными.
+OLLAMA_VER="v0.32.5"
+OLLAMA_REL="https://github.com/ollama/ollama/releases/download/$OLLAMA_VER"
+OLLAMA_WIN_URL="$OLLAMA_REL/OllamaSetup.exe"
+OLLAMA_LINUX_URL="$OLLAMA_REL/ollama-linux-amd64.tar.zst"
 
 OUT=""
 DO_INSTALLERS=0
@@ -39,6 +47,9 @@ VERSION=""
 
 die() { echo "ошибка: $*" >&2; exit 1; }
 note() { echo "── $*"; }
+sha256_of() { # macOS — shasum, большинство Linux — sha256sum
+  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -80,39 +91,94 @@ if [ "$DO_INSTALLERS" = 1 ]; then
       die "релиз $TAG — ЧЕРНОВИК: его файлы нельзя скачать по прямой ссылке.
      Опубликуйте релиз на GitHub (Releases → Edit → Publish release) и повторите."
     fi
-    URLS=$(gh release view "$TAG" --repo "$REPO" --json assets -q '.assets[].url')
+    # «url размер sha256» — по ним после скачивания видно и обрыв, и тихую порчу
+    # (digest у старых релизов бывает пустым, тогда остаётся сверка по размеру).
+    ASSETS=$(gh release view "$TAG" --repo "$REPO" --json assets \
+      -q '.assets[] | "\(.url) \(.size) \(.digest // "")"')
   else
     API="https://api.github.com/repos/$REPO/releases/${VERSION:+tags/}${VERSION:-latest}"
     JSON=$(curl -fsSL "$API") || die "не удалось получить релиз ($API). Если это черновик — опубликуйте его."
     TAG=$(printf '%s' "$JSON" | grep -m1 '"tag_name"' | cut -d'"' -f4)
-    URLS=$(printf '%s' "$JSON" | grep '"browser_download_url"' | cut -d'"' -f4)
+    # Без gh размер и хэш грепом из JSON надёжно не достать — качаем без сверки.
+    ASSETS=$(printf '%s' "$JSON" | grep '"browser_download_url"' | cut -d'"' -f4)
   fi
-  [ -n "$URLS" ] || die "у релиза $TAG нет артефактов (он опубликован?)"
+  [ -n "$ASSETS" ] || die "у релиза $TAG нет артефактов (он опубликован?)"
   note "Релиз: $TAG"
 
-  fetch() { # fetch <url> <куда>
-    local name; name="$(basename "$1")"
-    if [ -f "$2/$name" ]; then note "  есть: $name"; else
-      note "  скачиваю: $name"
-      curl -fL --progress-bar -o "$2/$name" "$1"
-    fi
-  }
-  for u in $URLS; do
-    case "$(basename "$u")" in
-      *-setup.exe) fetch "$u" "$OUT/Windows" ;;
-      *.deb|*.AppImage) fetch "$u" "$OUT/Linux" ;;
-      *.dmg) fetch "$u" "$OUT/macOS" ;;
-      *) : ;; # msi/rpm/sig/latest.json на флешку не кладём (не нужны установщику)
-    esac
+  # На флешке живёт РОВНО ОДНА версия приложения: старый установщик рядом с новым
+  # заставляет Установить.bat / install.sh выбирать файл наугад (порядок каталога
+  # на exFAT не гарантирован). Установщики Ollama не трогаем — версии в имени нет.
+  VER="${TAG#app-v}"
+  for d in "$OUT/Windows" "$OUT/Linux" "$OUT/macOS"; do
+    for f in "$d"/Jarvis.AI_*; do
+      [ -e "$f" ] || continue
+      case "$(basename "$f")" in
+        "Jarvis.AI_${VER}_"*) ;;
+        *) note "  удаляю прошлую версию: $(basename "$f")"; rm -f "$f" ;;
+      esac
+    done
   done
 
-  note "Скачиваю установщики движка Ollama…"
+  fetch() { # fetch <url> <куда> [размер в байтах] [sha256:… из релиза]
+    local name dst; name="$(basename "$1")"; dst="$2/$name"
+    if [ -f "$dst" ]; then note "  есть: $name"; return 0; fi
+    note "  скачиваю: $name"
+    # Во временное имя + mv: оборванная закачка не должна при перезапуске сойти
+    # за готовый файл и уехать на флешку (у клиента перекачать её нечем).
+    # -C -: докачка уцелевшего куска вместо старта с нуля.
+    curl -fL --progress-bar -C - -o "$dst.part" "$1"
+    if [ -n "${3:-}" ]; then
+      local got; got=$(wc -c < "$dst.part")
+      if [ "$got" -ne "$3" ]; then
+        rm -f "$dst.part"
+        die "размер $name: $got байт вместо $3 — файл битый, запустите сборку ещё раз"
+      fi
+    fi
+    if [ -n "${4:-}" ] && [ "$(sha256_of "$dst.part")" != "${4#sha256:}" ]; then
+      rm -f "$dst.part"
+      die "sha256 $name не совпал с релизом — файл записался с ошибкой, повторите"
+    fi
+    mv "$dst.part" "$dst"
+  }
+  while read -r u size digest; do
+    [ -n "$u" ] || continue
+    case "$(basename "$u")" in
+      *-setup.exe) fetch "$u" "$OUT/Windows" "${size:-}" "${digest:-}" ;;
+      *.deb|*.AppImage) fetch "$u" "$OUT/Linux" "${size:-}" "${digest:-}" ;;
+      *.dmg) fetch "$u" "$OUT/macOS" "${size:-}" "${digest:-}" ;;
+      *) : ;; # msi/rpm/sig/latest.json на флешку не кладём (не нужны установщику)
+    esac
+  done <<< "$ASSETS"
+
+  note "Скачиваю установщики движка Ollama ($OLLAMA_VER)…"
   fetch "$OLLAMA_WIN_URL" "$OUT/Windows"
   fetch "$OLLAMA_LINUX_URL" "$OUT/Linux"
 
+  # Ollama раздаёт Linux-сборку только в .tar.zst, а zstd на машине клиента может
+  # не оказаться — и поставить его офлайн неоткуда. Поэтому перепаковываем здесь,
+  # на машине сборки: на флешку уезжает .tgz, который распаковывает штатный tar
+  # без единой дополнительной программы. Нет zstd у нас — оставляем .tar.zst,
+  # install.sh его тоже умеет и честно скажет клиенту, чего не хватает.
+  if [ -f "$OUT/Linux/ollama-linux-amd64.tar.zst" ] && [ ! -f "$OUT/Linux/ollama-linux-amd64.tgz" ]; then
+    if command -v zstd >/dev/null 2>&1; then
+      note "  перепаковываю движок в .tgz (клиенту не понадобится zstd)…"
+      zstd -dc "$OUT/Linux/ollama-linux-amd64.tar.zst" \
+        | gzip -1 > "$OUT/Linux/ollama-linux-amd64.tgz.part"
+      mv "$OUT/Linux/ollama-linux-amd64.tgz.part" "$OUT/Linux/ollama-linux-amd64.tgz"
+      rm -f "$OUT/Linux/ollama-linux-amd64.tar.zst" # две копии движка флешке ни к чему
+    else
+      note "  ВНИМАНИЕ: нет zstd — на флешку уедет .tar.zst, и на машине клиента"
+      note "  потребуется пакет zstd (офлайн его поставить будет неоткуда)."
+    fi
+  fi
+
   note "Кладу установочные скрипты и инструкцию…"
-  cp "$USB_TPL/Установить.bat" "$OUT/Windows/"
-  cp "$USB_TPL/install.sh" "$OUT/Linux/" && chmod +x "$OUT/Linux/install.sh" || true
+  # cmd.exe надёжен только с CRLF — приводим переводы строк независимо от того,
+  # как файл лежит в рабочей копии (git мог отдать его и с LF).
+  sed -e $'s/\r$//' -e $'s/$/\r/' "$USB_TPL/Установить.bat" > "$OUT/Windows/Установить.bat.part"
+  mv "$OUT/Windows/Установить.bat.part" "$OUT/Windows/Установить.bat"
+  cp "$USB_TPL/install.sh" "$OUT/Linux/"
+  chmod +x "$OUT/Linux/install.sh" || true  # exFAT не хранит бит исполнения
   cp "$USB_TPL/ПРОЧТИ-МЕНЯ.html" "$OUT/"
 fi
 
@@ -149,6 +215,12 @@ if [ -n "$MODELS" ]; then
       else
         echo "    блоб: $blob ($(du -h "$SRC/blobs/$blob" | cut -f1))"
         cp "$SRC/blobs/$blob" "$DEST/blobs/$blob.part"
+        # Имя блоба — это его sha256: сверка копии ловит битую флешку сейчас,
+        # а не у клиента невнятной ошибкой загрузки модели (перекачать там нечем).
+        if [ "$(sha256_of "$DEST/blobs/$blob.part")" != "${blob#sha256-}" ]; then
+          rm -f "$DEST/blobs/$blob.part"
+          die "блоб $blob записался с ошибкой (sha256 не совпал) — проверьте носитель"
+        fi
         mv "$DEST/blobs/$blob.part" "$DEST/blobs/$blob"
       fi
     done

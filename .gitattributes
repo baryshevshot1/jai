@@ -13,6 +13,9 @@
 *.yml      text eol=lf
 *.sh       text eol=lf
 
+# Windows-скрипты: cmd.exe надёжен только с CRLF
+*.bat      text eol=crlf
+
 # Бинарные — не трогать
 *.png      binary
 *.ico      binary

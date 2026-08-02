@@ -1,0 +1,9 @@
+# Actions в workflow закреплены SHA коммитов (подвижный тег — риск подмены кода,
+# у release.yml в руках ключ подписи обновлений). Следить за свежестью пинов
+# вручную нереально — dependabot предлагает обновления отдельными PR с ревью.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

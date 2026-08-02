@@ -1,13 +1,55 @@
 name: Release
 
-# Сборка установщиков под Linux, Windows (и macOS на будущее) при пуше тега app-v*
+# Сборка установщиков под Linux, Windows (и macOS на будущее) при пуше тега app-v*.
+#
+# Все actions закреплены SHA коммита (тег рядом — только комментарий): этому
+# workflow доступен приватный ключ подписи обновлений, и подвижный тег action —
+# прямой путь к его утечке. Свежесть пинов ведёт dependabot через PR с ревью.
 on:
   push:
     tags:
       - 'app-v*'
 
+# По умолчанию — только чтение; право публикации есть лишь у job сборки.
+permissions:
+  contents: read
+
 jobs:
+  # Тег лишь именует релиз: версию артефактов и latest.json tauri-action берёт из
+  # tauri.conf.json. Если тег разошёлся с файлами (версия живёт в пяти местах),
+  # клиенты получат latest.json со старой версией и обновление молча не доедет.
+  # Поэтому сверяем всё ДО запуска трёхплатформенной сборки.
+  versions:
+    name: Сверка версии с тегом
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Версия в пяти файлах == тег
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#app-v}"
+          fail=0
+          check() { # check <файл> <версия из него>
+            if [ "$2" != "$TAG_VER" ]; then
+              echo "::error::$1: версия «$2» не совпадает с тегом app-v$TAG_VER"
+              fail=1
+            fi
+          }
+          check "package.json"                 "$(jq -r .version package.json)"
+          check "package-lock.json"            "$(jq -r .version package-lock.json)"
+          check "package-lock.json (packages)" "$(jq -r '.packages[""].version' package-lock.json)"
+          check "src-tauri/tauri.conf.json"    "$(jq -r .version src-tauri/tauri.conf.json)"
+          check "src-tauri/Cargo.toml"         "$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)"
+          check "src-tauri/Cargo.lock"         "$(grep -A1 '^name = "jai"$' src-tauri/Cargo.lock | grep -m1 '^version' | cut -d'"' -f2)"
+          if [ "$fail" != 0 ]; then
+            echo "Поднимите версию во ВСЕХ пяти файлах (npm install после package.json обновит lock), затем пересоздайте тег."
+            exit 1
+          fi
+
   release:
+    needs: versions
     permissions:
       contents: write
     strategy:
@@ -23,20 +65,28 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Токен в .git/config сборке не нужен — tauri-action публикует релиз
+          # через API по токену из env, а не через git push.
+          persist-credentials: false
 
       - name: Установить Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: lts/*
+          # Версия Node — из .nvmrc, чтобы релиз собирался тем же, чем разработка.
+          node-version-file: .nvmrc
 
-      - name: Установить Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # ветка stable
         with:
+          # Действующая версия — из rust-toolchain.toml (её cargo и слушается);
+          # здесь дублируем, чтобы action ставил сразу нужную, а не лишнюю stable.
+          toolchain: '1.96.0'
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Кэш Rust
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: './src-tauri -> target'
 
@@ -50,7 +100,7 @@ jobs:
         run: npm ci
 
       - name: Сборка и публикация в Releases
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Ключ подписи обновлений Tauri (сгенерировать: npx tauri signer generate)
