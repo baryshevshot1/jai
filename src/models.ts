@@ -37,7 +37,7 @@ import {
   ICON_REFRESH_CW,
   plural,
 } from "./util";
-import { addError, setComposerEnabled, updateGentleUi } from "./ui";
+import { addError, setComposerEnabled, showStatus, updateGentleUi, type StatusKind } from "./ui";
 import { cancelActivePull, runPull } from "./pull";
 import { refreshDocuments, sidebarDocCtx } from "./documents";
 
@@ -48,6 +48,45 @@ let installed: ModelInfo[] = [];
 // Список не удалось получить (движок не отвечает) — это НЕ то же самое, что
 // «моделей нет»: в подписи к выбору модели говорим об этом честно.
 let listFailed = false;
+
+// ── Человеческие имена моделей ───────────────────────────────────────────────
+// «qwen3.5:9b» заказчику ни о чём не говорит — по делу модель называется
+// «Базовая текстовая (чат)». Имена берём из набора в Rust (model_states), своего
+// второго списка не заводим: разойдутся — пользователь увидит разное в разных местах.
+const titleByTag = new Map<string, string>();
+
+// Запомнить имена набора. true — что-то изменилось (подписи стоит перерисовать).
+function rememberTitles(list: ModelState[]): boolean {
+  let changed = false;
+  for (const m of list) {
+    if (titleByTag.get(m.tag) !== m.title) {
+      titleByTag.set(m.tag, m.title);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// Спросить имена один раз при первой загрузке списка моделей: строка активной
+// модели видна на экране чата сразу, а страницу настроек (где имена приходят
+// вместе со списком набора) пользователь может не открыть вовсе.
+let titlesAsked = false;
+async function ensureModelTitles(): Promise<void> {
+  if (titlesAsked || titleByTag.size) return;
+  titlesAsked = true;
+  try {
+    const res = await invoke<{ models: ModelState[] }>("model_states");
+    rememberTitles(res.models);
+  } catch {
+    titlesAsked = false; // движок ещё не отвечает — спросим при следующей загрузке
+  }
+}
+
+// Имя модели для человека. Модель не из набора (пользователь поставил свою) —
+// имени у неё нет, тогда честно показываем тег: он и есть её единственное имя.
+function humanModel(tag: string): string {
+  return titleByTag.get(tag) ?? tag;
+}
 
 // ── Авто-выбор модели ────────────────────────────────────────────────────────
 // Модель в шапке больше НЕ выбирают: приложение подбирает её само.
@@ -115,6 +154,18 @@ export function applyModelChoice() {
   renderActiveModel(manual);
 }
 
+// Дописать в подпись имя модели и следом — её тег: имя отвечает на вопрос «что это
+// за модель», тег нужен поддержке. Тег мельче и тише (класс model-tag), а у моделей
+// вне набора имя и есть тег — тогда не повторяем его дважды.
+function appendModelName(box: HTMLElement, tag: string) {
+  box.append(humanModel(tag));
+  if (!titleByTag.has(tag)) return;
+  const el = document.createElement("span");
+  el.className = "model-tag";
+  el.textContent = tag;
+  box.append(" ", el);
+}
+
 // Поле «Модель для ответов» в настройках: «Автоматически» + установленные модели.
 function renderModelChoice(manual: boolean) {
   modelChoiceEl.innerHTML = "";
@@ -125,37 +176,68 @@ function renderModelChoice(manual: boolean) {
   for (const m of installed) {
     const opt = document.createElement("option");
     opt.value = m.name;
-    opt.textContent = m.name;
+    // В списке выбора имя и тег идут одной строкой (оформить часть строки внутри
+    // <option> нельзя): выбирают по имени, тег остаётся для сверки.
+    const title = titleByTag.get(m.name);
+    opt.textContent = title ? `${title} · ${m.name}` : m.name;
     modelChoiceEl.appendChild(opt);
   }
   modelChoiceEl.value = manual ? state.modelChoice : "auto";
   modelChoiceEl.disabled = installed.length === 0;
 
+  // Подпись переносится по словам (имя модели длиннее тега) — иначе хвост про
+  // картинки обрезался бы многоточием.
+  modelChoiceStateEl.classList.add("settings-field__value--wrap");
   if (!state.selectedModel) {
     modelChoiceStateEl.textContent = listFailed
       ? "движок не отвечает — список моделей недоступен"
       : "моделей нет — установите их ниже";
     return;
   }
+  modelChoiceStateEl.textContent = "";
+  modelChoiceStateEl.append(manual ? "вручную: " : "сейчас ");
+  appendModelName(modelChoiceStateEl, state.selectedModel);
   const vis = pickVisionModel();
-  const visPart = vis && vis !== state.selectedModel ? `, с картинкой — ${vis}` : "";
-  modelChoiceStateEl.textContent = manual
-    ? `вручную: ${state.selectedModel}${visPart}`
-    : `сейчас ${state.selectedModel}${visPart}`;
+  if (vis && vis !== state.selectedModel) {
+    modelChoiceStateEl.append(", с картинкой — ");
+    appendModelName(modelChoiceStateEl, vis);
+  }
+}
+
+// Тег живёт отдельной строкой под именем: карточка железа узкая, в одну строку имя
+// и тег не помещаются. Колонку под них собираем один раз и дальше переиспользуем.
+let hwModelTagEl: HTMLElement | null = null;
+function hwModelTag(): HTMLElement {
+  if (!hwModelTagEl) {
+    const box = document.createElement("div");
+    box.className = "hwchip__mbox";
+    hwModelEl.insertBefore(box, hwModelNameEl);
+    box.appendChild(hwModelNameEl); // имя переезжает в колонку, тег встаёт под ним
+    hwModelTagEl = document.createElement("span");
+    hwModelTagEl.className = "model-tag";
+    box.appendChild(hwModelTagEl);
+  }
+  return hwModelTagEl;
 }
 
 // Строка активной модели в блоке железа (внизу слева) — единственное место, где
-// имя модели видно на экране чата. Заказчику имя ни о чём не говорит, поэтому
-// оно не в шапке, но остаётся доступным для поддержки/диагностики.
+// модель видно на экране чата. Главное — человеческое имя («Базовая текстовая»),
+// технический тег остаётся под ним тише и мельче: заказчику он не нужен, поддержке
+// и диагностике — нужен.
 function renderActiveModel(manual: boolean) {
   if (!state.selectedModel) {
     hwModelEl.hidden = true;
     return;
   }
-  hwModelNameEl.textContent = state.selectedModel;
-  hwModelEl.title = manual
+  const human = humanModel(state.selectedModel);
+  const tagEl = hwModelTag();
+  hwModelNameEl.textContent = human;
+  tagEl.textContent = state.selectedModel;
+  tagEl.hidden = human === state.selectedModel; // модель вне набора: имя и есть тег
+  const how = manual
     ? "Модель выбрана вручную в настройках"
     : "Модель подобрана автоматически — по задаче и по вашему железу";
+  hwModelEl.title = `${human} · ${state.selectedModel}\n${how}`;
   hwModelEl.hidden = false;
 }
 
@@ -184,6 +266,7 @@ export async function loadModels() {
     visionByModel.set(m.name, m.vision);
     toolsByModel.set(m.name, m.tools);
   }
+  await ensureModelTitles(); // имена набора — до первой отрисовки, без «скачка» подписи
   applyModelChoice();
 
   if (!state.selectedModel) {
@@ -227,18 +310,10 @@ export function updateThinkAvailability() {
 
 // ── Каталог набора моделей (страница настроек, M4) ───────────────────────────
 
-let modelsStatusTimer: number | undefined;
-export function modelsStatus(text: string, isError: boolean) {
-  modelsStatusEl.hidden = false;
-  modelsStatusEl.textContent = text;
-  modelsStatusEl.classList.toggle("settings-status--error", isError);
-  if (modelsStatusTimer) clearTimeout(modelsStatusTimer);
-  // успех не висит постоянно — прячем через несколько секунд; ошибки остаются
-  if (!isError) {
-    modelsStatusTimer = window.setTimeout(() => {
-      modelsStatusEl.hidden = true;
-    }, 3500);
-  }
+// Итог операции в карточке «Модели» — единым компонентом статуса: успех гаснет
+// сам, ошибка ждёт, пока её прочтут.
+export function modelsStatus(text: string, kind: StatusKind = "info") {
+  showStatus(modelsStatusEl, text, kind);
 }
 
 // Локальные состояния моделей набора (без сети) → отрисовка списка.
@@ -246,9 +321,12 @@ export async function loadModelStates() {
   try {
     const res = await invoke<{ models: ModelState[]; others: string[] }>("model_states");
     modelStates = res.models;
+    // Имена набора приходят вместе с состояниями: если они уточнились, подписи с
+    // именем модели (карточка железа, «Модель для ответов») перерисовываем.
+    if (rememberTitles(res.models)) applyModelChoice();
   } catch (e) {
     modelStates = [];
-    modelsStatus(`Не удалось получить список моделей: ${humanError(e)}`, true);
+    modelsStatus(`Не удалось получить список моделей: ${humanError(e)}`, "error");
   }
   renderModelList();
 }
@@ -302,7 +380,9 @@ function showCheckResult() {
   checkBtnTimer = window.setTimeout(resetCheckButton, 3500);
 }
 
-// Вернуть кнопку к исходному виду «Проверить обновления».
+// Вернуть кнопку к исходному виду. Подпись обязана совпадать с index.html: рядом
+// в настройках есть такая же кнопка для обновлений САМОГО приложения, и без слова
+// «моделей» после первой же проверки эти две кнопки станут неразличимы.
 export function resetCheckButton() {
   if (checkBtnTimer) {
     clearTimeout(checkBtnTimer);
@@ -310,7 +390,7 @@ export function resetCheckButton() {
   }
   checkUpdatesBtn.disabled = false;
   checkUpdatesBtn.classList.remove("check-ok", "check-update", "check-err", "checking");
-  checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления`;
+  checkUpdatesBtn.innerHTML = `${ICON_REFRESH_CW}Проверить обновления моделей`;
   checkUpdatesBtn.title = "Сверить версии с реестром Ollama (нужен интернет)";
 }
 
@@ -425,13 +505,14 @@ async function pullModelTag(tag: string, isUpdate: boolean) {
       modelProgressFill.style.width = `${Math.max(4, Math.round(f * 100))}%`;
       modelProgressLabel.textContent = `${verb} ${tag}: ${t}`;
     },
-    done: () => modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, false),
+    done: () => modelsStatus(`${tag}: ${isUpdate ? "обновлено" : "установлено"}.`, "success"),
     cancelled: () =>
       modelsStatus(
         `${tag}: ${isUpdate ? "обновление отменено" : "установка отменена"} — докачка продолжится при повторе.`,
-        false,
+        "info",
       ),
-    error: (m) => modelsStatus(`Не удалось ${isUpdate ? "обновить" : "установить"} ${tag}: ${m}`, true),
+    error: (m) =>
+      modelsStatus(`Не удалось ${isUpdate ? "обновить" : "установить"} ${tag}: ${m}`, "error"),
   });
 
   modelProgressEl.hidden = true;

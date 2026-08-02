@@ -67,10 +67,12 @@ export function setRetryHandler(fn: () => void) {
 }
 
 // «Повторить» имеет смысл только у ПОСЛЕДНЕГО ответа: при появлении любого
-// следующего хода кнопки прежних ответов прячем.
-function retireRetryButtons() {
+// следующего хода кнопки прежних ответов прячем. Считаем обе разновидности —
+// и под готовым ответом, и в строке ошибки: иначе кнопка у старой ошибки
+// осталась бы на экране живой, а по клику молча ничего не делала.
+export function retireRetryButtons() {
   messagesEl
-    .querySelectorAll<HTMLButtonElement>(".msg-act--retry")
+    .querySelectorAll<HTMLButtonElement>(".msg-act--retry, .err-retry")
     .forEach((b) => (b.hidden = true));
 }
 
@@ -255,6 +257,108 @@ export function refreshEmptyState() {
   emptyStateEl.hidden = messagesEl.children.length > 0;
 }
 
+// ── Строка состояния операции ────────────────────────────────────────────────
+
+// Один компонент на все карточки: итог операции всегда выглядит и ведёт себя
+// одинаково, где бы он ни показывался (модели, движок, документы, обновления).
+// Таймеры автоскрытия храним снаружи элементов — WeakMap не мешает сборке мусора
+// и не заводит на DOM-узлах самодельных полей.
+const statusTimers = new WeakMap<HTMLElement, number>();
+
+// Успех сам гаснет: его прочитали — и он больше не нужен. «К сведению» и ошибка
+// висят, пока их не сменит следующий итог: сообщение о сбое должно дождаться,
+// когда пользователь его прочтёт, а не исчезнуть через несколько секунд.
+const STATUS_SUCCESS_MS = 3500;
+
+export type StatusKind = "info" | "success" | "error";
+
+export function showStatus(el: HTMLElement, text: string, kind: StatusKind = "info"): void {
+  clearStatusTimer(el);
+  // Базовый класс добавляем, а чужие не трогаем: элемент может нести и свою вёрстку.
+  el.classList.add("settings-status");
+  el.classList.toggle("settings-status--success", kind === "success");
+  el.classList.toggle("settings-status--error", kind === "error");
+  el.textContent = text;
+  el.hidden = false;
+  // Ошибку экранный диктор объявляет сразу, остальное — не перебивая пользователя.
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  if (kind === "success") {
+    el.setAttribute("aria-live", "polite");
+    statusTimers.set(
+      el,
+      window.setTimeout(() => {
+        statusTimers.delete(el);
+        el.hidden = true;
+      }, STATUS_SUCCESS_MS),
+    );
+  } else {
+    el.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+  }
+}
+
+export function hideStatus(el: HTMLElement): void {
+  clearStatusTimer(el);
+  el.hidden = true;
+}
+
+// Отложенное скрытие прежнего сообщения не должно погасить новое: любой повторный
+// вызов начинает отсчёт заново.
+function clearStatusTimer(el: HTMLElement) {
+  const t = statusTimers.get(el);
+  if (t !== undefined) {
+    clearTimeout(t);
+    statusTimers.delete(el);
+  }
+}
+
+// ── Шаги первого запуска ─────────────────────────────────────────────────────
+
+// Холодный старт занимает секунды: движок поднимается, модель заезжает в память.
+// Без картинки происходящего это выглядит как «зависло», поэтому на приветственном
+// экране показываем ход дела шагами — и сорванный шаг честно называем.
+const BOOT_ORDER = ["engine", "models", "ready"] as const;
+export type BootStep = (typeof BOOT_ORDER)[number] | "off";
+
+// Куда идти, если шаг не удался: подсказка про конкретный шаг, а не общее «ошибка».
+const BOOT_FAIL_HINT: Record<(typeof BOOT_ORDER)[number], string> = {
+  engine: "Не удалось запустить движок. Откройте Настройки → «Мастер установки».",
+  models: "Не удалось получить список моделей. Откройте Настройки → «Модели».",
+  ready: "Приложение запустилось не полностью. Откройте Настройки → «Проверка системы».",
+};
+
+export function setBootStep(step: BootStep, failed = false): void {
+  const box = document.getElementById("boot-steps");
+  if (!box) return;
+  if (step === "off") {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const at = BOOT_ORDER.indexOf(step);
+  BOOT_ORDER.forEach((name, i) => {
+    const row = box.querySelector<HTMLElement>(`.boot-step[data-step="${name}"]`);
+    if (!row) return;
+    // Последний шаг («Готов к работе») сам себе итог — отмечаем его зелёным сразу.
+    const done = i < at || (i === at && step === "ready" && !failed);
+    row.classList.toggle("is-done", done);
+    row.classList.toggle("is-active", i === at && !failed && !done);
+    row.classList.toggle("is-failed", i === at && failed);
+  });
+
+  let hint = box.querySelector<HTMLElement>(".boot-steps__hint");
+  if (failed) {
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.className = "boot-steps__hint";
+      box.appendChild(hint);
+    }
+    hint.textContent = BOOT_FAIL_HINT[step];
+    hint.hidden = false;
+  } else if (hint) {
+    hint.hidden = true;
+  }
+}
+
 // ── Состояние композера и «Стоп» ─────────────────────────────────────────────
 
 export function setStreaming(on: boolean) {
@@ -398,7 +502,10 @@ function trapTab(e: KeyboardEvent, overlay: HTMLElement) {
   }
 }
 
-// Своё модальное подтверждение.
+// Своё модальное подтверждение. Все вызовы — деструктивные («Удалить…»), поэтому
+// подтверждение только адресным действием: клик или Enter/Space на СФОКУСИРОВАННОЙ
+// кнопке (нативная активация). Глобального «Enter = подтвердить» нет — он срабатывал
+// бы и при фокусе на «Отмене», превращая отказ в необратимое удаление.
 export function confirmModal(message: string, okLabel = "Удалить"): Promise<boolean> {
   return new Promise((resolve) => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -408,12 +515,14 @@ export function confirmModal(message: string, okLabel = "Удалить"): Promi
       <div class="modal" role="dialog" aria-modal="true">
         <div class="modal__text"></div>
         <div class="modal__actions">
-          <button class="modal__btn" data-act="cancel">Отмена</button>
-          <button class="modal__btn modal__btn--danger" data-act="ok"></button>
+          <button type="button" class="modal__btn" data-act="cancel">Отмена</button>
+          <button type="button" class="modal__btn modal__btn--danger" data-act="ok"></button>
         </div>
       </div>`;
     overlay.querySelector(".modal__text")!.textContent = message;
     overlay.querySelector('[data-act="ok"]')!.textContent = okLabel;
+    // Имя диалога для скринридера — сам вопрос (id-ссылки не нужны, окно одно).
+    overlay.querySelector(".modal")!.setAttribute("aria-label", message);
     document.body.appendChild(overlay);
 
     const close = (result: boolean) => {
@@ -424,7 +533,6 @@ export function confirmModal(message: string, okLabel = "Удалить"): Promi
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close(false);
-      else if (e.key === "Enter") close(true);
       else trapTab(e, overlay);
     };
     overlay.addEventListener("click", (e) => {
@@ -433,7 +541,9 @@ export function confirmModal(message: string, okLabel = "Удалить"): Promi
       else if (t.dataset.act === "ok") close(true);
     });
     document.addEventListener("keydown", onKey);
-    (overlay.querySelector('[data-act="ok"]') as HTMLButtonElement).focus();
+    // Стартовый фокус — на безопасной «Отмене»: случайный Enter/Space сразу после
+    // открытия не должен стирать данные; удаление требует осознанного шага.
+    (overlay.querySelector('[data-act="cancel"]') as HTMLButtonElement).focus();
   });
 }
 
@@ -448,11 +558,12 @@ export function promptModal(title: string, placeholder = ""): Promise<string | n
         <div class="modal__text"></div>
         <input class="modal__input" type="text" />
         <div class="modal__actions">
-          <button class="modal__btn" data-act="cancel">Отмена</button>
-          <button class="modal__btn modal__btn--primary" data-act="ok">Создать</button>
+          <button type="button" class="modal__btn" data-act="cancel">Отмена</button>
+          <button type="button" class="modal__btn modal__btn--primary" data-act="ok">Создать</button>
         </div>
       </div>`;
     overlay.querySelector(".modal__text")!.textContent = title;
+    overlay.querySelector(".modal")!.setAttribute("aria-label", title); // имя диалога для скринридера
     const input = overlay.querySelector(".modal__input") as HTMLInputElement;
     input.placeholder = placeholder;
     document.body.appendChild(overlay);
@@ -464,8 +575,10 @@ export function promptModal(title: string, placeholder = ""): Promise<string | n
       resolve(result);
     };
     const onKey = (e: KeyboardEvent) => {
+      // Enter подтверждает только из поля ввода (привычно для формы); на кнопках
+      // Enter/Space активируют СФОКУСИРОВАННУЮ кнопку нативно — «Отмена» отменяет.
       if (e.key === "Escape") close(null);
-      else if (e.key === "Enter") close(input.value);
+      else if (e.key === "Enter" && document.activeElement === input) close(input.value);
       else trapTab(e, overlay);
     };
     overlay.addEventListener("click", (e) => {

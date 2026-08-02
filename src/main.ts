@@ -17,7 +17,7 @@ import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
 
 import { initDom, installEmbedBtn } from "./dom";
-import { setComposerEnabled } from "./ui";
+import { setBootStep, setComposerEnabled } from "./ui";
 import { wireChat } from "./chat";
 import { wireAttachments } from "./attachments";
 import {
@@ -77,13 +77,27 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Сначала обеспечиваем движок (поднимаем свой или переиспользуем системный), затем
   // уже опираемся на него. Если не готов — статус выставлен, движок-зависимые шаги
   // пропускаем (пользователь может повторить кнопкой обновления в шапке).
+  // Шаги запуска на приветственном экране: холодный старт длится секунды, и
+  // мелкой подписи в шапке мало — без видимого хода дела это выглядит как «зависло».
+  setBootStep("engine");
   const engineReady = await ensureEngine();
   if (engineReady) {
+    setBootStep("models");
     checkOllama(); // покажет версию Ollama в шапке
     await hwReady; // уровень железа известен → авто-выбор модели сразу верный, без «скачка»
-    loadModels();
+    // Список моделей не задерживает остальной старт, но именно он закрывает
+    // последний шаг: после него приложение действительно готово отвечать.
+    void loadModels().then(
+      () => {
+        setBootStep("ready");
+        window.setTimeout(() => setBootStep("off"), 1500); // подержать «готов» и убрать
+      },
+      () => setBootStep("models", true),
+    );
     refreshDocuments(sidebarDocCtx); // общая база (вне проектов) + статус модели эмбеддингов
     refreshCurrentDocsCount(); // есть ли документы у открытого чата (для RAG)
+  } else {
+    setBootStep("engine", true); // шаги остаются на экране с подсказкой, куда идти
   }
   // Первый запуск: обязательных моделей нет → мастер установки (оценит машину,
   // предложит посильный набор, поставит с флешки или из интернета). Сам молчит,

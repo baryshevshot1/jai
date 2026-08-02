@@ -17,8 +17,8 @@ import {
   wizardCloseBtn,
   wizardView,
 } from "./dom";
-import { plural } from "./util";
-import { showChatView } from "./ui";
+import { humanError, plural } from "./util";
+import { showChatView, showStatus, type StatusKind } from "./ui";
 import { cancelActivePull, runImport, runPull } from "./pull";
 import { loadModels, loadModelStates } from "./models";
 import { refreshCurrentDocsCount, refreshDocuments, sidebarDocCtx } from "./documents";
@@ -85,6 +85,11 @@ async function renderSetupScreen() {
   wizardCard.appendChild(el("h3", "wizard-h", "Ваш компьютер"));
   const hwLine = el("div", "wizard-note", "Определяю железо…");
   wizardCard.appendChild(hwLine);
+  // Помехи (железо не определилось, движок молчит) — отдельной заметной строкой:
+  // в общем сером перечислении характеристик их просто не замечают.
+  const hwTrouble = el("div");
+  hwTrouble.hidden = true;
+  wizardCard.appendChild(hwTrouble);
 
   wizardCard.appendChild(el("h3", "wizard-h", "Модели"));
   wizardCard.appendChild(
@@ -113,7 +118,8 @@ async function renderSetupScreen() {
   laterBtn.type = "button";
   actions.append(installBtn, laterBtn);
   wizardCard.appendChild(actions);
-  const status = el("div", "wizard-note", "");
+  const status = el("div");
+  status.hidden = true;
   wizardCard.appendChild(status);
 
   laterBtn.addEventListener("click", closeWizard);
@@ -121,6 +127,7 @@ async function renderSetupScreen() {
   // Железо и движок — параллельно, не задерживая список моделей.
   void (async () => {
     const parts: string[] = [];
+    const trouble: string[] = [];
     try {
       const hw = await invoke<HardwareInfo>("detect_hardware");
       const word =
@@ -133,15 +140,20 @@ async function renderSetupScreen() {
       parts.push(`ОЗУ ${hw.ram_gb.toFixed(0)} ГБ`);
       parts.push(`CPU ${hw.cpu_cores} ${plural(hw.cpu_cores, "ядро", "ядра", "ядер")}`);
     } catch {
-      parts.push("не удалось определить железо");
+      trouble.push(
+        "Определить характеристики компьютера не удалось — оценки моделей ниже приблизительные.",
+      );
     }
     try {
       const v = await invoke<string>("ollama_version");
       parts.push(`движок Ollama ${v}`);
     } catch {
-      parts.push("движок недоступен: установка из интернета не сработает, импорт с флешки — доступен");
+      trouble.push(
+        "Движок не отвечает: скачать модели из интернета не получится. Импорт с флешки при этом работает.",
+      );
     }
-    hwLine.textContent = parts.join(" · ");
+    hwLine.textContent = parts.length ? parts.join(" · ") : "Характеристики компьютера неизвестны";
+    if (trouble.length) showStatus(hwTrouble, trouble.join(" "), "error");
   })();
 
   // Оценка набора против железа (работает и без движка — по приблизительным весам).
@@ -149,7 +161,15 @@ async function renderSetupScreen() {
   try {
     assessments = await invoke<ModelAssessment[]>("assess_models");
   } catch (e) {
-    listEl.appendChild(el("div", "wizard-note", `Не удалось оценить набор моделей: ${e}`));
+    // Пустой список без объяснения выглядел бы как «моделей не нашлось».
+    const box = el("div");
+    listEl.appendChild(box);
+    showStatus(
+      box,
+      `Не удалось получить набор моделей: ${humanError(e)}. Закройте мастер и откройте ` +
+        "заново — или установите модели в настройках (раздел «Модели»).",
+      "error",
+    );
   }
 
   // Рекомендация: лучшая посильная текстовая (набор упорядочен от основной к лёгкой)
@@ -207,10 +227,14 @@ async function renderSetupScreen() {
   const renderSources = async () => {
     srcList.innerHTML = "";
     let sources: ModelSource[] = [];
+    let srcTrouble = "";
     try {
       sources = await invoke<ModelSource[]>("find_model_sources");
-    } catch {
-      /* без носителей остаётся интернет */
+    } catch (e) {
+      // Промолчать нельзя: список без флешки читается как «носитель не вставлен».
+      srcTrouble =
+        `Проверить подключённые носители не удалось: ${humanError(e)}. ` +
+        "Если флешка вставлена, нажмите «Обновить список носителей».";
     }
     const addOption = (value: string, label: string, sub: string, checked: boolean) => {
       const row = el("label", "wizard-source");
@@ -240,6 +264,11 @@ async function renderSetupScreen() {
       "модели скачиваются по очереди; нужен доступ в интернет",
       sources.length === 0,
     );
+    if (srcTrouble) {
+      const box = el("div");
+      srcList.appendChild(box);
+      showStatus(box, srcTrouble, "error");
+    }
   };
   await renderSources();
   srcRefresh.addEventListener("click", () => void renderSources());
@@ -250,7 +279,7 @@ async function renderSetupScreen() {
       srcList.querySelector<HTMLInputElement>('input[name="wizard-src"]:checked')?.value ??
       "internet";
     if (!chosen.length && src === "internet") {
-      status.textContent = "Отметьте хотя бы одну модель.";
+      showStatus(status, "Отметьте хотя бы одну модель — иначе устанавливать нечего.", "error");
       return;
     }
     await renderInstallScreen(chosen, src, assessments);
@@ -291,15 +320,21 @@ async function renderInstallScreen(
         fill.style.width = `${Math.max(2, Math.round(f * 100))}%`;
         lbl.textContent = t;
       },
-      finish: (t: string, err = false) => {
-        fill.style.width = "100%";
+      // Полную полосу заслуживает только успех. При отмене и при сбое полоса
+      // замирает там, где остановилась (сбой ещё и краснеет): залитая до конца
+      // выглядит как «установилось», и неудача становится неотличима от удачи.
+      finish: (t: string, kind: "done" | "stopped" | "failed" = "done") => {
+        if (kind === "done") fill.style.width = "100%";
+        fill.classList.toggle("error", kind === "failed");
         lbl.textContent = t;
-        lbl.classList.toggle("danger", err);
+        lbl.classList.toggle("danger", kind === "failed");
       },
     };
   };
 
-  const notes: string[] = [];
+  // Итоги операций под строками прогресса: что именно не получилось и что с этим
+  // делать. Вид сообщения (к сведению / ошибка) — общий для всех карточек.
+  const notes: { text: string; kind: StatusKind }[] = [];
   if (source !== "internet") {
     // Импорт: копируется ВЕСЬ каталог носителя одной операцией (набор согласован
     // при сборке флешки), затем честно сверяем, что из выбранного появилось.
@@ -307,9 +342,17 @@ async function renderInstallScreen(
     const outcome = await runImport(source, {
       progress: row.progress,
       done: () => row.finish("Готово — носитель можно извлечь"),
-      cancelled: () => row.finish("Импорт отменён — уже скопированное сохранено"),
-      error: (m) => row.finish(m, true),
+      cancelled: () => row.finish("Импорт отменён — уже скопированное сохранено", "stopped"),
+      error: (m) => row.finish(m, "failed"),
     });
+    if (outcome === "error")
+      notes.push({
+        text:
+          "Модели с носителя не скопировались. Проверьте, что флешка на месте и на диске " +
+          "есть свободное место, затем повторите — либо установите модели из интернета " +
+          "(Настройки → Модели).",
+        kind: "error",
+      });
     if (outcome === "done" && tags.length) {
       try {
         const st = await invoke<{ models: { tag: string; installed: boolean }[] }>(
@@ -319,30 +362,50 @@ async function renderInstallScreen(
           (t) => !st.models.find((m) => m.tag === t)?.installed,
         );
         if (missing.length)
-          notes.push(
-            `На носителе не оказалось: ${missing.join(", ")} — их можно установить из интернета (Настройки → Модели).`,
-          );
+          notes.push({
+            text:
+              `На носителе не оказалось: ${missing.join(", ")} — ` +
+              "их можно установить из интернета (Настройки → Модели).",
+            kind: "error",
+          });
       } catch {
-        /* движок молчит — состояние покажет список моделей позже */
+        // Движок молчит: копирование прошло, а вот появились ли нужные модели —
+        // неизвестно. Обещать «всё на месте» в таком случае нельзя.
+        notes.push({
+          text:
+            "Проверить, какие модели появились после импорта, не удалось: движок не " +
+            "отвечает. Загляните позже в Настройки → Модели.",
+          kind: "info",
+        });
       }
     }
   } else {
+    const failed: string[] = [];
     for (const tag of tags) {
       const a = assessments.find((x) => x.tag === tag);
       const row = progressRow(a ? `${a.title} (${tag})` : tag);
       const outcome = await runPull(tag, {
         progress: row.progress,
         done: () => row.finish("Установлена"),
-        cancelled: () => row.finish("Отменена — докачка продолжится при повторе"),
-        error: (m) => row.finish(m, true),
+        cancelled: () => row.finish("Отменена — докачка продолжится при повторе", "stopped"),
+        error: (m) => row.finish(m, "failed"),
       });
+      if (outcome === "error") failed.push(tag); // остальные всё же попробуем поставить
       if (outcome === "cancelled") {
-        notes.push(
-          "Установка остановлена — оставшиеся модели можно поставить позже (Настройки → Модели).",
-        );
+        notes.push({
+          text: "Установка остановлена — оставшиеся модели можно поставить позже (Настройки → Модели).",
+          kind: "info",
+        });
         break;
       }
     }
+    if (failed.length)
+      notes.push({
+        text:
+          `Не установлено: ${failed.join(", ")}. Обычно виноват пропавший интернет или ` +
+          "нехватка места на диске — повторите позже (Настройки → Модели).",
+        kind: "error",
+      });
   }
 
   cancelBtn.hidden = true;
@@ -351,11 +414,28 @@ async function renderInstallScreen(
   await refreshDocuments(sidebarDocCtx);
   await refreshCurrentDocsCount();
 
-  for (const n of notes) wizardCard.appendChild(el("div", "wizard-note", n));
+  for (const n of notes) {
+    const box = el("div");
+    wizardCard.appendChild(box);
+    showStatus(box, n.text, n.kind);
+  }
+  // Если что-то не установилось, главное действие — повторить: иначе экран с
+  // красной строкой и единственной кнопкой «Начать работу» выглядит тупиком.
+  const failedSomething = notes.some((n) => n.kind === "error");
   const actions = el("div", "wizard-actions");
-  const doneBtn = el("button", "ep-btn ep-btn--primary", "Начать работу");
+  const doneBtn = el(
+    "button",
+    failedSomething ? "ep-btn ep-btn--ghost" : "ep-btn ep-btn--primary",
+    "Начать работу",
+  );
   doneBtn.type = "button";
   doneBtn.addEventListener("click", closeWizard);
+  if (failedSomething) {
+    const retryBtn = el("button", "ep-btn ep-btn--primary", "Попробовать снова");
+    retryBtn.type = "button";
+    retryBtn.addEventListener("click", () => void renderSetupScreen());
+    actions.appendChild(retryBtn);
+  }
   actions.appendChild(doneBtn);
   wizardCard.appendChild(actions);
 }
