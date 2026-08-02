@@ -3,47 +3,29 @@
 import { describe, expect, it } from "vitest";
 import { humanError, plural } from "./util";
 
-describe("humanError", () => {
-  it("узнаёт недоступный движок", () => {
-    expect(humanError("error sending request: tcp connect error: Connection refused")).toContain(
-      "Движок не отвечает",
+describe("humanError: сообщение без кода", () => {
+  it("показывает строку как есть и НЕ угадывает причину по тексту", () => {
+    // Ровно те строки, на которых прежний разбор давал подсказку. Теперь команды,
+    // не обращающиеся к движку, не присылают кода — и выдумывать причину нельзя:
+    // «connection refused» может прийти из чего угодно, а не только от движка.
+    for (const s of [
+      "error sending request: tcp connect error: Connection refused",
+      "operation timed out",
+      'model "qwen3.5:9b" not found, try pulling it first',
+      "model requires more system memory (9.2 GiB) than is available",
+    ]) {
+      expect(humanError(s)).toBe(s);
+    }
+  });
+
+  it("не срабатывает на словах, похожих на маркеры", () => {
+    // Прежний шаблон /tim/ ловил «runtime», /404/ — любой путь с этими цифрами.
+    expect(humanError("panic in runtime: index out of bounds")).toBe(
+      "panic in runtime: index out of bounds",
     );
-  });
-
-  it("узнаёт таймаут", () => {
-    expect(humanError("operation timed out")).toContain("время ожидания");
-  });
-
-  it("НЕ принимает «runtime» за таймаут", () => {
-    // Прежний шаблон /tim/ ловил любое слово с «tim» — «runtime», «estimate».
-    const out = humanError("panic in runtime: index out of bounds");
-    expect(out).not.toContain("время ожидания");
-  });
-
-  it("НЕ принимает «estimate» за таймаут", () => {
-    expect(humanError("estimate failed")).not.toContain("время ожидания");
-  });
-
-  it("узнаёт отсутствующую модель", () => {
-    expect(humanError('model "qwen3.5:9b" not found, try pulling it first')).toContain(
-      "Модель не установлена",
+    expect(humanError("Не удалось прочитать /home/u/404/файл.txt")).toBe(
+      "Не удалось прочитать /home/u/404/файл.txt",
     );
-  });
-
-  it("НЕ принимает «no such file» за отсутствующую модель", () => {
-    // Файловая ошибка — это не про установку моделей: подсказка увела бы не туда.
-    const out = humanError("no such file or directory: /home/u/.config/jai/settings.json");
-    expect(out).not.toContain("Модель не установлена");
-  });
-
-  it("узнаёт нехватку памяти", () => {
-    expect(humanError("model requires more system memory (9.2 GiB) than is available")).toContain(
-      "Не хватает памяти",
-    );
-  });
-
-  it("нераспознанное отдаёт как есть", () => {
-    expect(humanError("совершенно новая ошибка")).toBe("совершенно новая ошибка");
   });
 
   it("длинную строку режет, не разрубая символы", () => {
@@ -98,11 +80,11 @@ describe("humanError: ошибка с кодом причины из Rust", () =
     expect(humanError({ code: "unknown", message: "Странный сбой." })).toBe("Странный сбой.");
   });
 
-  it("объект не той формы разбирается по-старому, а не как [object Object]", () => {
-    // Страховка на время миграции: пока часть команд шлёт строки, а часть — объекты.
-    expect(humanError({ message: "operation timed out" })).toContain("время ожидания");
-    expect(humanError(new Error("model x not found, try pulling it first"))).toContain(
-      "Модель не установлена",
+  it("объект без кода не превращается в [object Object]", () => {
+    // Сообщение обязано дойти до пользователя, даже если формы ошибки мы не знаем.
+    expect(humanError({ message: "Не удалось записать файл." })).toBe(
+      "Не удалось записать файл.",
     );
+    expect(humanError(new Error("Сбой разбора настроек."))).toBe("Сбой разбора настроек.");
   });
 });

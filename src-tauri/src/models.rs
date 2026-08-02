@@ -71,16 +71,16 @@ pub(crate) async fn pull_model(
     name: String,
     on_event: Channel<PullEvent>,
     state: tauri::State<'_, PullState>,
-) -> Result<PullOutcome, String> {
+) -> AppResult<PullOutcome> {
     // Регистрация задачи — в синхронной области (std-мьютекс не держим через await);
     // гард ниже снимет регистрацию при любом выходе из функции.
     let my_cancel = {
         let mut job = state.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(active) = job.as_ref() {
-            return Err(format!(
+            return Err(AppError::unknown(format!(
                 "Уже идёт установка «{}» — дождитесь её завершения или отмените.",
                 active.name
-            ));
+            )));
         }
         let cancel = Arc::new(AtomicBool::new(false));
         *job = Some(PullJob { name: name.clone(), cancel: cancel.clone() });
@@ -101,17 +101,18 @@ pub(crate) async fn pull_model(
     let mut resp = match with_cancel(send_fut, &my_cancel).await {
         None => return Ok(PullOutcome::Cancelled), // «Отмена» ещё до ответа движка
         Some(Err(_elapsed)) => {
-            return Err("Движок не ответил на запрос установки — попробуйте ещё раз \
-                        (если не поможет, перезапустите приложение)."
-                .into())
+            return Err(AppError::timeout(
+                "Движок не ответил на запрос установки — попробуйте ещё раз \
+                 (если не поможет, перезапустите приложение).",
+            ))
         }
-        Some(Ok(r)) => r.map_err(|e| format!("Не удалось подключиться к Ollama: {e}"))?,
+        Some(Ok(r)) => r.map_err(|e| AppError::from_reqwest(&e, "Установка модели не началась"))?,
     };
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Ollama вернул ошибку {status}: {text}"));
+        return Err(AppError::unknown(format!("Движок вернул ошибку {status}: {text}")));
     }
 
     // Разбор одной NDJSON-строки: статус/прогресс или ошибка (напр. нет интернета).
@@ -161,9 +162,10 @@ pub(crate) async fn pull_model(
         {
             Err(_elapsed) => {
                 if last_data.elapsed() > PULL_STALL {
-                    return Err("Сеть не отвечает — установка прервана. Проверьте \
-                                интернет и повторите: докачка продолжится с места."
-                        .into());
+                    return Err(AppError::timeout(
+                        "Сеть не отвечает — установка прервана. Проверьте интернет и \
+                         повторите: докачка продолжится с места.",
+                    ));
                 }
                 continue; // окно без данных — перепроверяем отмену
             }
@@ -172,7 +174,9 @@ pub(crate) async fn pull_model(
                 chunk
             }
             Ok(Ok(None)) => break, // поток корректно завершился
-            Ok(Err(e)) => return Err(format!("Сбой сети при скачивании модели: {e}")),
+            Ok(Err(e)) => {
+                return Err(AppError::from_reqwest(&e, "Скачивание модели прервалось"))
+            }
         };
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {

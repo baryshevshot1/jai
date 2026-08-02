@@ -5,6 +5,7 @@
 use tauri::Manager;
 
 use crate::engine;
+use crate::error::AppResult;
 use crate::write_atomic;
 
 /// Сериализует доступ к settings.json. set_setting делает read-modify-write всего
@@ -120,7 +121,7 @@ pub(crate) fn clear_engine_overrides(
 pub(crate) async fn ensure_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, engine::EngineState>,
-) -> Result<engine::EngineStatus, String> {
+) -> AppResult<engine::EngineStatus> {
     let exe_override = read_setting_path(&app, "ollama_path");
     let models_override = read_setting_path(&app, "ollama_models_dir");
     let resource_dir = app.path().resource_dir().ok();
@@ -134,7 +135,7 @@ pub(crate) async fn ensure_engine(
 pub(crate) async fn reload_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, engine::EngineState>,
-) -> Result<engine::EngineStatus, String> {
+) -> AppResult<engine::EngineStatus> {
     if engine::was_started_by_us(&state) {
         engine::stop_if_ours(&state); // гасит наш процесс и ждёт освобождения
     } else if engine::is_running().await {
