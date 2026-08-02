@@ -20,7 +20,6 @@ import {
   appUpdateStatusEl,
   appVersionEl,
   brandHomeBtn,
-  composerWrapEl,
   diagListEl,
   diagRunBtn,
   diagSummaryEl,
@@ -29,7 +28,6 @@ import {
   epResetBtn,
   epSetEngineBtn,
   epSetModelsBtn,
-  feedEl,
   gentleToggleBtn,
   inputEl,
   installFromDiskBtn,
@@ -38,18 +36,15 @@ import {
   modelProgressFill,
   modelProgressLabel,
   modelPullCancelBtn,
-  projectView,
   pullCancelBtn,
   settingsBackBtn,
   settingsBtn,
   settingsStatusEl,
-  settingsView,
   sidebarResizer,
   sidebarToggleBtn,
   themeBtn,
   themeIconEl,
   thinkToggleEl,
-  wizardView,
 } from "./dom";
 import { humanError, ICON_REFRESH_CW, plural } from "./util";
 import {
@@ -59,6 +54,7 @@ import {
   showStatus,
   updateGentleUi,
   type StatusKind,
+  showScreen,
 } from "./ui";
 import {
   flashIndexLabel,
@@ -73,7 +69,6 @@ import {
   modelsStatus,
   resetCheckButton,
 } from "./models";
-import { closeProjectView } from "./projects";
 import { refreshOutboundLog } from "./online";
 import { runImport } from "./pull";
 
@@ -81,12 +76,7 @@ import { runImport } from "./pull";
 
 // Открыть настройки: лента и поле ввода скрываются, страница занимает их место.
 function openSettings() {
-  if (!projectView.hidden) closeProjectView(); // настройки и экран проекта взаимоисключаемы
-  wizardView.hidden = true; // как и мастер установки
-  feedEl.hidden = true;
-  composerWrapEl.hidden = true;
-  settingsView.hidden = false;
-  settingsBtn.classList.add("active");
+  showScreen("settings"); // экран проекта и мастер гаснут сами — они взаимоисключаемы
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
   refreshDocuments(sidebarDocCtx); // свежий список общей базы (карточка «Документы»)
   applyModelChoice(); // поле «Модель для ответов» — всегда в актуальном состоянии

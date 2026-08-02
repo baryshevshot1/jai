@@ -6,8 +6,6 @@ import type { Project } from "./types";
 import { state } from "./state";
 import {
   chatProjectChip,
-  composerWrapEl,
-  feedEl,
   projectAddDocBtn,
   projectBackBtn,
   projectDeleteBtn,
@@ -16,14 +14,10 @@ import {
   projectNameInput,
   projectNewChatBtn,
   projectStatusEl,
-  projectView,
   newProjectBtn,
-  settingsBtn,
-  settingsView,
-  wizardView,
 } from "./dom";
 import { humanError, makePressable } from "./util";
-import { addError, confirmModal, promptModal, stop } from "./ui";
+import { addError, confirmModal, promptModal, stop, showScreen} from "./ui";
 import { addDocument, projectDocCtx, refreshDocuments } from "./documents";
 import {
   newDialog,
@@ -111,13 +105,7 @@ export function openProjectView(id: string) {
   if (!proj) return;
   if (state.streaming) stop();
   state.viewingProjectId = id;
-  // Прячем ленту/композер, настройки и мастер, показываем экран проекта.
-  feedEl.hidden = true;
-  composerWrapEl.hidden = true;
-  settingsView.hidden = true;
-  settingsBtn.classList.remove("active");
-  wizardView.hidden = true;
-  projectView.hidden = false;
+  showScreen("project"); // лента, настройки и мастер гаснут сами
 
   projectNameInput.value = proj.name;
   projectInstructionsEl.value = proj.instructions;
@@ -130,10 +118,7 @@ export function openProjectView(id: string) {
 }
 
 export function closeProjectView() {
-  projectView.hidden = true;
-  state.viewingProjectId = null;
-  feedEl.hidden = false;
-  composerWrapEl.hidden = false;
+  showScreen("chat"); // снимет и выбор проекта, и подсветку строки в панели
   renderProjectList();
 }
 
