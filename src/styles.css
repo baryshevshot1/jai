@@ -606,10 +606,19 @@ body.resizing { cursor: col-resize; user-select: none; }
   stroke-width: 2;
   opacity: 0.7;
 }
-.hwchip__model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* max-width обязателен: без него многоточию не за что зацепиться — элемент просто
+   растёт по содержимому и распирает панель. Тег русского профиля
+   («hf.co/t-tech/T-lite-it-2.1-GGUF:Q4_K_M») шире панели сам по себе. */
+.hwchip__model span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* Имя модели и её тег — колонкой: карточка узкая, в строку они не помещаются. */
 .hwchip__mbox {
   min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
