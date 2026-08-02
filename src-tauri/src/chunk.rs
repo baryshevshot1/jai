@@ -177,7 +177,7 @@ mod tests {
         let tail: String = chunks[0].chars().rev().take(40).collect::<String>()
             .chars().rev().collect();
         assert!(
-            chunks[1].contains(tail.trim()) || chunks[1].len() > 0,
+            chunks[1].contains(tail.trim()) || !chunks[1].is_empty(),
             "ожидается перекрытие на стыке"
         );
     }
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn respects_paragraph_boundaries() {
         let text = "Первый абзац короткий.\n\nВторой абзац тоже короткий.";
-        let chunks = chunk_text(&text);
+        let chunks = chunk_text(text);
         // оба коротких абзаца влезают в один фрагмент, но склейка идёт через пробел
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].contains("Первый абзац"));

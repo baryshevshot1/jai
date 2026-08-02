@@ -24,10 +24,17 @@ const SCHEMA_VERSION: i64 = 1;
 /// Вызывать один раз при старте (до открытия любых соединений). Идемпотентно по сути,
 /// но дёргать повторно не нужно.
 pub fn register_vec() {
+    // Указатель на инициализатор расширения приводим к сигнатуре, которую ждёт
+    // sqlite3_auto_extension: типы описаны в разных крейтах (libsqlite3-sys и
+    // sqlite-vec) и не совпадают номинально, хотя ABI один и тот же.
+    type AutoExtension = unsafe extern "C" fn(
+        *mut rusqlite::ffi::sqlite3,
+        *mut *mut std::os::raw::c_char,
+        *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::os::raw::c_int;
     unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
-        )));
+        let init: AutoExtension = std::mem::transmute(sqlite3_vec_init as *const ());
+        sqlite3_auto_extension(Some(init));
     }
 }
 
@@ -156,6 +163,36 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);",
     )?;
 
+    // Уборка сирот от прежних оборванных миграций (до того как перестройка стала
+    // транзакционной): фрагменты без документа съедают KNN-пул кандидатов и место.
+    // Сначала дешёвая проверка на чтение — в здоровой базе писать нечего.
+    let orphans: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE doc_id NOT IN (SELECT id FROM documents))",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if orphans {
+        // векторы — до фрагментов (тот же порядок, что в delete_document); vec_chunks
+        // может ещё не существовать — она создаётся при первой индексации
+        let has_vec = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_chunks'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap_or(false);
+        if has_vec {
+            let _ = conn.execute(
+                "DELETE FROM vec_chunks WHERE rowid IN
+                    (SELECT id FROM chunks WHERE doc_id NOT IN (SELECT id FROM documents))",
+                [],
+            );
+        }
+        let _ = conn.execute(
+            "DELETE FROM chunks WHERE doc_id NOT IN (SELECT id FROM documents)",
+            [],
+        );
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -166,11 +203,17 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 /// база) или столбец уже есть — ничего не делаем. При ошибке перестройки сбрасываем
 /// индекс (кэш), чтобы приложение продолжило работу с чистой новой схемой.
 fn migrate_documents_project_id(conn: &Connection) {
-    let table_exists = conn
-        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'")
-        .and_then(|mut s| s.exists([]))
-        .unwrap_or(false);
-    if !table_exists {
+    let table_exists = |name: &str| {
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
+            .and_then(|mut s| s.exists([name]))
+            .unwrap_or(false)
+    };
+    // Обрыв дотранзакционной перестройки (крах между DROP и RENAME) мог оставить
+    // данные в documents_new без documents — данные целы, довершаем переименование.
+    if !table_exists("documents") && table_exists("documents_new") {
+        let _ = conn.execute("ALTER TABLE documents_new RENAME TO documents", []);
+    }
+    if !table_exists("documents") {
         return; // свежая база — мигрировать нечего, CREATE создаст новую схему
     }
     let has_col = conn
@@ -183,30 +226,35 @@ fn migrate_documents_project_id(conn: &Connection) {
 
     // Перестройка с переносом данных. Внешние ключи на время миграции выключаем,
     // чтобы DROP/RENAME не спорил с ссылкой chunks.doc_id → documents(id) (id сохраняем).
-    let rebuilt: rusqlite::Result<()> = (|| {
-        conn.execute_batch(
-            "PRAGMA foreign_keys=OFF;
-             CREATE TABLE documents_new (
-                id          INTEGER PRIMARY KEY,
-                filename    TEXT NOT NULL,
-                ext         TEXT NOT NULL,
-                sha256      TEXT NOT NULL,
-                added_at    INTEGER NOT NULL,
-                char_count  INTEGER NOT NULL,
-                chunk_count INTEGER NOT NULL,
-                project_id  TEXT,
-                UNIQUE(project_id, sha256)
-             );
-             INSERT INTO documents_new (id, filename, ext, sha256, added_at, char_count, chunk_count, project_id)
-                SELECT id, filename, ext, sha256, added_at, char_count, chunk_count, NULL FROM documents;
-             DROP TABLE documents;
-             ALTER TABLE documents_new RENAME TO documents;
-             PRAGMA foreign_keys=ON;",
-        )
-    })();
+    // PRAGMA — снаружи (внутри транзакции foreign_keys игнорируется), сами DDL+INSERT —
+    // одной транзакцией: сбой посреди (питание, крах) откатывает всё целиком, а не
+    // оставляет базу без documents с висячими фрагментами и векторами.
+    let _ = conn.pragma_update(None, "foreign_keys", "OFF");
+    let rebuilt: rusqlite::Result<()> = conn.execute_batch(
+        "BEGIN;
+         DROP TABLE IF EXISTS documents_new;
+         CREATE TABLE documents_new (
+            id          INTEGER PRIMARY KEY,
+            filename    TEXT NOT NULL,
+            ext         TEXT NOT NULL,
+            sha256      TEXT NOT NULL,
+            added_at    INTEGER NOT NULL,
+            char_count  INTEGER NOT NULL,
+            chunk_count INTEGER NOT NULL,
+            project_id  TEXT,
+            UNIQUE(project_id, sha256)
+         );
+         INSERT INTO documents_new (id, filename, ext, sha256, added_at, char_count, chunk_count, project_id)
+            SELECT id, filename, ext, sha256, added_at, char_count, chunk_count, NULL FROM documents;
+         DROP TABLE documents;
+         ALTER TABLE documents_new RENAME TO documents;
+         COMMIT;",
+    );
     if rebuilt.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;"); // батч мог упасть внутри открытой транзакции
         let _ = drop_all(conn); // не смогли мигрировать — сбрасываем индекс (пересоберётся)
     }
+    let _ = conn.pragma_update(None, "foreign_keys", "ON");
 }
 
 /// Полный сброс схемы (при смене версии или несовместимой размерности вектора).
@@ -347,6 +395,9 @@ pub fn find_by_hash(
 }
 
 /// Вставка записи о документе в проект (project_id=None — вне проектов), возвращает id.
+// Аргументы — ровно колонки таблицы documents: промежуточная структура здесь только
+// добавила бы слой перекладывания полей между вызовом и SQL.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_document(
     conn: &Connection,
     filename: &str,
@@ -675,6 +726,57 @@ mod tests {
         let docs = list_documents(&conn, None).unwrap();
         assert_eq!(docs.len(), 1, "старый документ сохранён и относится к «вне проектов»");
         assert_eq!(docs[0].filename, "old.txt");
+    }
+
+    // Обрыв старой (дотранзакционной) миграции между DROP и RENAME: documents нет,
+    // данные лежат в documents_new. init() довершает переименование — данные целы.
+    #[test]
+    fn completes_interrupted_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents_new (
+                id          INTEGER PRIMARY KEY,
+                filename    TEXT NOT NULL,
+                ext         TEXT NOT NULL,
+                sha256      TEXT NOT NULL,
+                added_at    INTEGER NOT NULL,
+                char_count  INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                project_id  TEXT,
+                UNIQUE(project_id, sha256)
+            );
+            INSERT INTO documents_new VALUES (1,'saved.txt','txt','sha',1,10,1,NULL);",
+        )
+        .unwrap();
+
+        init(&conn).unwrap();
+        let docs = list_documents(&conn, None).unwrap();
+        assert_eq!(docs.len(), 1, "данные оборванной миграции спасены");
+        assert_eq!(docs[0].filename, "saved.txt");
+    }
+
+    // Висячие фрагменты и векторы (последствие старого сбоя миграции) вычищаются
+    // при открытии; живые данные не трогаются.
+    #[test]
+    fn cleans_orphan_chunks_and_vectors() {
+        register_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        ensure_vec_table(&conn, 4).unwrap();
+        let id = insert_document(&conn, "a.txt", "txt", "sha", 1, 10, 1, None).unwrap();
+        let cid = insert_chunk(&conn, id, 0, "текст", None).unwrap();
+        insert_vector(&conn, cid, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // осиротим: удалим документ в обход каскада (эмуляция последствий сбоя)
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        conn.execute("DELETE FROM documents", []).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        init(&conn).unwrap(); // повторное открытие
+        let chunks: i64 = conn.query_row("SELECT count(*) FROM chunks", [], |r| r.get(0)).unwrap();
+        let vecs: i64 = conn.query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0)).unwrap();
+        assert_eq!(chunks, 0, "висячие фрагменты вычищены");
+        assert_eq!(vecs, 0, "висячие векторы вычищены");
     }
 
     // Повреждённый файл базы: open() убирает его в .corrupt.bak и создаёт чистую

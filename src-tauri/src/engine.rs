@@ -13,27 +13,47 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const OLLAMA_URL: &str = "http://127.0.0.1:11434";
 const OLLAMA_HOST: &str = "127.0.0.1:11434"; // движок всегда слушает только localhost
 const READY_TRIES: u32 = 120; // 120 × 250мс ≈ 30 с — с запасом на холодный старт ollama serve
 const READY_INTERVAL_MS: u64 = 250;
+const MONITOR_INTERVAL_SECS: u64 = 45; // период присмотра за своим процессом движка
 
 /// Состояние движка: подняли ли мы его сами и дескриптор дочернего процесса.
 /// Хранится в Tauri State; на выходе по нему решаем, что останавливать.
+/// exe/models_dir — параметры последнего запуска: присмотр перезапускает упавший
+/// процесс ровно с ними, не перечитывая настройки.
 #[derive(Default)]
 struct Engine {
     started_by_us: bool,
     child: Option<Child>,
+    exe: Option<PathBuf>,
+    models_dir: Option<PathBuf>,
 }
 
-pub struct EngineState(Mutex<Engine>);
+struct EngineInner {
+    engine: Mutex<Engine>,
+    /// Сериализация ensure(): без замка два одновременных вызова (старт приложения +
+    /// «перезапустить» из настроек) оба видят «не жив», оба спаунят — и второй
+    /// убивает здоровый процесс первого. std-мьютекс не годится: его нельзя держать
+    /// через await опроса готовности.
+    ensure_lock: tokio::sync::Mutex<()>,
+    monitor_on: AtomicBool, // фоновый присмотр уже запущен (запускается один раз)
+}
+
+pub struct EngineState(Arc<EngineInner>);
 
 impl EngineState {
     pub fn new() -> Self {
-        EngineState(Mutex::new(Engine::default()))
+        EngineState(Arc::new(EngineInner {
+            engine: Mutex::new(Engine::default()),
+            ensure_lock: tokio::sync::Mutex::new(()),
+            monitor_on: AtomicBool::new(false),
+        }))
     }
 }
 
@@ -126,6 +146,14 @@ fn well_known_dirs() -> Vec<PathBuf> {
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         v.push(PathBuf::from(local).join("Programs").join("Ollama"));
     }
+    // Общесистемная установка (OllamaSetup /ALLUSERS от администратора) живёт в
+    // Program Files, а свежедобавленный системный PATH до перелогина в GUI-процесс
+    // может не попасть — проверяем каталог сами.
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(pf) = std::env::var_os(var) {
+            v.push(PathBuf::from(pf).join("Ollama"));
+        }
+    }
     v
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -188,6 +216,10 @@ pub async fn ensure(
     models_override: Option<PathBuf>,
     resource_dir: Option<PathBuf>,
 ) -> EngineStatus {
+    // Один запуск за раз: конкурент дождётся и увидит уже живой движок (перепроверка
+    // alive() ниже), а не спаунит второй процесс и не убьёт здоровый первый.
+    let _serial = state.0.ensure_lock.lock().await;
+
     // Уже отвечает (системный/ручной/ранее поднятый нами) — переиспользуем, не трогаем.
     if alive().await {
         return EngineStatus {
@@ -218,19 +250,25 @@ pub async fn ensure(
             };
         }
     };
-    {
-        let mut g = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        // если в этой сессии уже поднимали свой движок — погасим прежний, не плодим
-        if let Some(old) = g.child.take() {
-            kill_tree(old);
-        }
+    let old = {
+        let mut g = state.0.engine.lock().unwrap_or_else(|e| e.into_inner());
+        // прежний свой процесс (упавший — живой ответил бы выше) заберём и пожнём
+        let old = g.child.take();
         g.child = Some(child);
         g.started_by_us = true;
-    } // гард освобождаем ДО await ниже (не держим Mutex через await)
+        g.exe = Some(exe);
+        g.models_dir = models_override;
+        old
+    }; // гард освобождаем ДО await ниже (не держим Mutex через await)
+    if let Some(old) = old {
+        // kill_tree ждёт до 3 с — не в воркере рантайма и не под мьютексом
+        tauri::async_runtime::spawn_blocking(move || kill_tree(old));
+    }
 
     // Ждём готовности: опрашиваем /api/version с интервалом и верхней границей.
     for _ in 0..READY_TRIES {
         if alive().await {
+            start_monitor(state);
             return EngineStatus {
                 status: "ready".into(),
                 message: "Движок запущен".into(),
@@ -238,10 +276,77 @@ pub async fn ensure(
         }
         tokio::time::sleep(Duration::from_millis(READY_INTERVAL_MS)).await;
     }
+
+    // Не дождались: процесс упал либо порт держит кто-то ещё. Ребёнка пожинаем
+    // (иначе зомби до конца сессии) и снимаем «наш» — оценки памяти по q8-профилю
+    // не должны опираться на неработающий процесс.
+    let dead = {
+        let mut g = state.0.engine.lock().unwrap_or_else(|e| e.into_inner());
+        g.started_by_us = false;
+        g.exe = None;
+        g.models_dir = None;
+        g.child.take()
+    };
+    if let Some(c) = dead {
+        tauri::async_runtime::spawn_blocking(move || kill_tree(c));
+    }
     EngineStatus {
         status: "error".into(),
         message: "Движок не ответил вовремя (таймаут запуска).".into(),
     }
+}
+
+/// Фоновый присмотр за СВОИМ процессом движка: упавший `ollama serve` пожинается
+/// (не висит зомби) и перезапускается с теми же параметрами — коробочный продукт
+/// не должен ждать, пока пользователь наткнётся на ошибку чата. Внешний движок и
+/// намеренную остановку (stop_if_ours снимает started_by_us) не трогаем.
+fn start_monitor(state: &EngineState) {
+    if state.0.monitor_on.swap(true, Ordering::SeqCst) {
+        return; // уже присматриваем
+    }
+    let inner = state.0.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(MONITOR_INTERVAL_SECS)).await;
+            // тот же замок, что у ensure(): не спорим с ручным перезапуском
+            let _serial = inner.ensure_lock.lock().await;
+            let respawn = {
+                let mut g = inner.engine.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.started_by_us {
+                    None
+                } else {
+                    match g.child.as_mut().map(|c| c.try_wait()) {
+                        // умер — пожат самим try_wait; забираем параметры запуска
+                        Some(Ok(Some(_))) => {
+                            g.child = None;
+                            g.exe.clone().map(|exe| (exe, g.models_dir.clone()))
+                        }
+                        _ => None, // жив (или дескриптора нет) — ничего не делаем
+                    }
+                }
+            };
+            let Some((exe, models_dir)) = respawn else { continue };
+            if alive().await {
+                // порт уже занял внешний экземпляр — нашего процесса больше нет
+                let mut g = inner.engine.lock().unwrap_or_else(|e| e.into_inner());
+                if g.child.is_none() {
+                    g.started_by_us = false;
+                }
+                continue;
+            }
+            match spawn(&exe, models_dir.as_deref()) {
+                Ok(child) => {
+                    let mut g = inner.engine.lock().unwrap_or_else(|e| e.into_inner());
+                    g.child = Some(child);
+                }
+                Err(_) => {
+                    // перезапуск невозможен (движок удалили?) — больше не «наш»
+                    let mut g = inner.engine.lock().unwrap_or_else(|e| e.into_inner());
+                    g.started_by_us = false;
+                }
+            }
+        }
+    });
 }
 
 fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
@@ -279,6 +384,26 @@ fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
 
+    #[cfg(target_os = "linux")]
+    {
+        // AppImage (AppRun linuxdeploy) экспортирует LD_LIBRARY_PATH и GTK/GStreamer-
+        // переменные, указывающие внутрь смонтированного образа. Унаследовав их,
+        // ollama serve подцепляет несовместимые libstdc++/libssl и падает — хотя из
+        // терминала запускается. Системному движку эти переменные не нужны, вычищаем.
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if name == "LD_LIBRARY_PATH"
+                || name == "LD_PRELOAD"
+                || name == "PYTHONHOME"
+                || name == "PYTHONPATH"
+                || name.starts_with("GST_")
+                || name.starts_with("GIO_")
+            {
+                cmd.env_remove(&key);
+            }
+        }
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -308,8 +433,18 @@ fn spawn(exe: &Path, models_dir: Option<&Path>) -> std::io::Result<Child> {
 }
 
 /// Запускали ли движок мы сами (для решения «можно ли перезапустить с новым override»).
+/// Мёртвый ребёнок — не «наш работающий движок»: отвечать на порту может внешний
+/// экземпляр с обычным f16-KV, и экономный q8-профиль к нему не относится.
 pub fn was_started_by_us(state: &EngineState) -> bool {
-    state.0.lock().unwrap_or_else(|e| e.into_inner()).started_by_us
+    let mut g = state.0.engine.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.started_by_us {
+        return false;
+    }
+    match g.child.as_mut().map(|c| c.try_wait()) {
+        Some(Ok(Some(_))) => false, // упал (присмотр пожнёт и перезапустит)
+        Some(_) => true,            // жив либо опрос не удался — считаем нашим
+        None => false,              // дескриптора нет (перезапуск не удался)
+    }
 }
 
 /// Жив ли движок сейчас (публичная обёртка над проверкой /api/version).
@@ -318,15 +453,22 @@ pub async fn is_running() -> bool {
 }
 
 /// Остановить движок, ЕСЛИ его запустили мы. Внешний/системный — не трогаем.
+/// kill_tree ждёт до 3 с — выполняем его уже ОТПУСТИВ мьютекс, чтобы параллельные
+/// was_started_by_us/ensure не подвисали на это время.
 pub fn stop_if_ours(state: &EngineState) {
-    let mut g = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    if !g.started_by_us {
-        return;
-    }
-    if let Some(child) = g.child.take() {
+    let child = {
+        let mut g = state.0.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.started_by_us {
+            return;
+        }
+        g.started_by_us = false;
+        g.exe = None;
+        g.models_dir = None;
+        g.child.take()
+    };
+    if let Some(child) = child {
         kill_tree(child);
     }
-    g.started_by_us = false;
 }
 
 /// Гасит процесс СО ВСЕМИ дочерними (Ollama порождает runner-процессы): сначала

@@ -15,6 +15,10 @@ echo.
 if exist "OllamaSetup.exe" (
   echo  [1/2] Движок Ollama... ^(1-2 минуты^)
   start /wait "" "OllamaSetup.exe" /VERYSILENT /NORESTART
+  if errorlevel 1 (
+    echo        Установщик движка завершился с ошибкой.
+    goto :fail
+  )
 ) else (
   echo  [1/2] OllamaSetup.exe не найден рядом со скриптом — пропускаю.
   echo        Если движок не установлен, скачайте его с ollama.com
@@ -25,6 +29,10 @@ for %%f in ("Jarvis.AI_*-setup.exe") do set "APP=%%f"
 if defined APP (
   echo  [2/2] Приложение Jarvis AI...
   start /wait "" "%APP%" /S
+  if errorlevel 1 (
+    echo        Установщик приложения завершился с ошибкой.
+    goto :fail
+  )
 ) else (
   echo  [2/2] Установщик Jarvis.AI_*-setup.exe не найден рядом со скриптом.
   goto :fail

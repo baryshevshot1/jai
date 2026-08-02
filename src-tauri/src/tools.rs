@@ -7,6 +7,11 @@
 // клиент `web_client()` для HTTPS наружу (rustls), с таймаутами и User-Agent.
 // Эти два пути не смешиваются: localhost остаётся как был, интернет — явный путь.
 //
+// Страж исходящих (guard_url): наружу — только https и только публичный интернет.
+// Хост резолвится, всё локальное (loopback/private/link-local/CGNAT/ULA) отсекается,
+// и та же проверка выполняется на каждом redirect-хопе — публичный сайт не может
+// «перенаправить» запрос внутрь этого компьютера или локальной сети (SSRF).
+//
 // Расширяемость: добавить новый инструмент = +1 запись в `tool_specs()` и +1 ветка
 // в `execute_tool()`. Агентный цикл (lib.rs) дёргает инструменты обобщённо по имени
 // и не переписывается при добавлении нового.
@@ -23,6 +28,13 @@ const USER_AGENT: &str = concat!("jai/", env!("CARGO_PKG_VERSION"), " (+offline-
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Отдельный таймаут на установку соединения (нет сети/DNS не резолвится).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Максимум перенаправлений, за которыми готовы идти: обычным сайтам хватает
+/// одного-двух (www, короткие ссылки), длинная цепочка — признак неладного.
+const MAX_REDIRECTS: usize = 5;
+/// Общий срок чтения страницы вместе с редиректами: REQUEST_TIMEOUT ограничивает
+/// каждый запрос по отдельности, а цепочка хопов не должна суммироваться в минуты
+/// ожидания — пользователь всё это время смотрит на «Читаю страницу…».
+const READ_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Сколько источников просим у провайдера (максимум Tavily). Широкий охват «разных
 /// источников» за один поиск; у advanced-глубины число результатов НЕ влияет на расход
@@ -32,6 +44,10 @@ const MAX_RESULTS: u64 = 20;
 /// Глубина поиска Tavily: "advanced" — более полный и разнообразный охват источников,
 /// чем "basic" (стоит дороже по кредитам, но даёт заметно лучшую широту).
 const SEARCH_DEPTH: &str = "advanced";
+/// Предел длины поискового запроса (символы). Запрос уходит стороннему провайдеру —
+/// ограничение механически режет объём данных, который туда вообще можно отправить
+/// (в т.ч. если инъекция из веб-контента уговорит модель вложить в запрос переписку).
+const QUERY_MAX_CHARS: usize = 400;
 /// Предел длины сниппета одного результата (символы). Заголовки и ссылки сохраняем
 /// полностью — режем только тело, чтобы 20 источников уместились в num_ctx (≈ 20×330
 /// симв ≈ 2200 токенов на поиск). Сводка (answer) идёт отдельно и не режется.
@@ -49,14 +65,147 @@ const PAGE_TEXT_MAX_CHARS: usize = 4000;
 /// от localhost-клиента Ollama. `https_only` запрещает случайный откат на http —
 /// наружу ходим только по TLS (rustls, уже включён в Cargo.toml). Клиент дешёвый,
 /// строим по требованию в исполнителе инструмента; пул соединений нам тут не нужен.
+///
+/// Редиректы ограничены, и каждый хоп проходит ту же быструю проверку адреса, что и
+/// исходный запрос (check_url_shape): сервер не может «перенаправить» нас на
+/// localhost или голый IP. DNS-проверку на хопах из синхронной redirect-политики
+/// reqwest сделать нельзя — там, где адрес диктует модель (read_url), переходами
+/// поэтому управляем вручную (web_client_no_redirects + полный guard_url).
 pub fn web_client() -> Result<reqwest::Client, String> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > MAX_REDIRECTS {
+            return attempt.error("слишком длинная цепочка перенаправлений");
+        }
+        match check_url_shape(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e),
+        }
+    });
+    web_client_builder()
+        .redirect(policy)
+        .build()
+        .map_err(|e| format!("Не удалось создать сетевой клиент: {e}"))
+}
+
+/// Клиент для чтения страниц: тот же, но БЕЗ автоматических редиректов — переходами
+/// управляет read_url, прогоняя каждый хоп через полный страж адреса с DNS-резолвом.
+fn web_client_no_redirects() -> Result<reqwest::Client, String> {
+    web_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Не удалось создать сетевой клиент: {e}"))
+}
+
+/// Общая заготовка исходящего клиента: UA, таймауты, только TLS.
+fn web_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .https_only(true)
-        .build()
-        .map_err(|e| format!("Не удалось создать сетевой клиент: {e}"))
+}
+
+// ── Страж исходящих запросов (SSRF-защита онлайн-слоя) ─────────────────────────
+
+/// Быстрая проверка адреса БЕЗ выхода в сеть: только https, без локальных/служебных
+/// имён и без голых IP — инструменты ходят на сайты в интернете, а не в службы на
+/// этом компьютере или в локальной сети. Выполняется и на каждом redirect-хопе
+/// (политика web_client), поэтому отделена от DNS-части стража (guard_url).
+fn check_url_shape(url: &reqwest::Url) -> Result<(), String> {
+    if url.scheme() != "https" {
+        return Err(format!("открываю только https-ссылки, а это «{}»", url.scheme()));
+    }
+    let host = url.host_str().unwrap_or("").trim_matches(['[', ']']).to_ascii_lowercase();
+    if host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.parse::<std::net::IpAddr>().is_ok()
+    {
+        return Err(
+            "локальные адреса и IP-адреса не открываю — нужна обычная ссылка на сайт".into()
+        );
+    }
+    Ok(())
+}
+
+/// Публичный ли IP: отсекаем всё, что указывает на этот компьютер или в локальную/
+/// служебную сеть — loopback, приватные диапазоны, link-local, CGNAT (100.64/10),
+/// unique-local и IPv4-адреса, упакованные в IPv6.
+fn ip_is_public(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || o[0] == 0 // 0.0.0.0/8 «эта сеть»
+                || (o[0] == 100 && (64..=127).contains(&o[1]))) // CGNAT 100.64/10
+        }
+        std::net::IpAddr::V6(v6) => {
+            // ::ffff:a.b.c.d — IPv4 внутри IPv6: судим по вложенному IPv4-адресу.
+            if let [0, 0, 0, 0, 0, 0xffff, hi, lo] = v6.segments() {
+                let v4 = std::net::Ipv4Addr::new(
+                    (hi >> 8) as u8,
+                    hi as u8,
+                    (lo >> 8) as u8,
+                    lo as u8,
+                );
+                return ip_is_public(std::net::IpAddr::V4(v4));
+            }
+            let s0 = v6.segments()[0];
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || (s0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (s0 & 0xfe00) == 0xfc00) // unique-local fc00::/7
+        }
+    }
+}
+
+/// Полный страж исходящего адреса: пропускает только https-адреса публичного
+/// интернета. Помимо проверки имени (check_url_shape) резолвит хост и отвергает
+/// адреса локальных сетей — строковый фильтр легко обойти доменом, чья DNS-запись
+/// указывает внутрь. Резолв — блокирующий вызов ОС, поэтому уходит в отдельный
+/// поток, не занимая асинхронные воркеры. Наружу при этом уезжает только DNS-запрос
+/// с именем хоста (к системному резолверу), содержимое не отправляется — отказ здесь
+/// считается «до сети». Повторный резолв внутри самого запроса (окно DNS-rebinding)
+/// осознанно принимаем: пиновка адресов не стоит своей сложности для десктопа.
+async fn guard_url(url: &reqwest::Url) -> Result<(), String> {
+    check_url_shape(url)?;
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    let port = url.port_or_known_default().unwrap_or(443);
+    let resolved = tauri::async_runtime::spawn_blocking(move || {
+        std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+            .map(|addrs| addrs.collect::<Vec<_>>())
+    })
+    .await;
+    let addrs = match resolved {
+        Ok(Ok(a)) => a,
+        Ok(Err(_)) | Err(_) => {
+            return Err(
+                "не удалось определить адрес сайта (возможно, нет интернета или в ссылке \
+                 опечатка)"
+                    .into(),
+            )
+        }
+    };
+    if addrs.is_empty() {
+        return Err(
+            "не удалось определить адрес сайта (возможно, нет интернета или в ссылке опечатка)"
+                .into(),
+        );
+    }
+    // ЛЮБОЙ локальный адрес в ответе DNS — отказ: резолвер мог подмешать внутренний.
+    if addrs.iter().any(|a| !ip_is_public(a.ip())) {
+        return Err(
+            "этот адрес ведёт в локальную сеть, а не в интернет — такие страницы не открываю"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Источник из веб-поиска (заголовок + ссылка) — показываем пользователю в чате,
@@ -74,10 +223,14 @@ pub struct WebSource {
 /// `went_online` — было ли реальное обращение к провайдеру (данные могли уйти наружу).
 /// По нему пишется журнал отправок: короткое замыкание без сети (нет ключа/URL/запроса)
 /// в журнал НЕ попадает — он отражает только фактический выход в интернет (152-ФЗ).
+/// `final_url` — адрес, с которым РЕАЛЬНО шла работа (после перенаправлений), если
+/// обращение к сети было: прозрачность требует показывать, куда ходили на самом деле,
+/// а не только куда просили.
 pub struct ToolResult {
     pub content: String,
     pub sources: Vec<WebSource>,
     pub went_online: bool,
+    pub final_url: Option<String>,
 }
 
 /// Конфиг веб-поиска из настроек (settings.json). Бэкенд НЕ захардкожен: провайдер,
@@ -154,6 +307,7 @@ pub async fn execute_tool(
             content: format!("Инструмент «{other}» не поддерживается этим приложением."),
             sources: Vec::new(),
             went_online: false,
+            final_url: None,
         },
     }
 }
@@ -165,8 +319,12 @@ pub async fn execute_tool(
 async fn web_search(args: &serde_json::Value, cfg: &WebSearchConfig) -> ToolResult {
     // Короткое замыкание ДО сети (нет запроса/URL/ключа): наружу ничего не уходит,
     // в журнал не пишется → went_online: false.
-    let offline_fail =
-        |msg: String| ToolResult { content: msg, sources: Vec::new(), went_online: false };
+    let offline_fail = |msg: String| ToolResult {
+        content: msg,
+        sources: Vec::new(),
+        went_online: false,
+        final_url: None,
+    };
 
     // 1) запрос из аргументов модели
     let query = args
@@ -178,6 +336,13 @@ async fn web_search(args: &serde_json::Value, cfg: &WebSearchConfig) -> ToolResu
     if query.is_empty() {
         return offline_fail("Веб-поиск не выполнен: пустой поисковый запрос.".into());
     }
+    // Длинный хвост отрезаем ещё до сети: провайдеру не должна уходить «простыня»
+    // (см. QUERY_MAX_CHARS — это и предохранитель от эксфильтрации через запрос).
+    let query: String = if query.chars().count() > QUERY_MAX_CHARS {
+        query.chars().take(QUERY_MAX_CHARS).collect()
+    } else {
+        query
+    };
 
     // 2) провайдер настроен? (Tavily требует ключ; без него — честно недоступен)
     if cfg.url.trim().is_empty() {
@@ -196,13 +361,32 @@ async fn web_search(args: &serde_json::Value, cfg: &WebSearchConfig) -> ToolResu
         );
     }
 
-    // 3) клиент (ошибка сборки — тоже до фактического выхода в сеть)
+    // 3) страж адреса провайдера: наружу — только https в публичный интернет.
+    // Адрес берётся из настроек, но правило одно для всех исходящих запросов слоя.
+    let provider_url = match reqwest::Url::parse(cfg.url.trim()) {
+        Ok(u) => u,
+        Err(_) => {
+            return offline_fail(
+                "Веб-поиск не выполнен: адрес поискового провайдера в настройках не похож \
+                 на ссылку. Сообщи пользователю, что нужно поправить настройки \
+                 (Онлайн-режим)."
+                    .into(),
+            )
+        }
+    };
+    if let Err(e) = guard_url(&provider_url).await {
+        return offline_fail(format!(
+            "Веб-поиск не выполнен: {e}. Проверь адрес провайдера в настройках (Онлайн-режим)."
+        ));
+    }
+
+    // 4) клиент (ошибка сборки — тоже до фактического выхода в сеть)
     let client = match web_client() {
         Ok(c) => c,
         Err(e) => return offline_fail(format!("Веб-поиск недоступен: {e}")),
     };
 
-    // 4) запрос к провайдеру (адаптер по имени провайдера — расширяемо). С этого
+    // 5) запрос к провайдеру (адаптер по имени провайдера — расширяемо). С этого
     // момента обращение наружу состоялось (или хотя бы началось) → went_online: true.
     let outcome = match provider {
         "tavily" => tavily_search(&client, cfg, &query).await,
@@ -225,6 +409,7 @@ async fn web_search(args: &serde_json::Value, cfg: &WebSearchConfig) -> ToolResu
             ),
             sources: Vec::new(),
             went_online: true, // обращение к провайдеру было — могло уйти наружу
+            final_url: None,
         },
     }
 }
@@ -234,14 +419,18 @@ async fn web_search(args: &serde_json::Value, cfg: &WebSearchConfig) -> ToolResu
 /// честным текстом в `content`: модель перескажет причину пользователю.
 async fn read_url(args: &serde_json::Value) -> ToolResult {
     // Отказы ДО сети (кривая ссылка, http, локальный адрес): наружу ничего не ушло.
-    let offline_fail =
-        |msg: String| ToolResult { content: msg, sources: Vec::new(), went_online: false };
+    let offline_fail = |msg: String| ToolResult {
+        content: msg,
+        sources: Vec::new(),
+        went_online: false,
+        final_url: None,
+    };
 
     let raw = args.get("url").and_then(|u| u.as_str()).unwrap_or("").trim().to_string();
     if raw.is_empty() {
         return offline_fail("Чтение страницы не выполнено: пустая ссылка.".into());
     }
-    let url = match reqwest::Url::parse(&raw) {
+    let mut url = match reqwest::Url::parse(&raw) {
         Ok(u) => u,
         Err(_) => {
             return offline_fail(format!(
@@ -249,47 +438,98 @@ async fn read_url(args: &serde_json::Value) -> ToolResult {
             ))
         }
     };
-    // Наружу — только TLS (правило web_client). Незашифрованный http не открываем.
-    if url.scheme() != "https" {
+    // Страж адреса (guard_url): только https и только публичный интернет — инструмент
+    // для сайтов, а не для служб на этом компьютере или в локальной сети пользователя.
+    if let Err(e) = guard_url(&url).await {
         return offline_fail(format!(
-            "Открываю только https-ссылки, а «{raw}» — {}. Попроси другую ссылку \
-             или найди источник через web_search.",
-            url.scheme()
+            "Чтение «{raw}» не выполнено: {e}. Попроси другую ссылку или найди источник \
+             через web_search."
         ));
     }
-    // Локальные/внутренние адреса и голые IP не открываем: инструмент для сайтов в
-    // интернете, а не для служб на этом компьютере или в локальной сети пользователя.
-    let host = url.host_str().unwrap_or("").trim_matches(['[', ']']).to_ascii_lowercase();
-    if host.is_empty()
-        || host == "localhost"
-        || host.ends_with(".local")
-        || host.ends_with(".internal")
-        || host.parse::<std::net::IpAddr>().is_ok()
-    {
-        return offline_fail(
-            "Локальные адреса и IP-адреса не открываю — нужна обычная ссылка на сайт.".into(),
-        );
-    }
+    let requested = url.to_string();
 
-    let client = match web_client() {
+    let client = match web_client_no_redirects() {
         Ok(c) => c,
         Err(e) => return offline_fail(format!("Чтение страницы недоступно: {e}")),
     };
 
-    // С этого момента обращение наружу состоялось (или началось) → went_online: true.
-    let online_fail =
-        |msg: String| ToolResult { content: msg, sources: Vec::new(), went_online: true };
-    let resp = match client.get(url.clone()).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return online_fail(format!("Не удалось открыть «{raw}»: {}.", friendly_net_err(&e)))
+    // С этого момента обращение наружу состоялось (или началось) → went_online: true;
+    // в `final_url` — адрес, с которым реально шла работа (для журнала и UI).
+    let online_fail = |msg: String, at: &reqwest::Url| ToolResult {
+        content: msg,
+        sources: Vec::new(),
+        went_online: true,
+        final_url: Some(at.to_string()),
+    };
+
+    // Перенаправления проходим сами (клиент им не следует): каждый хоп — через тот же
+    // страж адреса, что и исходная ссылка. Иначе публичный сайт мог бы «перенаправить»
+    // чтение на роутер/NAS/службу в локальной сети (SSRF через redirect).
+    let deadline = std::time::Instant::now() + READ_TOTAL_TIMEOUT;
+    let mut hops = 0usize;
+    let mut resp = loop {
+        // Новый хоп начинаем только в пределах общего срока (сам запрос ограничен
+        // своим REQUEST_TIMEOUT, так что и суммарное ожидание жёстко ограничено).
+        if std::time::Instant::now() > deadline {
+            return online_fail(
+                format!("Не удалось открыть «{raw}»: сайт отвечает слишком долго."),
+                &url,
+            );
         }
+        let r = match client.get(url.clone()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return online_fail(
+                    format!("Не удалось открыть «{raw}»: {}.", friendly_net_err(&e)),
+                    &url,
+                )
+            }
+        };
+        if !r.status().is_redirection() {
+            break r;
+        }
+        hops += 1;
+        if hops > MAX_REDIRECTS {
+            return online_fail(
+                format!(
+                    "Страница «{raw}» перенаправляет слишком много раз подряд — чтение \
+                     остановлено."
+                ),
+                &url,
+            );
+        }
+        let loc = r
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .trim();
+        let next = if loc.is_empty() { None } else { url.join(loc).ok() };
+        let Some(next) = next else {
+            return online_fail(
+                format!(
+                    "Страница «{raw}» перенаправляет по некорректному адресу — чтение \
+                     остановлено."
+                ),
+                &url,
+            );
+        };
+        if let Err(e) = guard_url(&next).await {
+            return online_fail(
+                format!("Страница «{raw}» перенаправляет на закрытый адрес: {e}."),
+                &url,
+            );
+        }
+        url = next;
     };
     if !resp.status().is_success() {
-        return online_fail(format!(
-            "Страница «{raw}» вернула ошибку {} — содержимое недоступно.",
-            resp.status()
-        ));
+        return online_fail(
+            format!(
+                "Страница «{raw}» вернула ошибку {} — содержимое недоступно.",
+                resp.status()
+            ),
+            &url,
+        );
     }
     // Читаем только текстовые страницы: PDF/картинки/архивы этому инструменту не по зубам.
     let ctype = resp
@@ -301,38 +541,56 @@ async fn read_url(args: &serde_json::Value) -> ToolResult {
     let is_html = ctype.contains("text/html") || ctype.contains("application/xhtml");
     let is_plain = ctype.contains("text/plain");
     if !(ctype.is_empty() || is_html || is_plain) {
-        return online_fail(format!(
-            "Страница «{raw}» — не текст (тип {ctype}), прочитать её не могу."
-        ));
+        return online_fail(
+            format!("Страница «{raw}» — не текст (тип {ctype}), прочитать её не могу."),
+            &url,
+        );
     }
+    // Content-Length (если сервер его прислал) — быстрый отказ без скачивания.
     if let Some(len) = resp.content_length() {
         if len as usize > PAGE_MAX_BYTES {
-            return online_fail(format!(
-                "Страница «{raw}» слишком большая ({} МБ) — не читаю.",
-                len / 1024 / 1024
-            ));
+            return online_fail(
+                format!(
+                    "Страница «{raw}» слишком большая ({} МБ) — не читаю.",
+                    len / 1024 / 1024
+                ),
+                &url,
+            );
         }
     }
-    let mut body = match resp.text().await {
-        Ok(t) => t,
-        Err(e) => return online_fail(format!("Не удалось прочитать «{raw}»: {e}.")),
-    };
-    // Content-Length мог отсутствовать (chunked) — страхуемся после скачивания.
-    if body.len() > PAGE_MAX_BYTES {
-        let mut cut = PAGE_MAX_BYTES;
-        while !body.is_char_boundary(cut) {
-            cut -= 1;
+    // Тело читаем ПОТОКОВО и обрываем на лимите: Content-Length может отсутствовать
+    // (chunked) или врать, а скачивать в память «сколько пришлёт сервер» нельзя —
+    // память клиентского железа и так впритык. Хвост сверх лимита просто не качаем.
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < PAGE_MAX_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = PAGE_MAX_BYTES - buf.len();
+                buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return online_fail(
+                    format!("Не удалось прочитать «{raw}»: {}.", friendly_net_err(&e)),
+                    &url,
+                )
+            }
         }
-        body.truncate(cut);
     }
+    // Байты → строка. Битые байты (и возможный разрез символа ровно на лимите)
+    // заменяются, не роняя чтение: содержание важнее идеальности.
+    let body = String::from_utf8_lossy(&buf).into_owned();
 
     let (title, text) =
         if is_plain { (String::new(), collapse_whitespace(&body)) } else { html_to_text(&body) };
     if text.trim().is_empty() {
-        return online_fail(format!(
-            "На странице «{raw}» не нашлось читаемого текста (возможно, содержимое \
-             подгружается скриптами)."
-        ));
+        return online_fail(
+            format!(
+                "На странице «{raw}» не нашлось читаемого текста (возможно, содержимое \
+                 подгружается скриптами)."
+            ),
+            &url,
+        );
     }
     // Предел текста для модели: режем по символам (не байтам) и честно помечаем.
     let (text, truncated) = if text.chars().count() > PAGE_TEXT_MAX_CHARS {
@@ -342,10 +600,18 @@ async fn read_url(args: &serde_json::Value) -> ToolResult {
     };
     let shown_title = if title.is_empty() { raw.clone() } else { title.clone() };
     let cut_note = if truncated { " (показано начало — страница длиннее)" } else { "" };
+    // Фактический адрес после перенаправлений показываем, если он отличается от
+    // запрошенного: должно быть видно, откуда на самом деле пришёл текст.
+    let final_url = url.to_string();
+    let addr_note =
+        if final_url == requested { String::new() } else { format!(" → {final_url}") };
     ToolResult {
-        content: format!("Содержимое страницы «{shown_title}» ({raw}){cut_note}:\n\n{text}"),
-        sources: vec![WebSource { title: shown_title, url: raw }],
+        content: format!(
+            "Содержимое страницы «{shown_title}» ({raw}{addr_note}){cut_note}:\n\n{text}"
+        ),
+        sources: vec![WebSource { title: shown_title, url: final_url.clone() }],
         went_online: true,
+        final_url: Some(final_url),
     }
 }
 
@@ -526,10 +792,12 @@ async fn tavily_search(
         }
         return Err(format!("провайдер вернул ошибку {status}"));
     }
+    // Куда фактически ушёл запрос (после возможных перенаправлений) — для журнала.
+    let final_url = resp.url().to_string();
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let answer = json.get("answer").and_then(|a| a.as_str()).unwrap_or("");
     let results = json.get("results").and_then(|r| r.as_array());
-    Ok(format_results(query, answer, results))
+    Ok(ToolResult { final_url: Some(final_url), ..format_results(query, answer, results) })
 }
 
 /// Обобщённый адаптер для провайдеров с JSON формата {results:[{title,url,content}]}
@@ -549,10 +817,12 @@ async fn generic_search(
     if !resp.status().is_success() {
         return Err(format!("провайдер вернул ошибку {}", resp.status()));
     }
+    // Куда фактически ушёл запрос (после возможных перенаправлений) — для журнала.
+    let final_url = resp.url().to_string();
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let answer = json.get("answer").and_then(|a| a.as_str()).unwrap_or("");
     let results = json.get("results").and_then(|r| r.as_array());
-    Ok(format_results(query, answer, results))
+    Ok(ToolResult { final_url: Some(final_url), ..format_results(query, answer, results) })
 }
 
 /// Собрать tool-сообщение (для модели) и список источников (для UI) из результатов
@@ -597,7 +867,8 @@ fn format_results(
         format!("Результаты веб-поиска по запросу «{query}»:\n\n{}", lines.join("\n\n"))
     };
     // Вызывается только после ответа провайдера → обращение наружу состоялось.
-    ToolResult { content, sources, went_online: true }
+    // Фактический адрес знает адаптер провайдера — он и заполняет final_url.
+    ToolResult { content, sources, went_online: true, final_url: None }
 }
 
 /// Превратить сетевую ошибку reqwest в человеческое объяснение (без интернета /
@@ -607,6 +878,9 @@ fn friendly_net_err(e: &reqwest::Error) -> String {
         "превышено время ожидания ответа".into()
     } else if e.is_connect() {
         "не удалось соединиться (вероятно, нет интернета)".into()
+    } else if e.is_redirect() {
+        // Нашей redirect-политике не понравился переход: закрытый адрес или цепочка.
+        "перенаправление отклонено (страница уводит на недопустимый адрес)".into()
     } else {
         e.to_string()
     }
@@ -652,5 +926,52 @@ mod tests {
     fn collapse_whitespace_keeps_paragraphs() {
         let s = "  один   два  \n\n\n\n  три \n\n";
         assert_eq!(collapse_whitespace(s), "один два\n\nтри");
+    }
+
+    #[test]
+    fn ip_is_public_rejects_local_ranges() {
+        use std::net::IpAddr;
+        let local = [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1", // CGNAT
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "::ffff:192.168.1.1", // IPv4-mapped IPv6
+        ];
+        for s in local {
+            assert!(!ip_is_public(s.parse::<IpAddr>().unwrap()), "{s} должен считаться локальным");
+        }
+        let public = ["8.8.8.8", "77.88.8.8", "100.128.0.1", "172.32.0.1", "2606:4700::1111"];
+        for s in public {
+            assert!(ip_is_public(s.parse::<IpAddr>().unwrap()), "{s} должен считаться публичным");
+        }
+    }
+
+    #[test]
+    fn check_url_shape_filters_local_and_plain_http() {
+        let bad = [
+            "http://example.com/",
+            "https://localhost/admin",
+            "https://foo.localhost/",
+            "https://nas.local/",
+            "https://api.internal/x",
+            "https://192.168.1.1/",
+            "https://[::1]/",
+        ];
+        for s in bad {
+            let u = reqwest::Url::parse(s).unwrap();
+            assert!(check_url_shape(&u).is_err(), "{s} должен быть отвергнут");
+        }
+        let u = reqwest::Url::parse("https://example.com/page?q=1").unwrap();
+        assert!(check_url_shape(&u).is_ok());
     }
 }
