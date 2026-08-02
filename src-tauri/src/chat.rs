@@ -16,6 +16,14 @@ use crate::{tools, with_cancel, CancelFlag, HTTP};
 const WATCHDOG_INTERVAL_MS: u64 = 1500;
 const SWAP_TRIP_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Порог свободной памяти, ниже которого генерацию прерываем. Своп — признак уже
+/// НАЧАВШЕЙСЯ беды, и он есть не везде: на машине без свопа (или когда память
+/// кончается быстрее, чем ОС успевает свопить) сторож по свопу молчит, а процесс
+/// убивает системный OOM-killer — для пользователя это «приложение вылетело».
+/// Поэтому следим и за самой доступной памятью: 512 МБ — это уже край, дальше ОС
+/// начинает убивать процессы.
+const LOW_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Порог перегрева (°C) и выдержка (число подряд замеров) до мягкой остановки
 /// генерации. Порог высокий сознательно: под нагрузкой 85–95° — штатная работа
 /// современных CPU, аварийное выключение ОС начинается ~105° — рубим только
@@ -31,9 +39,27 @@ fn gentle_threads() -> u64 {
     (cores / 2).max(2)
 }
 
-/// Применить «щадящий режим» к телу запроса /api/chat: ограничить потоки CPU.
+/// Сколько движок держит модель в памяти после ответа. Обычно 5 минут: следующий
+/// вопрос идёт без перезагрузки весов (это десятки секунд). В щадящем режиме —
+/// полминуты: он включается на слабых машинах, где освободить память важнее, чем
+/// сэкономить время на повторной загрузке.
+///
+/// Передаём ИМЕННО В ЗАПРОСЕ, а не переменной окружения. Переменные действуют,
+/// только когда движок поднимаем мы; при системной установке Ollama (а install.sh
+/// её и рекомендует) приложение переиспользует чужой процесс, и весь экономный
+/// профиль мимо. Значение в теле запроса движок уважает в любом случае.
+const KEEP_ALIVE_DEFAULT: &str = "5m";
+const KEEP_ALIVE_GENTLE: &str = "30s";
+
+/// Применить «щадящий режим» к телу запроса /api/chat: ограничить потоки CPU и
+/// быстрее освобождать память под моделью.
 /// Пер-запросная опция — действует на любой движок (наш или системный).
 pub(crate) fn apply_gentle(body: &mut serde_json::Value, gentle: Option<bool>) {
+    body["keep_alive"] = serde_json::json!(if gentle.unwrap_or(false) {
+        KEEP_ALIVE_GENTLE
+    } else {
+        KEEP_ALIVE_DEFAULT
+    });
     if gentle.unwrap_or(false) {
         body["options"]["num_thread"] = serde_json::json!(gentle_threads());
     }
@@ -175,8 +201,12 @@ pub(crate) async fn stream_chat_response(
                 break; // уже отменено («Стоп» или генерация завершена)
             }
             sys.refresh_memory();
+            // Две независимые приметы беды. Своп растёт — машина уже «легла» и
+            // отвечает рывками. Свободная память на нуле — до OOM-killer секунды,
+            // и свопа может не быть вовсе. Ловим то, что случится раньше.
             let growth = sys.used_swap().saturating_sub(base_swap);
-            if growth > SWAP_TRIP_BYTES {
+            let available = sys.available_memory();
+            if growth > SWAP_TRIP_BYTES || available < LOW_MEMORY_BYTES {
                 *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some((
                     ErrorCode::OutOfMemory,
                     "недостаточно оперативной памяти — попробуйте модель полегче или \
@@ -483,5 +513,43 @@ mod tests {
         // ровно на этих ложных срабатываниях ломался прежний разбор на фронтенде.
         assert_eq!(classify_ollama_message("panic in runtime"), ErrorCode::Unknown);
         assert_eq!(classify_ollama_message("no such file or directory"), ErrorCode::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod gentle_tests {
+    use super::apply_gentle;
+
+    /// keep_alive обязан уходить В ТЕЛЕ запроса. Переменные окружения действуют,
+    /// только когда движок поднимает само приложение; при системной установке Ollama
+    /// (её и рекомендует install.sh) весь экономный профиль проходит мимо, и
+    /// keep_alive в запросе остаётся единственным рычагом, который движок уважает.
+    #[test]
+    fn keep_alive_is_always_sent() {
+        for gentle in [None, Some(false), Some(true)] {
+            let mut body = serde_json::json!({ "model": "m" });
+            apply_gentle(&mut body, gentle);
+            assert!(
+                body["keep_alive"].is_string(),
+                "keep_alive пропал при gentle={gentle:?}: на чужом движке модель \
+                 останется висеть в памяти"
+            );
+        }
+    }
+
+    /// В щадящем режиме (слабая машина) память освобождаем заметно быстрее:
+    /// там важнее отдать её системе, чем сэкономить на повторной загрузке весов.
+    #[test]
+    fn gentle_mode_frees_memory_sooner() {
+        let mut normal = serde_json::json!({});
+        apply_gentle(&mut normal, Some(false));
+        let mut gentle = serde_json::json!({});
+        apply_gentle(&mut gentle, Some(true));
+
+        assert_eq!(normal["keep_alive"], "5m");
+        assert_eq!(gentle["keep_alive"], "30s");
+        // И потоки процессора в щадящем режиме ограничены — это его прежний смысл.
+        assert!(gentle["options"]["num_thread"].is_number());
+        assert!(normal["options"]["num_thread"].is_null());
     }
 }
