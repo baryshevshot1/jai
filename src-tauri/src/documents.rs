@@ -394,6 +394,36 @@ pub(crate) fn documents_empty(
     docstore::is_empty(&conn, project_id.as_deref())
 }
 
+/// Текст фрагментов, на которые опирался ответ, — для показа под ним. Читает базу
+/// ПО НОМЕРАМ, не трогая движок: показать источник должно быть мгновенно и
+/// одинаково при каждом открытии. Через поиск это стоило бы вычисления эмбеддинга и
+/// загрузки модели поиска, а результат ещё и мог бы не совпасть с тем, что реально
+/// было в ответе.
+#[tauri::command]
+pub(crate) async fn document_fragments(
+    app: tauri::AppHandle,
+    filename: String,
+    chunk_indexes: Vec<i64>,
+    project_id: Option<String>,
+) -> AppResult<Vec<FragmentText>> {
+    let db = docstore::db_path(&app)?;
+    let rows = tauri::async_runtime::spawn_blocking(move || {
+        let conn = docstore::open(&db)?;
+        docstore::fragments_by_index(&conn, &filename, &chunk_indexes, project_id.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::unknown(format!("Сбой чтения фрагментов: {e}")))?
+    .map_err(AppError::from)?;
+    Ok(rows.into_iter().map(|(chunk_index, text)| FragmentText { chunk_index, text }).collect())
+}
+
+/// Фрагмент документа для показа под ответом.
+#[derive(serde::Serialize)]
+pub(crate) struct FragmentText {
+    chunk_index: i64,
+    text: String,
+}
+
 /// Семантический поиск по базе: эмбеддинг вопроса → KNN top-k фрагментов с
 /// метаданными. Пустой запрос/пустая база → пусто (без обращения к эмбеддингам).
 #[tauri::command]

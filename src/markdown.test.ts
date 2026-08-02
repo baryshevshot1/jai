@@ -105,3 +105,54 @@ describe("renderMarkdown: содержимое не ломается", () => {
     expect(host.querySelector("li")?.textContent).toContain("пункт");
   });
 });
+
+// Живая печать зовёт renderMarkdown на КАЖДОМ промежуточном срезе потокового ответа —
+// текст в этот момент почти всегда «недописан» где-то на границе блока: код-блок или
+// формула ещё не закрыты, список обрывается на середине пункта. Рендер обязан
+// пережить это без исключений и без сломанной разметки (исполняемого содержимого,
+// битых тегов) — ронять окно из-за куска текста, который через полсекунды дорисуется
+// полностью, нельзя.
+describe("renderMarkdown: обрывы посреди потокового текста", () => {
+  it("незакрытый код-блок не бросает исключение и не теряет уже пришедший код", () => {
+    const partial = "Объяснение:\n\n```python\ndef f(x):\n    return x + 1\n";
+    expect(() => render(partial)).not.toThrow();
+    const host = render(partial);
+    expect(host.querySelector("script")).toBeNull();
+    expect(host.textContent).toContain("def f(x):");
+  });
+
+  it("незакрытая инлайн-формула $… не бросает исключение", () => {
+    const partial = "Площадь круга: $\\pi r^2";
+    expect(() => render(partial)).not.toThrow();
+    const host = render(partial);
+    expect(host.querySelector("script")).toBeNull();
+  });
+
+  it("незакрытая блочная формула $$… не бросает исключение", () => {
+    const partial = "Вычисления:\n\n$$\\int_0^1 x\\,dx";
+    expect(() => render(partial)).not.toThrow();
+    expect(render(partial).querySelector("script")).toBeNull();
+  });
+
+  it("незавершённый нумерованный список не бросает исключение", () => {
+    const partial = "Шаги:\n\n1. Первый\n2. Второй\n3. ";
+    expect(() => render(partial)).not.toThrow();
+    const host = render(partial);
+    expect(host.querySelectorAll("li").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("оборванная на середине строки таблица не бросает исключение", () => {
+    const partial = "| а | б |\n|---|---|\n| 1 |";
+    expect(() => render(partial)).not.toThrow();
+  });
+
+  it("незакрытая инлайн-разметка (жирный без второй пары **) не бросает исключение", () => {
+    const partial = "Это **жирный текст без закрытия и дальше обычный";
+    expect(() => render(partial)).not.toThrow();
+    expect(render(partial).textContent).toContain("жирный текст");
+  });
+
+  it("обрыв ровно на открывающей тройной кавычке (без языка и без содержимого)", () => {
+    expect(() => render("Код:\n\n```")).not.toThrow();
+  });
+});

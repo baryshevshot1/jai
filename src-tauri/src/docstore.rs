@@ -517,6 +517,52 @@ pub struct RetrievedChunk {
 /// с join к метаданным. vec0 KNN отдаёт k ближайших ГЛОБАЛЬНО, поэтому фильтр по
 /// проекту мог бы обнулить результат — берём расширенный пул кандидатов (k×5) и
 /// после фильтра по проекту оставляем top-k.
+/// Текст конкретных фрагментов документа по их номерам. Нужен, чтобы показать
+/// пользователю, на что именно опирался ответ: это ЧТЕНИЕ по ключу, а не поиск.
+/// Через семантический поиск то же самое обошлось бы вычислением эмбеддинга вопроса
+/// и загрузкой модели поиска — секунды и лишняя память ради текста, который уже
+/// лежит в базе. Вдобавок поиск не гарантирует, что вернёт именно эти фрагменты.
+pub fn fragments_by_index(
+    conn: &Connection,
+    filename: &str,
+    chunk_indexes: &[i64],
+    project_id: Option<&str>,
+) -> Result<Vec<(i64, String)>, String> {
+    if chunk_indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Список номеров подставляем плейсхолдерами, а не склейкой строк: номера приходят
+    // из интерфейса, и склейка была бы дырой для инъекции.
+    let holes = std::iter::repeat_n("?", chunk_indexes.len()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT c.chunk_index, c.text
+         FROM chunks c JOIN documents d ON d.id = c.doc_id
+         WHERE d.filename = ?1 AND d.project_id IS ?2 AND c.chunk_index IN ({holes})
+         ORDER BY c.chunk_index"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("Не удалось подготовить выборку фрагментов: {e}"))?;
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(filename.to_string()),
+        Box::new(project_id.map(str::to_string)),
+    ];
+    for i in chunk_indexes {
+        params.push(Box::new(*i));
+    }
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(refs.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| format!("Ошибка выборки фрагментов: {e}"))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| format!("Ошибка чтения фрагмента: {e}"))?);
+    }
+    Ok(out)
+}
+
 pub fn search(
     conn: &Connection,
     query: &[f32],

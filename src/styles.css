@@ -551,7 +551,59 @@ body.resizing { cursor: col-resize; user-select: none; }
   line-height: 1.5;
 }
 .sources__label { font-weight: 600; }
-.sources__item { color: var(--muted); }
+.sources__list { display: inline-flex; flex-wrap: wrap; gap: 6px; vertical-align: top; }
+
+/* Источник-чип: свёрнут — файл + номера фрагментов (как раньше просто текстом),
+   по клику раскрывает сам текст фрагмента (см. renderSources в ui.ts). */
+.source-group { display: inline-flex; flex-direction: column; align-items: flex-start; max-width: 100%; }
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--t-xs);
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
+}
+.source-chip:hover { color: var(--text); border-color: var(--border-strong); }
+.source-chip__chevron {
+  display: inline-block;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+.source-chip[aria-expanded="true"] .source-chip__chevron { transform: rotate(90deg); }
+.source-chip__name {
+  color: var(--text);
+  font-weight: 500;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Раскрытый фрагмент — текст документа, на который опирался ответ (не сам ответ):
+   чуть крупнее и контрастнее строки источников, но без модальных окон и рамки-акцента. */
+.source-panel {
+  margin: 4px 0 2px;
+  padding: 8px 10px;
+  max-width: 560px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.source-frag + .source-frag { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.source-frag__head { font-size: var(--t-xs); font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+.source-frag__text { white-space: pre-wrap; }
+.source-frag__text--missing { color: var(--muted); font-style: italic; white-space: normal; }
 
 .side-foot {
   border-top: 1px solid var(--border);
