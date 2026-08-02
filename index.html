@@ -46,7 +46,7 @@
 
           <div class="search">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
-            <input id="conv-search" placeholder="Поиск по чатам" />
+            <input id="conv-search" placeholder="Поиск по чатам" aria-label="Поиск по чатам" />
           </div>
 
           <div class="conv-list" id="conv-list"></div>
@@ -119,6 +119,13 @@
             <div class="empty-state__hint">
               Работаю офлайн на вашем компьютере — ваши данные остаются только у вас.
             </div>
+            <!-- Ход первого запуска: движок поднимается несколько секунд, и без
+                 этих шагов ожидание выглядит как «зависло» (см. ui.ts → setBootStep). -->
+            <div class="boot-steps" id="boot-steps" hidden>
+              <div class="boot-step" data-step="engine"><span class="boot-step__led"></span>Запуск движка</div>
+              <div class="boot-step" data-step="models"><span class="boot-step__led"></span>Подготовка моделей</div>
+              <div class="boot-step" data-step="ready"><span class="boot-step__led"></span>Готов к работе</div>
+            </div>
             <div class="empty-state__chips">
               <button type="button" class="chip" data-prompt="Составить деловое письмо">Составить деловое письмо</button>
               <button type="button" class="chip" data-prompt="Сформулировать ответ клиенту">Сформулировать ответ клиенту</button>
@@ -140,7 +147,7 @@
               <button type="button" class="img-chip__ocr" id="img-ocr" title="Распознать текст на изображении">Извлечь текст</button>
               <button type="button" class="img-chip__remove" id="img-remove" title="Убрать изображение" aria-label="Убрать изображение">×</button>
             </div>
-            <textarea id="chat-input" rows="1" placeholder="Спросите что-нибудь…"></textarea>
+            <textarea id="chat-input" rows="1" placeholder="Спросите что-нибудь…" aria-label="Ваш вопрос"></textarea>
             <div class="composer-bar">
               <button type="button" class="tool" id="attach-btn" title="Прикрепить документ (PDF, Word, текст)" aria-label="Прикрепить документ">
                 <svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.2 20.3a5 5 0 0 1-7.1-7.1l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4l8.5-8.5" /></svg>
@@ -180,9 +187,11 @@
             <section class="settings-card">
               <div class="settings-card__head models-head">
                 <h2 class="settings-card__title">Модели</h2>
+                <!-- «моделей» в названии обязательно: рядом, в карточке ниже, есть
+                     кнопка обновления самого приложения — их путали. -->
                 <button type="button" class="ep-btn ep-btn--icon" id="check-updates-btn">
                   <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" /></svg>
-                  Проверить обновления
+                  Проверить обновления моделей
                 </button>
               </div>
               <p class="settings-card__desc models-desc">
@@ -436,7 +445,7 @@
             <span class="project-head__icon">
               <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             </span>
-            <input class="project-name-input" id="project-name-input" placeholder="Название проекта" spellcheck="false" />
+            <input class="project-name-input" id="project-name-input" placeholder="Название проекта" spellcheck="false" aria-label="Название проекта" />
             <button type="button" class="ep-btn ep-btn--ghost project-del-btn" id="project-delete">Удалить проект</button>
           </div>
 
@@ -449,7 +458,7 @@
                   (например: «Ты юрист компании X, отвечай со ссылками на приложенные договоры»).
                 </p>
               </div>
-              <textarea class="project-instructions" id="project-instructions" rows="3"
+              <textarea class="project-instructions" id="project-instructions" rows="3" aria-label="Инструкции проекта"
                 placeholder="Необязательно. Опишите роль и правила для чатов этого проекта…"></textarea>
               <div class="settings-status" id="project-status" hidden></div>
             </section>

@@ -135,7 +135,7 @@ mod tests {
         let vecs = embed_batch(&texts).await.expect("эмбеддинг батчем");
         assert_eq!(vecs.len(), 2, "по вектору на текст");
         assert_eq!(vecs[0].len(), vecs[1].len(), "одинаковая размерность");
-        assert!(vecs[0].len() > 0, "непустой вектор");
+        assert!(!vecs[0].is_empty(), "непустой вектор");
         eprintln!("dim = {}", vecs[0].len());
 
         // Косинусная близость: одинаковые тексты ближе, чем разные по смыслу.

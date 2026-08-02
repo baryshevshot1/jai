@@ -1,13 +1,21 @@
-# Быстрая сетка безопасности на каждый PR и push в main: тесты Rust, строгий tsc,
+# Быстрая сетка безопасности на каждый PR и push в main: тесты Rust, clippy, строгий tsc,
 # и — главное — компиляция Windows-веток (#[cfg(windows)]: DXGI и пр.), которые
 # на Mac разработчика не собираются вовсе. Установщики здесь НЕ собираются —
 # это делает release.yml по тегу app-v*.
+#
+# Все actions закреплены SHA коммита (тег рядом — только комментарий): подвижный
+# тег могут переставить на вредоносный коммит. Свежесть пинов ведёт dependabot
+# (.github/dependabot.yml) через PR с ревью.
 name: ci
 
 on:
   pull_request:
   push:
     branches: [main]
+
+# Проверкам достаточно чтения — здесь ничего не публикуется.
+permissions:
+  contents: read
 
 # Новый пуш в ту же ветку отменяет уже идущую проверку (экономим минуты CI).
 concurrency:
@@ -20,11 +28,16 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: lts/*
+          # Не оставлять токен в .git/config: дальше выполняются чужие
+          # postinstall-скрипты npm и build.rs крейтов, им токен не положен.
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Версия Node — из .nvmrc, чтобы CI и разработка не расходились.
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Фронтенд — tsc strict + vite build
@@ -34,9 +47,19 @@ jobs:
           npm ci
           npm run build
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Тесты фронтенда
+        # Санитайзер Markdown (XSS + целость формул/подсветки) и разбор ошибок:
+        # регрессия здесь либо открывает дыру, либо ломает вывод ответа.
+        run: npm test
 
-      - uses: swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # ветка stable
+        with:
+          # Действующая версия — из rust-toolchain.toml (её cargo и слушается);
+          # здесь дублируем, чтобы action ставил сразу нужную, а не лишнюю stable.
+          toolchain: '1.96.0'
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: './src-tauri -> target'
 
@@ -44,6 +67,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Clippy
+        # Строго: замечаний в коде не осталось, и новое не должно проскочить незаметно.
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Формат Rust (информационно)
+        # Кодовая база исторически не под rustfmt: шаг показывает расхождения,
+        # но сборку не валит — до разового согласованного cargo fmt.
+        continue-on-error: true
+        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
       - name: Тесты Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -53,11 +86,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: lts/*
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Фронтенд — tsc strict + vite build
@@ -65,11 +100,17 @@ jobs:
           npm ci
           npm run build
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # ветка stable
+        with:
+          toolchain: '1.96.0'
+          components: clippy
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: './src-tauri -> target'
+
+      - name: Clippy (включая Windows-ветки cfg)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Тесты Rust (включая Windows-ветки cfg)
         # Именно тесты, не только check: восстановление повреждённой documents.db

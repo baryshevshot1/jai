@@ -5,17 +5,38 @@ import type { DocAttachment } from "./types";
 
 // Сырые технические ошибки (reqwest/serde/Ollama) → короткий человеческий текст.
 // Детали остаются в console для диагностики; пользователю — понятная суть.
+// Известные случаи распознаются по устойчивым маркерам конкретных сбоев; всё
+// нераспознанное показываем как есть (обрезав): ложная догадка хуже сырой
+// строки — она уводит диагностику в сторону.
+const KNOWN_ERRORS: ReadonlyArray<[RegExp, string]> = [
+  // Движок не запущен или порт закрыт: «connection refused», tcp connect error…
+  [
+    /connect|11434|refused|отказано/i,
+    "Движок не отвечает. Нажмите кнопку обновления в шапке или откройте Настройки → «Проверка системы».",
+  ],
+  // Именно «timed out»/«timeout», а не любое слово с «tim» (runtime, estimate…).
+  [/timed?\s?out|timeout|время ожидания/i, "Превышено время ожидания ответа движка."],
+  // Ollama об отсутствующей модели: «model "…" not found, try pulling it first», HTTP 404.
+  // Голое «not found» не считаем: файловое «no such file» — не про модель.
+  [
+    /model\b.{0,80}not found|try pulling|\b404\b/i,
+    "Модель не установлена. Откройте Настройки → «Модели».",
+  ],
+  // Нехватка памяти при загрузке модели: ggml/CUDA-аллокации и «model requires
+  // more system memory» от Ollama.
+  [
+    /out of memory|not enough memory|requires more.{0,30}memory|failed to allocate|cudamalloc|\boom\b/i,
+    "Не хватает памяти для модели. Закройте тяжёлые программы или установите модель полегче: Настройки → «Модели».",
+  ],
+];
+
 export function humanError(e: unknown): string {
   const s = String(e);
   console.error(s);
-  if (/connect|Connection|11434|отказано|refused/i.test(s))
-    return "Движок не отвечает. Нажмите кнопку обновления в шапке или откройте Настройки → «Проверка системы».";
-  if (/tim| timed out|timeout/i.test(s)) return "Превышено время ожидания ответа движка.";
-  if (/no such|not found|404/i.test(s))
-    return "Модель не установлена. Откройте Настройки → «Модели».";
-  if (/memory|OOM|allocat/i.test(s))
-    return "Не хватает памяти для модели. Закройте тяжёлые программы или установите модель полегче: Настройки → «Модели».";
-  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+  for (const [re, text] of KNOWN_ERRORS) if (re.test(s)) return text;
+  // Обрезаем по кодовым точкам: slice по UTF-16-единицам мог бы разрубить эмодзи.
+  const cps = [...s];
+  return cps.length > 200 ? cps.slice(0, 200).join("") + "…" : s;
 }
 
 // Склонение существительного по числу (русские правила): 1 ядро, 4 ядра, 18 ядер.
@@ -87,6 +108,10 @@ export function makePressable(el: HTMLElement) {
   el.tabIndex = 0;
   el.setAttribute("role", "button");
   el.addEventListener("keydown", (e) => {
+    // Только когда сфокусирована сама строка: нажатие на вложенной кнопке («×»
+    // удаления) всплывает сюда, и перехват отменил бы её нативную активацию —
+    // с клавиатуры вместо удаления открывался бы диалог.
+    if (e.target !== el) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       el.click();

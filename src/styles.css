@@ -1,4 +1,9 @@
-/* ===================== ДИЗАЙН-ТОКЕНЫ (из прототипа) ===================== */
+/* ===================== ДИЗАЙН-ТОКЕНЫ (из прототипа) =====================
+   Правило употребления цвета текста: --text — основное, --muted — техническое
+   и второстепенное, --faint — ТОЛЬКО декор (иконки, индикаторы, градиент
+   шиммера). На тексте --faint даёт контраст ~2.2:1 при кегле 11.5px — для
+   возрастной аудитории это нечитаемо. Иерархию «техдетали мельче и тише»
+   несут кегль, капитель и моноширинный шрифт, а не потеря читаемости. */
 :root {
   --font-ui: "Inter", system-ui, -apple-system, sans-serif;
   --font-display: "Fraunces", Georgia, serif;
@@ -14,13 +19,14 @@
 }
 :root[data-theme="light"] {
   --bg: #faf8f4; --surface: #ffffff; --sidebar: #f4f1eb; --hover: #ece8e0;
-  --text: #2a2825; --muted: #736f68; --faint: #a8a39a;
+  --text: #2a2825; --muted: #6e6a62; --faint: #a8a39a;
   --border: #e8e4db; --border-strong: #dad5cb;
   --accent: #2f6be0; --accent-hover: #2659c2; --accent-soft: #ebf1fd; --accent-ring: rgba(47, 107, 224, 0.14);
   --code-bg: #f6f3ed; --code-border: #e8e4db;
   --user-grad-a: #2f6be0; --user-grad-b: #3d78ea; --user-text: #fff;
   --brand-grad-a: #2f6be0; --brand-grad-b: #7b5cf0;
-  --green: #3e9b6b; --green-soft: #e7f3eb;
+  --green: #3e9b6b; --green-soft: #e7f3eb; --green-text: #23744b;
+  --amber: #d9a441; --amber-text: #8a6116;
   --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.05);
   --shadow: 0 1px 3px rgba(60, 50, 30, 0.05), 0 8px 24px rgba(60, 50, 30, 0.07);
   --danger: #c0392b; --danger-soft: #fdecec;
@@ -33,10 +39,19 @@
   --code-bg: #15140f; --code-border: #312e29;
   --user-grad-a: #3a6fd8; --user-grad-b: #4a7ce6; --user-text: #fff;
   --brand-grad-a: #6293f2; --brand-grad-b: #9d7bff;
-  --green: #5fb98a; --green-soft: #1b2a21;
+  --green: #5fb98a; --green-soft: #1b2a21; --green-text: #5fb98a;
+  --amber: #d9a441; --amber-text: #e7b357;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.34);
   --danger: #ff8a80; --danger-soft: #3a1d1d;
+}
+
+/* Крупный интерфейс: аудитория продукта — руководители, юристы, бухгалтеры,
+   которым 13.5px основного текста мелко. Переопределяем только шкалу кегля —
+   компоновка, отступы и радиусы остаются прежними, ничего не «разъезжается». */
+:root[data-scale="lg"] {
+  --t-xs: 12.5px; --t-sm: 13.5px; --t-base: 15px; --t-md: 15.5px;
+  --t-lg: 16.5px; --t-xl: 17.5px; --t-brand: 19px;
 }
 
 /* ===================== БАЗА ===================== */
@@ -152,7 +167,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-size: var(--t-base);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.search input::placeholder { color: var(--faint); }
+.search input::placeholder { color: var(--muted); }
 .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .search svg {
   position: absolute;
@@ -172,7 +187,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--faint);
+  color: var(--muted);
   padding: var(--s4) var(--s2) var(--s2);
 }
 .conv-label:first-child { padding-top: var(--s2); }
@@ -189,7 +204,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   margin-bottom: 1px;
 }
 .conv:hover { background: var(--hover); color: var(--text); }
-.conv.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.conv.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 500; }
 :root[data-theme="dark"] .conv.active { color: var(--text); }
 .conv svg { width: var(--icon); height: var(--icon); flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
 .conv .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -201,7 +216,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
   font-size: 1.05em;
   line-height: 1;
-  padding: 4px 6px; /* кликзона ближе к рекомендуемым 24px */
+  min-width: 24px; /* цель клика 24px: рядом строка чата — промах открывает не то */
+  min-height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   flex-shrink: 0;
 }
 .conv:hover .conv-del,
@@ -237,7 +256,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .doc-item__sub { font-size: var(--t-xs); color: var(--muted); }
 .doc-item__del {
   border: none; background: transparent; color: var(--muted);
-  opacity: 0; cursor: pointer; font-size: 1.05em; line-height: 1; padding: 4px 6px; flex-shrink: 0;
+  opacity: 0; cursor: pointer; font-size: 1.05em; line-height: 1; padding: 0; flex-shrink: 0;
+  min-width: 24px; min-height: 24px; display: grid; place-items: center;
 }
 .doc-item:hover .doc-item__del,
 .doc-item:focus-within .doc-item__del { opacity: 0.6; }
@@ -275,6 +295,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   gap: var(--s2);
   padding: var(--s3) var(--s5);
   border-bottom: 1px solid var(--border);
+  /* страница настроек длинная: «Назад» остаётся на виду и не требует прокрутки вверх */
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
 }
 .settings-head__title { font-size: var(--t-lg); font-weight: 600; color: var(--text); }
 .settings-body {
@@ -324,6 +349,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Значение из нескольких частей (имя модели + тег + оговорка про картинки) не
+   умещается в строку: переносим по словам вместо обрезки многоточием. */
+.settings-field__value--wrap { overflow: visible; text-overflow: clip; white-space: normal; }
 .settings-card__actions { margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--border); }
 /* первое поле карточки идёт сразу под описанием — верхняя линия там лишняя */
 .settings-field--first { border-top: none; padding-top: 0; }
@@ -368,9 +396,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ep-btn.check-ok { background: var(--green-soft); color: var(--green); border-color: transparent; }
 .ep-btn.check-ok:hover { background: color-mix(in srgb, var(--green) 16%, var(--surface)); }
 :root[data-theme="dark"] .ep-btn.check-ok { color: var(--text); }
-.ep-btn.check-update { background: color-mix(in srgb, #d9a441 18%, var(--surface)); color: #b9831f; border-color: transparent; }
-:root[data-theme="dark"] .ep-btn.check-update { color: #e7b357; }
-.ep-btn.check-update:hover { background: color-mix(in srgb, #d9a441 26%, var(--surface)); }
+.ep-btn.check-update { background: color-mix(in srgb, var(--amber) 18%, var(--surface)); color: var(--amber-text); border-color: transparent; }
+.ep-btn.check-update:hover { background: color-mix(in srgb, var(--amber) 26%, var(--surface)); }
 .ep-btn.check-err { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 /* живое вращение стрелок во время проверки (360°, как у «обновить») */
 @keyframes ep-spin { to { transform: rotate(360deg); } }
@@ -392,6 +419,10 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--accent-soft);
   color: var(--text);
 }
+/* Три исхода операции читаются цветом одинаково во всех карточках: синее — к
+   сведению, зелёное — получилось, красное — не получилось. Гаснет по таймеру
+   только успех: сообщение об ошибке ждёт, пока пользователь его прочтёт. */
+.settings-status--success { background: var(--green-soft); color: var(--green-text); }
 .settings-status--error { background: var(--danger-soft); color: var(--danger); }
 
 /* раздел «Модели»: список с состоянием и действиями */
@@ -459,12 +490,15 @@ body.resizing { cursor: col-resize; user-select: none; }
   padding: 3px 9px;
   border-radius: var(--r-pill);
 }
-.model-badge--ok { background: var(--green-soft); color: var(--green); }
-.model-badge--update { background: color-mix(in srgb, #d9a441 16%, var(--surface)); color: #b9831f; }
-:root[data-theme="dark"] .model-badge--update { color: #e7b357; }
+.model-badge--ok { background: var(--green-soft); color: var(--green-text); }
+.model-badge--update { background: color-mix(in srgb, var(--amber) 16%, var(--surface)); color: var(--amber-text); }
 .model-badge--missing { background: var(--hover); color: var(--muted); }
 .model-badge--err { background: var(--danger-soft); color: var(--danger); }
 :root[data-theme="dark"] .model-badge--ok { color: var(--text); }
+/* Ответ, построенный на данных из интернета: янтарный закреплён за онлайном
+   (тумблер «Онлайн»), поэтому метка узнаётся без объяснений. Видна и в старых
+   диалогах — сразу понятно, какие ответы полностью офлайновые. */
+.model-badge--web { background: color-mix(in srgb, var(--amber) 16%, var(--surface)); color: var(--amber-text); }
 .model-row .ep-btn { flex-shrink: 0; padding: 5px 11px; }
 /* строки «Проверки системы» проявляются на каждом прогоне — видно, что список свежий */
 .model-row--fade { animation: diag-in 0.28s ease both; }
@@ -491,6 +525,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .index-progress { margin: 0 var(--s3) var(--s3); }
 .index-progress__bar { height: 5px; border-radius: var(--r-pill); background: var(--hover); overflow: hidden; }
 .index-progress__bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s ease; }
+/* Сорванная операция не должна выглядеть как выполненная: полоса краснеет,
+   подпись — тоже. Иначе «установлено» и «не установилось» неотличимы. */
+.index-progress__bar > i.error { background: var(--danger); }
+.index-progress__label.danger { color: var(--danger); font-weight: 500; }
 .index-progress__label { margin-top: 5px; font-size: var(--t-xs); color: var(--muted); }
 .pull-cancel-btn {
   margin-top: 7px;
@@ -569,8 +607,23 @@ body.resizing { cursor: col-resize; user-select: none; }
   opacity: 0.7;
 }
 .hwchip__model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hwchip--yellow { background: color-mix(in srgb, #d9a441 14%, var(--surface)); }
-.hwchip--yellow .led { background: #d9a441; box-shadow: 0 0 0 3px color-mix(in srgb, #d9a441 20%, transparent); }
+/* Имя модели и её тег — колонкой: карточка узкая, в строку они не помещаются. */
+.hwchip__mbox {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.35;
+}
+/* Технический тег модели («qwen3.5:9b»): нужен поддержке и диагностике, поэтому
+   не прячем — но уводим в иерархию кеглем и моноширинным шрифтом. */
+.model-tag {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--muted);
+}
+.hwchip--yellow { background: color-mix(in srgb, var(--amber) 14%, var(--surface)); }
+.hwchip--yellow .led { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 20%, transparent); }
 .hwchip--red { background: var(--danger-soft); }
 .hwchip--red .led { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 20%, transparent); }
 .hwchip--unknown { background: var(--hover); }
@@ -731,8 +784,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .engine__state { font-weight: 500; }
 .engine__meta { display: inline-flex; align-items: center; gap: var(--s2); min-width: 0; }
 .engine__sep { width: 1px; height: 11px; background: var(--border); flex-shrink: 0; }
-.engine__name { color: var(--faint); }
-.engine__ver { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
+.engine__name { color: var(--muted); }
+.engine__ver { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--muted); }
 /* Движок молчит: гаснет индикатор, рамка тревожная, подпись про версию скрыта из JS
    (висящая версия при погасшем огоньке выглядела бы как враньё). */
 .engine--down { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
@@ -800,6 +853,50 @@ body.resizing { cursor: col-resize; user-select: none; }
   max-width: 440px;
   margin-top: var(--s3);
 }
+/* Первые секунды после запуска — единственный момент, когда «коробка» может
+   показаться сломанной: движок поднимается, модель ещё не в памяти. Три шага
+   превращают ожидание в наблюдаемый процесс, а сбой — в понятный шаг с
+   подсказкой, куда идти. Язык индикаторов тот же, что у светофора железа. */
+.boot-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: var(--s3);
+  text-align: left;
+}
+.boot-step {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-sm);
+  color: var(--muted);
+  opacity: 0.55;
+  transition: opacity 0.2s ease, color 0.2s ease;
+}
+.boot-step__led {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.boot-step.is-active { opacity: 1; color: var(--text); }
+.boot-step.is-active .boot-step__led {
+  opacity: 1;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.boot-step.is-done { opacity: 1; }
+.boot-step.is-done .boot-step__led { opacity: 1; background: var(--green); box-shadow: none; }
+.boot-step.is-failed { opacity: 1; color: var(--danger); }
+.boot-step.is-failed .boot-step__led { opacity: 1; background: var(--danger); box-shadow: none; }
+.boot-steps__hint {
+  margin-top: var(--s1);
+  font-size: var(--t-xs);
+  color: var(--danger);
+  line-height: 1.5;
+}
 .chip {
   pointer-events: auto; /* кликабельны, в отличие от оверлея */
   padding: 8px 14px;
@@ -837,6 +934,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* ассистент — слева, просто текст без аватара/подписи */
 .turn.ai { align-items: flex-start; }
 .msg { font-size: var(--t-lg); line-height: var(--lh-relaxed); color: var(--text); max-width: 100%; }
+/* Широкое содержимое ответа прокручивается ВНУТРИ себя: таблица со сводкой,
+   длинная формула или ссылка без пробелов не должны растягивать всю ленту. */
+.msg { overflow-wrap: anywhere; min-width: 0; }
+.msg table { display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+.msg .katex-display { overflow-x: auto; overflow-y: hidden; }
 
 /* действия под ответом ассистента: «Копировать», «Повторить» */
 .msg-actions { display: flex; gap: var(--s2); margin-top: 2px; opacity: 0; transition: opacity 0.15s ease; }
@@ -857,6 +959,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .msg-act + .msg-act { margin-left: 0; }
 .msg-act:hover { color: var(--text); background: var(--hover); }
+/* «Повторить» — самое частое действие после неудачного или неточного ответа:
+   держим его заметнее прочих, но без заливки, чтобы лента осталась спокойной. */
+.msg-act--retry { color: var(--accent); }
+.msg-act--retry:hover { color: var(--accent-hover); background: var(--accent-soft); }
 
 /* индикатор «думаю» — три пульсирующие точки */
 .thinking { display: flex; align-items: center; gap: var(--s2); color: var(--muted); font-size: var(--t-md); }
@@ -979,6 +1085,23 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-size: 0.9em;
   text-align: center;
 }
+/* «Повторить» прямо в сообщении об ошибке: если ответ оборвался на первой секунде,
+   ход ассистента убран и кнопки под ответом нет — вопрос не должен требовать
+   перенабора. Контур по currentColor, чтобы читалась на красной подложке. */
+.err-retry {
+  display: inline-block;
+  margin-left: var(--s2);
+  padding: 2px 10px;
+  border: 1px solid currentColor;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+.err-retry:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
 .notice {
   align-self: center;
   max-width: 90%;
@@ -1052,6 +1175,13 @@ body.resizing { cursor: col-resize; user-select: none; }
   gap: 10px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
+/* Файл тащат в окно: композер подсвечивается как зона броска — видно, куда бросать
+   и что приложение вообще принимает перетаскивание. */
+.composer--dragover {
+  border-color: var(--accent);
+  border-style: dashed;
+  background: var(--accent-soft);
+}
 .composer:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow);
@@ -1068,7 +1198,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   padding: 6px 8px 0;
   max-height: 160px;
 }
-.composer textarea::placeholder { color: var(--faint); }
+.composer textarea::placeholder { color: var(--muted); }
 .composer textarea:disabled { opacity: 0.6; }
 
 /* Бейдж формата файла (PDF/DOCX/…): общий для чипа над вводом и карточки в сообщении */
@@ -1145,8 +1275,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .img-chip__remove {
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 24px; /* цель клика не мельче 24px: промах попадает по «Извлечь текст» */
+  height: 24px;
   flex-shrink: 0;
   border: none;
   border-radius: 50%;
@@ -1196,8 +1326,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .doc-chip__remove {
   display: grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 24px; /* цель клика не мельче 24px — чип узкий, промахнуться легко */
+  height: 24px;
   flex-shrink: 0;
   border: none;
   border-radius: 50%;
@@ -1258,11 +1388,10 @@ body.resizing { cursor: col-resize; user-select: none; }
    Янтарный акцент (как у статуса обновления) — отличается от синих «Размышлений»,
    чтобы выход в сеть был визуально заметен (152-ФЗ: онлайн не должен быть незаметным). */
 .online-toggle.on {
-  background: color-mix(in srgb, #d9a441 16%, var(--surface));
-  border-color: color-mix(in srgb, #d9a441 45%, transparent);
-  color: #b9831f;
+  background: color-mix(in srgb, var(--amber) 16%, var(--surface));
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  color: var(--amber-text);
 }
-:root[data-theme="dark"] .online-toggle.on { color: #e7b357; }
 
 /* Пока онлайн активен, у тумблера горит живая точка: отдельного бейджа в шапке нет,
    индикатор — сам тумблер. Что именно ушло наружу, видно по источникам под ответом
@@ -1272,7 +1401,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #d9a441;
+  background: var(--amber);
   flex-shrink: 0;
   animation: online-pulse 2s ease-out infinite;
 }
@@ -1401,7 +1530,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-size: var(--t-base);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.modal__input::placeholder { color: var(--faint); }
+.modal__input::placeholder { color: var(--muted); }
 .modal__input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 
 /* ===================== ПРОЕКТЫ ===================== */
@@ -1420,12 +1549,12 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--faint);
+  color: var(--muted);
 }
 .side-section__add {
   flex-shrink: 0;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   border: none;
@@ -1459,13 +1588,13 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 .project:hover { background: var(--hover); color: var(--text); }
-.project.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.project.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 500; }
 :root[data-theme="dark"] .project.active { color: var(--text); }
 .project svg { width: var(--icon); height: var(--icon); flex-shrink: 0; opacity: 0.65; stroke: currentColor; fill: none; stroke-width: 2; }
 .project .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-empty {
   padding: var(--s2) calc(var(--s2) + 2px) var(--s3);
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--t-sm);
   line-height: 1.5;
 }
@@ -1497,7 +1626,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-weight: 600;
   transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
-.project-name-input::placeholder { color: var(--faint); font-weight: 500; }
+.project-name-input::placeholder { color: var(--muted); font-weight: 500; }
 .project-name-input:hover { background: var(--hover); }
 .project-name-input:focus {
   outline: none;
@@ -1522,7 +1651,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   resize: vertical;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.project-instructions::placeholder { color: var(--faint); }
+.project-instructions::placeholder { color: var(--muted); }
 .project-instructions:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 /* список чатов проекта — строки .conv уже стилизованы */
 .project-chats { display: flex; flex-direction: column; }

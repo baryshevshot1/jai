@@ -15,16 +15,35 @@ echo.
 if exist "OllamaSetup.exe" (
   echo  [1/2] Движок Ollama... ^(1-2 минуты^)
   start /wait "" "OllamaSetup.exe" /VERYSILENT /NORESTART
+  if errorlevel 1 (
+    echo        Установщик движка завершился с ошибкой.
+    goto :fail
+  )
 ) else (
   echo  [1/2] OllamaSetup.exe не найден рядом со скриптом — пропускаю.
   echo        Если движок не установлен, скачайте его с ollama.com
 )
 
+rem Рядом должна лежать ровно одна версия (make-usb.sh чистит старые):
+rem порядок перечисления каталога на exFAT не гарантирован, и «последний
+rem найденный» файл ставил бы клиенту произвольную версию.
 set "APP="
-for %%f in ("Jarvis.AI_*-setup.exe") do set "APP=%%f"
+set /a APPCOUNT=0
+for %%f in ("Jarvis.AI_*-setup.exe") do (
+  set "APP=%%f"
+  set /a APPCOUNT+=1
+)
+if %APPCOUNT% GTR 1 (
+  echo  На флешке несколько установщиков Jarvis.AI — оставьте один ^(нужной версии^) и запустите снова.
+  goto :fail
+)
 if defined APP (
   echo  [2/2] Приложение Jarvis AI...
   start /wait "" "%APP%" /S
+  if errorlevel 1 (
+    echo        Установщик приложения завершился с ошибкой.
+    goto :fail
+  )
 ) else (
   echo  [2/2] Установщик Jarvis.AI_*-setup.exe не найден рядом со скриптом.
   goto :fail

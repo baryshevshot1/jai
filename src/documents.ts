@@ -58,10 +58,14 @@ export function initDocContexts() {
 
 // Тянет список документов контекста и (для общей базы) статус модели эмбеддингов.
 export async function refreshDocuments(ctx: DocCtx) {
+  // «Не удалось спросить» и «модели нет» — разные вещи: пустая база не должна
+  // советовать установить bge-m3, если на самом деле молчит движок.
+  let statusUnknown = false;
   try {
     state.embeddingReady = await invoke<boolean>("embedding_status");
   } catch {
     state.embeddingReady = false;
+    statusUnknown = true;
   }
   // Карточка установки bge-m3 — только у общей базы (общий статус модели поиска).
   if (ctx === sidebarDocCtx) {
@@ -69,8 +73,9 @@ export async function refreshDocuments(ctx: DocCtx) {
       docStatusEl.hidden = true;
     } else if (state.pullingTag === null) {
       docStatusEl.hidden = false;
-      docStatusTextEl.textContent =
-        "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или импортируйте с флешки/диска (каталог моделей Ollama) — без терминала.";
+      docStatusTextEl.textContent = statusUnknown
+        ? "Проверить модель поиска bge-m3 не удалось: движок не отвечает. Запустите его в настройках — или, если модели ещё нет, скачайте из интернета либо импортируйте с флешки/диска."
+        : "Для поиска по документам нужна модель bge-m3. Скачайте из интернета или импортируйте с флешки/диска (каталог моделей Ollama) — без терминала.";
       installEmbedBtn.hidden = false;
       installEmbedBtn.disabled = false;
       installEmbedBtn.textContent = "Установить (~1.2 ГБ)"; // единый глагол установки
@@ -80,24 +85,37 @@ export async function refreshDocuments(ctx: DocCtx) {
   }
 
   let docs: DocumentMeta[] = [];
+  let listFailed = false;
   try {
     docs = await invoke<DocumentMeta[]>("list_documents", { projectId: ctx.projectId });
   } catch (e) {
-    console.error("list_documents:", e);
+    // Молча показать пустой список нельзя: «База пуста» вместо непрочитанного
+    // списка читается как «мои документы пропали».
+    listFailed = true;
+    hideIndexProgress(ctx); // чтение списка идёт без прогресса — полоса ни при чём
+    flashIndexLabel(`Не удалось прочитать список документов: ${humanError(e)}`, true, ctx);
   }
-  renderDocList(docs, ctx);
+  renderDocList(docs, ctx, { listFailed, statusUnknown });
 }
 
-function renderDocList(docs: DocumentMeta[], ctx: DocCtx) {
+function renderDocList(
+  docs: DocumentMeta[],
+  ctx: DocCtx,
+  trouble: { listFailed: boolean; statusUnknown: boolean },
+) {
   ctx.listEl.innerHTML = "";
   if (docs.length === 0) {
     const empty = document.createElement("div");
     empty.className = "doc-empty";
-    empty.textContent = !state.embeddingReady
-      ? "Для документов нужна модель поиска bge-m3 — установите её в настройках (раздел «Документы») или через мастер установки."
-      : ctx.projectId
-        ? "В проекте пока нет документов. Добавьте — и чаты проекта будут искать по ним."
-        : "База пуста. Добавьте документы — и спрашивайте по ним.";
+    empty.textContent = trouble.listFailed
+      ? "Список документов прочитать не удалось. Это не значит, что документы удалены: откройте раздел заново или перезапустите программу."
+      : trouble.statusUnknown
+        ? "Движок не отвечает — проверить модель поиска не удалось. Запустите движок в настройках и откройте раздел заново."
+        : !state.embeddingReady
+          ? "Для документов нужна модель поиска bge-m3 — установите её в настройках (раздел «Документы») или через мастер установки."
+          : ctx.projectId
+            ? "В проекте пока нет документов. Добавьте — и чаты проекта будут искать по ним."
+            : "База пуста. Добавьте документы — и спрашивайте по ним.";
     ctx.listEl.appendChild(empty);
     return;
   }
@@ -141,6 +159,7 @@ export function showIndexProgress(label: string, frac: number, ctx: DocCtx) {
   }
   ctx.progressEl.hidden = false;
   ctx.fillEl.style.width = `${Math.round(frac * 100)}%`;
+  ctx.fillEl.classList.remove("error"); // новая операция начинается с чистой полосы
   ctx.labelEl.textContent = label;
   ctx.labelEl.classList.remove("danger");
 }
@@ -148,18 +167,27 @@ export function showIndexProgress(label: string, frac: number, ctx: DocCtx) {
 export function hideIndexProgress(ctx: DocCtx) {
   ctx.progressEl.hidden = true;
   ctx.fillEl.style.width = "0";
+  ctx.fillEl.classList.remove("error");
 }
 
-// Краткая надпись в области прогресса (итог/ошибка), затем авто-скрытие. Таймер
-// хранится в контексте и отменяется при новой операции (не гасит чужой прогресс).
+// Итог операции в области прогресса. Успех сам гаснет через несколько секунд —
+// его прочитали, и он больше не нужен. Сбой остаётся на месте, пока его не
+// сменит следующая операция (showIndexProgress чистит и надпись, и полосу):
+// исчезнувшая сама собой надпись об ошибке читается как «всё получилось», а в
+// журнал за подробностями пользователь не пойдёт. Полоса при сбое замирает там,
+// где остановилась, и краснеет — залитая до конца выглядела бы как успех.
 export function flashIndexLabel(text: string, isError: boolean, ctx: DocCtx) {
-  if (ctx.flashTimer !== null) clearTimeout(ctx.flashTimer);
+  if (ctx.flashTimer !== null) {
+    clearTimeout(ctx.flashTimer);
+    ctx.flashTimer = null;
+  }
   ctx.progressEl.hidden = false;
-  ctx.fillEl.style.width = "0";
   ctx.labelEl.textContent = text;
   ctx.labelEl.classList.toggle("danger", isError);
+  ctx.fillEl.classList.toggle("error", isError);
+  if (isError) return;
+  ctx.fillEl.style.width = "0";
   ctx.flashTimer = window.setTimeout(() => {
-    ctx.labelEl.classList.remove("danger");
     ctx.progressEl.hidden = true;
     ctx.flashTimer = null;
   }, 3500);
@@ -175,7 +203,8 @@ export async function addDocument(ctx: DocCtx) {
     });
     path = typeof sel === "string" ? sel : null;
   } catch (e) {
-    flashIndexLabel(`Не удалось открыть диалог: ${e}`, true, ctx);
+    hideIndexProgress(ctx); // выбор файла не начинал индексацию — полоса пустая
+    flashIndexLabel(`Не удалось открыть окно выбора файла: ${humanError(e)}`, true, ctx);
     return;
   }
   if (!path) return;
@@ -210,7 +239,8 @@ export async function addDocument(ctx: DocCtx) {
     }
   } catch (e) {
     ctx.opGen++;
-    hideIndexProgress(ctx);
+    // Полосу не гасим: она замирает там, где индексация оборвалась, и краснеет —
+    // видно, что документ НЕ добавлен, а не «мигнуло и пропало».
     flashIndexLabel(humanError(e), true, ctx);
   } finally {
     ctx.addBtn.disabled = false;
@@ -222,7 +252,8 @@ async function deleteDocument(d: DocumentMeta, ctx: DocCtx) {
   try {
     await invoke("delete_document", { id: d.id });
   } catch (e) {
-    flashIndexLabel(`Не удалось удалить: ${humanError(e)}`, true, ctx);
+    hideIndexProgress(ctx); // удаление идёт без прогресса — полоса ни при чём
+    flashIndexLabel(`Не удалось удалить «${d.filename}»: ${humanError(e)}`, true, ctx);
     return;
   }
   await refreshDocuments(ctx);
@@ -235,7 +266,11 @@ export async function refreshCurrentDocsCount() {
   try {
     const empty = await invoke<boolean>("documents_empty", { projectId: state.currentProjectId });
     state.docsCount = empty ? 0 : 1;
-  } catch {
+  } catch (e) {
+    // Не смогли спросить — считаем, что искать нечего (поиск не сорвёт ответ).
+    // Своей строки состояния у этой проверки нет: если документы действительно
+    // есть, о сбое честно скажет список документов и сам ответ без источников.
+    console.error("documents_empty:", e);
     state.docsCount = 0;
   }
 }

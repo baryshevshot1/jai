@@ -52,7 +52,14 @@ import {
   wizardView,
 } from "./dom";
 import { humanError, ICON_REFRESH_CW, plural } from "./util";
-import { confirmModal, showChatView, updateGentleUi } from "./ui";
+import {
+  confirmModal,
+  hideStatus,
+  showChatView,
+  showStatus,
+  updateGentleUi,
+  type StatusKind,
+} from "./ui";
 import {
   flashIndexLabel,
   refreshDocuments,
@@ -114,11 +121,10 @@ async function refreshEnginePaths() {
   }
 }
 
-// Статус-сообщение на странице настроек.
-function settingsStatus(text: string, isError: boolean) {
-  settingsStatusEl.hidden = false;
-  settingsStatusEl.textContent = text;
-  settingsStatusEl.classList.toggle("settings-status--error", isError);
+// Статус-сообщение карточки «Движок и производительность» — единым компонентом:
+// успех гаснет сам, ошибка ждёт, пока её прочтут.
+function settingsStatus(text: string, kind: StatusKind = "info") {
+  showStatus(settingsStatusEl, text, kind);
 }
 
 // Выбор каталога моделей Ollama через системный диалог.
@@ -136,7 +142,7 @@ async function pickModelsDir(): Promise<string | null> {
 // report — контекстная обратная связь (карточка «Документы» либо страница настроек).
 // Обновление зависимых экранов (список документов, модели) — на вызывающем; статус
 // bge-m3 для честного сообщения перечитываем сами.
-async function applyModelsDir(dir: string, report: (t: string, err: boolean) => void) {
+async function applyModelsDir(dir: string, report: (t: string, kind: StatusKind) => void) {
   try {
     await invoke("set_models_dir", { path: dir }); // валидация manifests/blobs + запись
     const res = await invoke<{ status: string; message: string }>("reload_engine");
@@ -147,11 +153,11 @@ async function applyModelsDir(dir: string, report: (t: string, err: boolean) => 
       ready = false;
     }
     state.embeddingReady = ready;
-    if (res.status === "external") report(res.message, false);
-    else if (ready) report("Локальный каталог моделей применён", false);
-    else report("Каталог применён, но bge-m3 в нём не найдена", true);
+    if (res.status === "external") report(res.message, "info");
+    else if (ready) report("Локальный каталог моделей применён", "success");
+    else report("Каталог применён, но bge-m3 в нём не найдена", "error");
   } catch (e) {
-    report(humanError(e), true); // напр. «не похоже на каталог моделей Ollama»
+    report(humanError(e), "error"); // напр. «не похоже на каталог моделей Ollama»
   } finally {
     refreshEnginePaths();
   }
@@ -215,7 +221,7 @@ async function installFromLocalDir() {
 async function settingsPickModels() {
   const dir = await pickModelsDir();
   if (!dir) return;
-  settingsStatus("Применение локального каталога…", false);
+  settingsStatus("Применение локального каталога…", "info");
   await applyModelsDir(dir, settingsStatus);
   await refreshDocuments(sidebarDocCtx);
   await loadModels();
@@ -235,10 +241,13 @@ async function installFromDiskForModels() {
       modelProgressFill.style.width = `${Math.max(2, Math.round(f * 100))}%`;
       modelProgressLabel.textContent = t;
     },
-    done: () => modelsStatus("Модели импортированы — носитель можно извлечь.", false),
+    done: () => modelsStatus("Модели импортированы — носитель можно извлечь.", "success"),
     cancelled: () =>
-      modelsStatus("Импорт отменён — уже скопированное сохранено, повтор продолжит с места.", false),
-    error: (m) => modelsStatus(`Не удалось импортировать: ${m}`, true),
+      modelsStatus(
+        "Импорт отменён — уже скопированное сохранено, повтор продолжит с места.",
+        "info",
+      ),
+    error: (m) => modelsStatus(`Не удалось импортировать: ${m}`, "error"),
   });
   modelProgressEl.hidden = true;
   modelPullCancelBtn.hidden = true;
@@ -256,15 +265,15 @@ async function setEnginePathDialog() {
     const sel = await open({ multiple: false, title: "Исполняемый файл Ollama" });
     file = typeof sel === "string" ? sel : null;
   } catch (e) {
-    settingsStatus(`Не удалось открыть диалог: ${e}`, true);
+    settingsStatus(`Не удалось открыть диалог: ${e}`, "error");
     return;
   }
   if (!file) return;
   try {
     await invoke("set_engine_path", { path: file }); // валидация исполняемого файла
-    settingsStatus("Путь к движку сохранён (применится при следующем запуске движка).", false);
+    settingsStatus("Путь к движку сохранён (применится при следующем запуске движка).", "success");
   } catch (e) {
-    settingsStatus(String(e), true);
+    settingsStatus(String(e), "error");
   }
   refreshEnginePaths();
 }
@@ -277,9 +286,9 @@ async function resetEnginePaths() {
     await invoke("reload_engine");
     await refreshDocuments(sidebarDocCtx);
     await loadModels();
-    settingsStatus("Пути сброшены — движок и модели снова ищутся автоматически.", false);
+    settingsStatus("Пути сброшены — движок и модели снова ищутся автоматически.", "success");
   } catch (e) {
-    settingsStatus(String(e), true);
+    settingsStatus(String(e), "error");
   }
   refreshEnginePaths();
 }
@@ -407,11 +416,10 @@ function renderDiagnostics(checks: DiagCheck[]) {
 
 // ── Обновления приложения: онлайн-проверка (по кнопке) и установка с диска ────
 
-// Статус-сообщение карточки обновлений.
-function appUpdateStatus(text: string, isError: boolean) {
-  appUpdateStatusEl.hidden = false;
-  appUpdateStatusEl.textContent = text;
-  appUpdateStatusEl.classList.toggle("settings-status--error", isError);
+// Статус-сообщение карточки обновлений (тот же компонент, что и в остальных
+// карточках: успех гаснет сам, ошибка ждёт, пока её прочтут).
+function appUpdateStatus(text: string, kind: StatusKind = "info") {
+  showStatus(appUpdateStatusEl, text, kind);
 }
 
 // Проверить наличие новой версии на сервере выпусков (GitHub Releases).
@@ -420,14 +428,14 @@ async function checkAppUpdate() {
   appUpdateCheckBtn.disabled = true;
   appUpdateCheckBtn.classList.add("checking");
   appUpdateCheckBtn.innerHTML = `${ICON_REFRESH_CW}Проверка…`;
-  appUpdateStatusEl.hidden = true;
+  hideStatus(appUpdateStatusEl); // итог прошлой проверки убираем вместе с его таймером
   appUpdateInfoEl.innerHTML = "";
   try {
     const update = await check();
     if (update) renderAppUpdateRow(update);
-    else appUpdateStatus("У вас последняя версия.", false);
+    else appUpdateStatus("У вас последняя версия.", "success");
   } catch (e) {
-    appUpdateStatus(`Не удалось проверить обновления (нужен доступ в интернет): ${e}`, true);
+    appUpdateStatus(`Не удалось проверить обновления (нужен доступ в интернет): ${e}`, "error");
   } finally {
     appUpdateCheckBtn.disabled = false;
     appUpdateCheckBtn.classList.remove("checking");
@@ -493,11 +501,11 @@ async function installAppUpdate(update: Update, btn: HTMLButtonElement) {
       }
     });
     appUpdateProgressEl.hidden = true;
-    appUpdateStatus("Обновление установлено — приложение перезапустится.", false);
+    appUpdateStatus("Обновление установлено — приложение перезапустится.", "success");
     await relaunch();
   } catch (e) {
     appUpdateProgressEl.hidden = true;
-    appUpdateStatus(`Не удалось установить обновление: ${e}`, true);
+    appUpdateStatus(`Не удалось установить обновление: ${e}`, "error");
     btn.disabled = false;
   }
 }
@@ -515,9 +523,9 @@ async function installAppUpdateFromDisk() {
   if (typeof sel !== "string") return;
   try {
     await invoke("install_update_from_disk", { path: sel });
-    appUpdateStatus("Установщик запущен — приложение сейчас закроется.", false);
+    appUpdateStatus("Установщик запущен — приложение сейчас закроется.", "success");
   } catch (e) {
-    appUpdateStatus(`${e}`, true);
+    appUpdateStatus(`${e}`, "error");
   }
 }
 
@@ -533,7 +541,9 @@ function applyTheme(theme: string) {
   themeIconEl.innerHTML = theme === "dark" ? ICON_SUN : ICON_MOON;
 }
 
-// При старте: тема из настроек Tauri; если не сохранена — по системной.
+// При старте: тема из настроек Tauri; если не сохранена — по системной. Здесь же
+// восстанавливаем размер интерфейса: оба решения об оформлении должны примениться
+// ДО того, как включатся переходы, иначе интерфейс на старте заметно «дёрнется».
 export async function initTheme() {
   let theme: string | null = null;
   try {
@@ -545,7 +555,8 @@ export async function initTheme() {
     theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
   applyTheme(theme);
-  // Тема применена — включаем переходы (чтобы интерфейс не «переплывал» на старте).
+  await initUiScale();
+  // Оформление применено — включаем переходы (чтобы интерфейс не «переплывал» на старте).
   requestAnimationFrame(() => document.documentElement.classList.remove("no-transitions"));
 }
 
@@ -556,6 +567,83 @@ function toggleTheme() {
   invoke("set_setting", { key: "theme", value: next }).catch((e) =>
     console.error("set_setting:", e),
   );
+}
+
+// ── Размер интерфейса (обычный / крупный) ────────────────────────────────────
+// Читают приложение руководители, юристы и бухгалтеры — мелкий шрифт для них не
+// «строго», а неудобно. Крупный размер меняет только шкалу кегля (styles.css по
+// атрибуту data-scale на <html>): компоновка, отступы и радиусы остаются прежними.
+
+type UiScale = "normal" | "lg";
+let uiScale: UiScale = "normal";
+let uiScaleStateEl: HTMLElement | null = null;
+let uiScaleBtn: HTMLButtonElement | null = null;
+
+// Применить размер и привести подписи карточки к нему (карточка может быть ещё не
+// собрана — размер всё равно применяется, это главное).
+function applyUiScale(scale: UiScale) {
+  uiScale = scale;
+  const root = document.documentElement;
+  if (scale === "lg") root.setAttribute("data-scale", "lg");
+  else root.removeAttribute("data-scale");
+  if (uiScaleStateEl) {
+    uiScaleStateEl.textContent =
+      scale === "lg" ? "крупный — для комфортного чтения" : "обычный — стандартный размер";
+  }
+  if (uiScaleBtn) uiScaleBtn.textContent = scale === "lg" ? "Вернуть обычный" : "Сделать крупным";
+}
+
+// Восстановление выбора при старте (по умолчанию — обычный размер).
+async function initUiScale() {
+  let saved: string | null = null;
+  try {
+    saved = await invoke<string | null>("get_setting", { key: "ui_scale" });
+  } catch {
+    saved = null;
+  }
+  applyUiScale(saved === "lg" ? "lg" : "normal");
+}
+
+function toggleUiScale() {
+  const next: UiScale = uiScale === "lg" ? "normal" : "lg";
+  applyUiScale(next);
+  invoke("set_setting", { key: "ui_scale", value: next }).catch((e) =>
+    console.error("set_setting ui_scale:", e),
+  );
+}
+
+// Карточка «Оформление» встаёт сразу за «Движком и производительностью»: та карточка
+// про удобство машины, эта — про удобство человека за ней.
+const APPEARANCE_CARD = `
+  <div class="settings-card__head">
+    <h2 class="settings-card__title">Оформление</h2>
+    <p class="settings-card__desc">
+      Размер текста и элементов приложения. Крупный размер делает надписи заметно
+      больше — читать легче, а на экран помещается чуть меньше.
+    </p>
+  </div>
+  <div class="settings-field settings-field--first">
+    <div class="settings-field__icon">
+      <svg viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16" /></svg>
+    </div>
+    <div class="settings-field__info">
+      <div class="settings-field__label">Размер интерфейса</div>
+      <div class="settings-field__value" id="ui-scale-state"></div>
+    </div>
+    <button type="button" class="ep-btn" id="ui-scale-toggle"></button>
+  </div>`;
+
+function buildAppearanceCard() {
+  const after = gentleToggleBtn.closest(".settings-card");
+  if (!after) return;
+  const card = document.createElement("section");
+  card.className = "settings-card";
+  card.innerHTML = APPEARANCE_CARD;
+  after.insertAdjacentElement("afterend", card);
+  uiScaleStateEl = card.querySelector("#ui-scale-state");
+  uiScaleBtn = card.querySelector("#ui-scale-toggle");
+  uiScaleBtn?.addEventListener("click", toggleUiScale);
+  applyUiScale(uiScale); // подписи — под уже применённый размер
 }
 
 // ── Тумблер «Размышления» ────────────────────────────────────────────────────
@@ -671,6 +759,7 @@ export async function initSidebar() {
 
 // Обработчики страницы настроек, темы, панели, диагностики и обновлений.
 export function wireSettings() {
+  buildAppearanceCard(); // карточка «Оформление» — до первого открытия настроек
   settingsBtn.addEventListener("click", openSettings);
   settingsBackBtn.addEventListener("click", goHome);
   brandHomeBtn.addEventListener("click", goHome); // бренд в шапке = «на главную»

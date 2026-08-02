@@ -26,7 +26,7 @@ import {
   stop,
 } from "./ui";
 import { refreshCurrentDocsCount } from "./documents";
-import { makePressable } from "./util";
+import { humanError, makePressable } from "./util";
 
 // Кэш списка диалогов и текущий фильтр поиска (для отрисовки боковой панели).
 let convMetas: ConversationMeta[] = [];
@@ -37,27 +37,59 @@ function titleFromHistory(): string {
   const first = history.find((m) => m.role === "user");
   if (!first) return "Новый диалог";
   const t = first.content.trim().replace(/\s+/g, " ");
-  return t.length > 40 ? t.slice(0, 40) + "…" : t;
+  // Режем по кодовым точкам: slice по UTF-16-единицам может разрубить эмодзи на
+  // границе, а одиночный суррогат не переживает сериализацию IPC — сохранение падает.
+  const cps = [...t];
+  return cps.length > 40 ? cps.slice(0, 40).join("") + "…" : t;
 }
+
+// Ид удалённых диалогов: поздний автосейв (черновик, дочистка «Стопа») не должен
+// воскресить стёртый пользователем файл — записи по этим id запрещены навсегда.
+const deletedIds = new Set<string>();
+
+// Очередь записей на диск: параллельные save_conversation не упорядочены на
+// бэкенде, и черновик, стартовавший за миг до финала стрима, мог бы записаться
+// ПОСЛЕ финального сохранения — файл остался бы с усечённым ответом.
+let saveChain: Promise<unknown> = Promise.resolve();
+
+// Об отказе сохранения предупреждаем в ленте один раз: автосейв повторяется
+// каждые несколько секунд — спамить ошибкой нельзя, но и молчать нельзя.
+let saveErrorShown = false;
 
 // Сохраняет текущий диалог на диск и обновляет список. Пустой не сохраняем.
 // draft — незавершённый ответ ассистента (автосейв во время генерации): пишется
 // в файл ПОВЕРХ истории, но в саму history не попадает — финальное сохранение
 // по завершении перезапишет файл начисто. Список диалогов черновик не трогает.
 export async function persist(draft?: Message) {
-  if (!history.length || !state.currentId) return;
+  if (!history.length || !state.currentId || deletedIds.has(state.currentId)) return;
   const conv: Conversation = {
     id: state.currentId,
     title: titleFromHistory(),
     updated_at: Date.now(),
     ...(state.currentProjectId ? { project_id: state.currentProjectId } : {}),
-    messages: draft ? [...history, draft] : history,
+    // Снимок массива: запись уходит через очередь, к её моменту history мог измениться.
+    messages: draft ? [...history, draft] : [...history],
   };
+  const write = saveChain
+    .catch(() => {}) // сбой прежней записи не должен закупорить очередь
+    .then(() => {
+      // Повторная проверка в момент фактической записи: диалог могли удалить,
+      // пока очередь доходила до этого сохранения.
+      if (deletedIds.has(conv.id)) return;
+      return invoke("save_conversation", { conversation: conv });
+    });
+  saveChain = write;
   try {
-    await invoke("save_conversation", { conversation: conv });
+    await write;
+    saveErrorShown = false; // запись снова проходит: о следующем сбое стоит сказать
     if (!draft) await refreshConversationList();
   } catch (e) {
     console.error("save_conversation:", e);
+    // Отказ записи не должен быть немым — диалог молча перестал бы сохраняться.
+    if (!saveErrorShown) {
+      saveErrorShown = true;
+      addError(`Не удалось сохранить диалог: ${humanError(e)}`);
+    }
   }
 }
 
@@ -82,14 +114,33 @@ export async function refreshConversationList() {
   if (!projectView.hidden && state.viewingProjectId) renderProjectChats(state.viewingProjectId);
 }
 
-// Группа по дате последнего изменения.
-function dateGroup(ts: number): string {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const t0 = today.getTime();
-  if (ts >= t0) return "Сегодня";
-  if (ts >= t0 - 86_400_000) return "Вчера";
-  return "Ранее";
+// Шкала времени списка диалогов: полоса «от какого момента» и её подпись.
+type DateBand = { from: number; label: string };
+
+// Границы шкалы — локальные полуночи N суток назад: диалог вчерашнего вечера
+// попадает во «Вчера» и утром, и в обед, а не по счётчику «24 часа назад».
+// Сутки отматываем через setDate, а не вычитанием миллисекунд: при переходе на
+// летнее время в сутках не 24 часа и граница уехала бы на час.
+function dateScale(): DateBand[] {
+  const midnightDaysAgo = (days: number) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - days);
+    return d.getTime();
+  };
+  return [
+    { from: midnightDaysAgo(0), label: "Сегодня" },
+    { from: midnightDaysAgo(1), label: "Вчера" },
+    { from: midnightDaysAgo(7), label: "На этой неделе" },
+    { from: midnightDaysAgo(30), label: "В этом месяце" },
+  ];
+}
+
+// Группа по дате последнего изменения. Шкалу передаём снаружи: она считается
+// один раз на отрисовку — иначе список, начатый за миг до полуночи, получил бы
+// две разные группы «Сегодня».
+function dateGroup(ts: number, scale: DateBand[]): string {
+  return scale.find((band) => ts >= band.from)?.label ?? "Ранее";
 }
 
 const ICON_CHAT =
@@ -102,7 +153,10 @@ function renderConvList() {
   const f = convFilter.trim().toLowerCase();
   const items = convMetas
     .filter((m) => !m.project_id) // только вне проектов
-    .filter((m) => !f || (m.title || "").toLowerCase().includes(f));
+    .filter((m) => !f || (m.title || "").toLowerCase().includes(f))
+    // Группы идут сверху вниз от свежих к старым, поэтому порядок обязан быть
+    // строго убывающим: иначе одна и та же подпись («Вчера») встретилась бы дважды.
+    .sort((a, b) => b.updated_at - a.updated_at);
 
   // Пустой список не должен выглядеть поломкой: у первого запуска — подсказка,
   // у поиска без результатов — честное «ничего не найдено».
@@ -116,9 +170,12 @@ function renderConvList() {
     return;
   }
 
+  // Подпись группы добавляется вместе с ПЕРВЫМ её чатом, поэтому после поиска
+  // не остаётся заголовков без содержимого: пустая группа просто не встречается.
+  const scale = dateScale();
   let lastGroup = "";
   for (const m of items) {
-    const group = dateGroup(m.updated_at);
+    const group = dateGroup(m.updated_at, scale);
     if (group !== lastGroup) {
       const lbl = document.createElement("div");
       lbl.className = "conv-label";
@@ -201,17 +258,24 @@ export function updateChatContextChip() {
   }
 }
 
+// Поколение открытия: быстрые клики по списку запускают параллельные
+// load_conversation, применяем только результат последнего клика — иначе
+// победителя определяла бы скорость чтения с диска, а не пользователь.
+let openGen = 0;
+
 // Открывает диалог из файла в ленту. Восстанавливает и проект чата (для RAG/инструкций).
 export async function openConversation(id: string) {
   if (state.streaming) stop();
   showChatView(); // вышли из настроек/экрана проекта — показываем ленту
+  const my = ++openGen;
   let conv: Conversation;
   try {
     conv = await invoke<Conversation>("load_conversation", { id });
   } catch (e) {
-    addError(`Не удалось открыть диалог: ${e}`);
+    if (my === openGen) addError(`Не удалось открыть диалог: ${humanError(e)}`);
     return;
   }
+  if (my !== openGen) return; // пока читали файл, пользователь выбрал другой диалог
   state.currentId = conv.id;
   state.currentProjectId = conv.project_id ?? null;
   history.length = 0;
@@ -228,6 +292,7 @@ export async function openConversation(id: string) {
 export function newDialog(projectId: string | null = null) {
   if (state.streaming) stop();
   showChatView(); // вышли из настроек/экрана проекта — показываем ленту
+  openGen++; // недогруженное открытие старого диалога не должно перекрыть новый чат
   state.currentId = crypto.randomUUID();
   state.currentProjectId = projectId;
   history.length = 0;
@@ -243,10 +308,15 @@ export function newDialog(projectId: string | null = null) {
 // Удаление диалога (с подтверждением — потеря данных необратима).
 export async function deleteConversation(id: string) {
   if (!(await confirmModal("Удалить этот диалог? Действие необратимо."))) return;
+  // Помечаем ДО удаления файла и дожидаемся очереди записей: автосейв идущей
+  // генерации иначе мог бы записать файл заново уже после удаления.
+  deletedIds.add(id);
+  await saveChain.catch(() => {});
   try {
     await invoke("delete_conversation", { id });
   } catch (e) {
-    addError(`Не удалось удалить диалог: ${e}`);
+    deletedIds.delete(id); // файл не удалён — записи по этому id снова разрешены
+    addError(`Не удалось удалить диалог: ${humanError(e)}`);
     return;
   }
   if (id === state.currentId) {
@@ -266,10 +336,16 @@ async function clearAllConversations() {
     ))
   )
     return;
+  // Текущий диалог мог стримиться: помечаем его удалённым и дожидаемся очереди
+  // записей, чтобы дочистка «Стопа» не воскресила один файл после очистки всех.
+  const oldId = state.currentId;
+  if (oldId) deletedIds.add(oldId);
+  await saveChain.catch(() => {});
   try {
     await invoke("clear_conversations");
   } catch (e) {
-    addError(`Не удалось очистить диалоги: ${e}`);
+    if (oldId) deletedIds.delete(oldId);
+    addError(`Не удалось очистить диалоги: ${humanError(e)}`);
     return;
   }
   newDialog(); // начинаем с чистого листа

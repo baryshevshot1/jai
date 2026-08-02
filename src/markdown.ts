@@ -8,6 +8,7 @@ import "highlight.js/styles/atom-one-dark.css";
 import MarkdownIt from "markdown-it";
 import texmath from "markdown-it-texmath";
 import katex from "katex";
+import DOMPurify from "dompurify";
 // highlight.js: ядро + ЯВНЫЙ набор языков вместо lib/common (~40 языков — лишний
 // объём). Набор — под делового ассистента с навыком кода (плюс 1С для российского
 // бизнеса). Неизвестный язык не проблема: блок выводится экранированным текстом.
@@ -98,6 +99,44 @@ md.use(texmath, {
   katexOptions: { throwOnError: false },
 });
 
+// Каждой ссылке — target="_blank" + rel: такой якорь перехватывает init-скрипт
+// плагина opener и открывает ссылку в системном браузере. Без target обычный клик
+// навигировал бы САМО окно приложения на внешний сайт (без кнопки «назад»).
+// Вторая линия — делегированный обработчик кликов в chat.ts (только http/https).
+const defaultLinkOpen =
+  md.renderer.rules.link_open ??
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet("target", "_blank");
+  tokens[idx].attrSet("rel", "noopener noreferrer");
+  return defaultLinkOpen(tokens, idx, options, env, self);
+};
+
+// Страховка перед innerHTML: html:false и экранирование делают цепочку чистой, но
+// она держится на корректности четырёх сторонних библиотек. DOMPurify отсекает всё
+// исполняемое даже при регрессии в markdown-it/KaTeX/highlight.js.
+const SANITIZE_CONFIG = {
+  // KaTeX (MathML-ветка): semantics/annotation DOMPurify знает, но по умолчанию
+  // запрещает — без них формула теряет текстовое представление (скринридер, копирование).
+  ADD_TAGS: ["semantics", "annotation"],
+  // target по умолчанию вырезается, а на target="_blank" держится открытие ссылок
+  // в системном браузере (см. правило link_open выше).
+  ADD_ATTR: ["target"],
+};
+
+// Схемы адресов ограничиваем точечно, на самих ссылочных атрибутах. Через
+// ALLOWED_URI_REGEXP этого делать НЕЛЬЗЯ: DOMPurify гоняет тот же шаблон по всем
+// атрибутам подряд, и вместе с javascript: осыпались бы target/rel и разметка KaTeX
+// (viewBox, preserveAspectRatio, d у SVG корней и скобок — формулы поехали бы).
+const URI_ATTRS = ["href", "src", "xlink:href"];
+const SAFE_URI = /^(?:https?:|mailto:)/i;
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  for (const attr of URI_ATTRS) {
+    const value = node.getAttribute(attr);
+    if (value !== null && !SAFE_URI.test(value.trim())) node.removeAttribute(attr);
+  }
+});
+
 export function renderMarkdown(text: string): string {
-  return md.render(text);
+  return DOMPurify.sanitize(md.render(text), SANITIZE_CONFIG);
 }
