@@ -17,6 +17,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Голосовой ввод собирается по умолчанию, но его можно отключить: whisper.cpp
+# компилируется из исходников (нужен cmake и C++-тулчейн), и для быстрой проверки
+# логики это лишние минуты. Релиз собирается со включённым.
+default = ["voice"]
+voice = ["dep:whisper-rs", "dep:cpal", "dep:rubato"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -34,6 +41,19 @@ sysinfo = "0.33"
 # zip: только deflate (miniz_oxide), чтобы не тянуть C-крейты bzip2/zstd.
 pdf-extract = "0.12"
 quick-xml = "0.41"
+
+# ── Голосовой ввод ───────────────────────────────────────────────────────────
+# whisper-rs линкуется СТАТИЧЕСКИ (никаких библиотек рядом с приложением) и ничего
+# не скачивает при сборке — для коробочной поставки это решающее преимущество перед
+# sherpa-onnx, который кладёт рядом .so/.dll и требует настройки путей загрузки.
+# default-features = false: не тянем CUDA/Metal — распознавание считается на
+# процессоре, чтобы не отбирать видеопамять у языковой модели.
+whisper-rs = { version = "0.16", default-features = false, optional = true }
+# Запись с микрофона в самом Rust: getUserMedia в webview на Linux (WebKitGTK)
+# ненадёжен, а звук нужен на всех трёх системах одинаково.
+cpal = { version = "0.18", optional = true }
+# Микрофоны отдают 44.1/48 кГц, распознаванию нужно ровно 16 кГц моно.
+rubato = { version = "0.16", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
 # Обновления приложения: онлайн-проверка выпусков GitHub (только по явной кнопке

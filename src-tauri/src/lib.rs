@@ -19,6 +19,7 @@ mod projects; // Проекты: группировка чатов + своя б
 mod provision; // Поставка моделей: импорт с флешки/диска, оценка посильности, поиск носителей
 mod settings; // Настройки приложения и офлайн-пути движка
 mod tools; // Онлайн-слой (агентный режим): исходящий клиент + инструменты (веб-поиск)
+mod voice; // Голосовой ввод: запись с микрофона и распознавание речи
 mod update; // Обновление приложения с диска (офлайн-путь)
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,6 +156,11 @@ pub fn run() {
         .manage(settings::SettingsLock(std::sync::Mutex::new(())))
         .manage(projects::ProjectsLock(std::sync::Mutex::new(())))
         .manage(engine::EngineState::new())
+        .setup(|_app| {
+            // Присмотр за памятью распознавателя речи: выгружает модель по простою.
+            voice::spawn_idle_watch();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             chat::chat_stream,
             agent::agentic_chat,
@@ -197,6 +203,9 @@ pub fn run() {
             settings::set_models_dir,
             settings::clear_engine_overrides,
             settings::reload_engine,
+            voice::voice_available,
+            voice::voice_start,
+            voice::voice_stop,
             update::install_update_from_disk
         ])
         .build(tauri::generate_context!())
