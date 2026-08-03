@@ -1849,3 +1849,68 @@ input:focus-visible,
   .settings-head { padding: var(--s3); }
   .project-name-input { font-size: var(--t-base); }
 }
+
+/* ── Плашка отказа старта ────────────────────────────────────────────────────
+   Появляется, когда какой-то модуль не поднялся. Раньше такой отказ был НЕВИДИМ:
+   интерфейс просто приезжал без части элементов, и разницу между «этой функции нет»
+   и «эта функция сломалась» пользователь установить не мог. Плашку намеренно
+   трудно не заметить — она про то, что приложению нужен человек. */
+.boot-error {
+  position: fixed; z-index: 90; left: 50%; transform: translateX(-50%);
+  bottom: var(--s4); width: min(720px, calc(100vw - 2 * var(--s4)));
+  padding: var(--s3) var(--s4); border-radius: var(--r-lg);
+  background: var(--danger-soft); color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  box-shadow: var(--shadow); font-size: var(--t-sm); line-height: 1.5;
+}
+.boot-error__title { font-weight: 600; margin-bottom: var(--s2); }
+.boot-error__list { margin: 0 0 var(--s2); padding-left: 1.2em; }
+.boot-error__list li { margin-bottom: 2px; }
+/* Путь к журналу — длинный и его переписывают в письмо: даём выделять и переносить. */
+.boot-error__hint { color: var(--text); opacity: .85; user-select: text; overflow-wrap: anywhere; }
+.boot-error__close {
+  margin-top: var(--s3); padding: 6px 14px; border-radius: var(--r-sm);
+  border: 1px solid currentColor; background: transparent; color: inherit;
+  font: inherit; cursor: pointer;
+}
+.boot-error__close:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* ── Технические сведения на «Проверке системы» ──────────────────────────────
+   Свёрнуты по умолчанию: вкус заказчика — техдетали не прятать, но и не совать
+   в глаза; их место в иерархии ниже, а не за пределами экрана. */
+.diag-tech { margin-top: var(--s4); border-top: 1px solid var(--border); padding-top: var(--s3); }
+.diag-tech__summary {
+  cursor: pointer; color: var(--muted); font-size: var(--t-sm);
+  list-style: none; user-select: none;
+}
+.diag-tech__summary::-webkit-details-marker { display: none; }
+.diag-tech__summary::before { content: "▸ "; }
+.diag-tech[open] > .diag-tech__summary::before { content: "▾ "; }
+.diag-tech__summary:hover { color: var(--text); }
+.diag-tech__grid {
+  display: grid; grid-template-columns: max-content 1fr; gap: 2px var(--s3);
+  margin: var(--s3) 0 0; font-size: var(--t-sm);
+}
+.diag-tech__grid dt { color: var(--muted); }
+/* Пути и хэши переписывают в письмо — даём выделять и переносить. */
+.diag-tech__grid dd { margin: 0; font-family: var(--font-mono); font-size: var(--t-xs);
+  user-select: text; overflow-wrap: anywhere; }
+.diag-tech__head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s3); margin-top: var(--s4);
+}
+.diag-tech__title { margin: 0; font-size: var(--t-base); font-weight: 600; }
+.diag-tech__path {
+  margin: var(--s1) 0 var(--s2); color: var(--muted); font-size: var(--t-xs);
+  font-family: var(--font-mono); user-select: text; overflow-wrap: anywhere;
+}
+.journal-row {
+  display: grid; grid-template-columns: max-content max-content 1fr; gap: var(--s2);
+  padding: 3px 0; font-size: var(--t-xs); border-bottom: 1px solid var(--border);
+}
+/* --muted, а не --faint: на тексте --faint даёт контраст ~2.2:1 — см. шапку файла. */
+.journal-row__time { color: var(--muted); font-family: var(--font-mono); }
+.journal-row__src { color: var(--muted); }
+.journal-row__msg { user-select: text; overflow-wrap: anywhere; }
+.journal-row--warn .journal-row__msg { color: var(--amber-text); }
+.journal-row--error .journal-row__msg { color: var(--danger); }

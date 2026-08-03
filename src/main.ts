@@ -16,6 +16,7 @@ import "@fontsource/fraunces/600.css";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
 
+import { installErrorReporting, report, runBoot, showBootFailure } from "./boot";
 import { initDom, installEmbedBtn } from "./dom";
 import { setBootStep, setComposerEnabled } from "./ui";
 import { wireChat } from "./chat";
@@ -44,31 +45,55 @@ import { initVoice } from "./voice";
 import { maybeOfferWizard, wireWizard } from "./wizard";
 
 window.addEventListener("DOMContentLoaded", async () => {
-  initDom(); // реестр элементов — строго первым
-  initDocContexts(); // контексты документов (сайдбар/проект) — из готовых рефов
+  installErrorReporting(); // до всего: ошибки самого старта тоже должны попасть в журнал
+  report("info", "старт", "инициализация окна");
 
-  // Обработчики модулей (каждый навешивает свои).
-  wireChat();
-  wireAttachments();
-  wireDocuments();
-  wireModels();
-  wireConversations();
-  wireProjects();
-  wireSettings();
-  wireWizard();
-  // Композиция поверх слоёв: documents не импортирует models, поэтому обновление
-  // списка моделей после успешной установки bge-m3 делает точка сборки.
-  installEmbedBtn.addEventListener("click", async () => {
-    if ((await installEmbeddingModel()) === "done") await loadModels();
-  });
+  // Реестр элементов — строго первым и БЕЗ изоляции: если разметка и реестр
+  // разошлись, дальше идти некуда, и честнее упасть с внятной плашкой, чем
+  // возводить интерфейс поверх пустоты.
+  try {
+    initDom();
+  } catch (e) {
+    await showBootFailure([
+      { name: "разметка окна", error: e instanceof Error ? e.message : String(e) },
+    ]);
+    report("error", "старт", `реестр элементов не собрался: ${e}`);
+    return;
+  }
 
-  initTheme(); // применяем сохранённую/системную тему как можно раньше
-  initThinking(); // восстанавливаем тумблер «Размышления» из настроек (+миграция)
-  await initGentle(); // щадящий режим — ДО светофора железа (авто-решение учитывает выбор)
-  await initModelChoice(); // «Автоматически» или ручной выбор — ДО подбора модели ниже
-  initOnline(); // восстанавливаем онлайн-режим и настройки веб-поиска (по умолчанию офлайн)
-  initVoice(); // кнопка диктовки — появится, только если стоит модель распознавания
-  initSidebar(); // восстанавливаем ширину и состояние левой панели
+  // Дальше — каждый модуль в своей изоляции. Раньше это была одна цепочка, и
+  // исключение в любом звене отменяло все следующие: интерфейс приезжал наполовину,
+  // а место отказа приходилось угадывать.
+  const failures = await runBoot([
+    { name: "контексты документов", run: initDocContexts },
+    { name: "чат", run: wireChat },
+    { name: "вложения", run: wireAttachments },
+    { name: "документы", run: wireDocuments },
+    { name: "модели", run: wireModels },
+    { name: "история диалогов", run: wireConversations },
+    { name: "проекты", run: wireProjects },
+    { name: "настройки", run: wireSettings },
+    { name: "мастер установки", run: wireWizard },
+    {
+      // Композиция поверх слоёв: documents не импортирует models, поэтому обновление
+      // списка моделей после успешной установки bge-m3 делает точка сборки.
+      name: "связка «модель документов»",
+      run: () =>
+        installEmbedBtn.addEventListener("click", async () => {
+          if ((await installEmbeddingModel()) === "done") await loadModels();
+        }),
+    },
+    { name: "тема оформления", run: initTheme },
+    { name: "тумблер «Размышления»", run: initThinking },
+    // Щадящий режим — ДО светофора железа (авто-решение учитывает выбор),
+    // выбор модели — ДО подбора модели ниже. Порядок значим, изоляция его не меняет.
+    { name: "щадящий режим", run: initGentle },
+    { name: "выбор модели", run: initModelChoice },
+    { name: "онлайн-режим", run: initOnline },
+    { name: "голосовой ввод", run: initVoice },
+    { name: "боковая панель", run: initSidebar },
+  ]);
+  await showBootFailure(failures);
 
   setComposerEnabled(false); // включим, когда загрузится список моделей
   await refreshProjects(); // список проектов в боковой панели

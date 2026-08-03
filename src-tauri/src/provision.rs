@@ -486,8 +486,14 @@ fn copy_file_chunked(
     progress: &mut dyn FnMut(u64, u64, &str, bool),
 ) -> Result<bool, String> {
     use std::io::{Read, Write};
+    // Суффикс НЕ «.part» — он занят незавершённой ЗАГРУЗКОЙ из интернета
+    // (download.rs), которая после обрыва хранит там уже скачанные сотни мегабайт.
+    // Совпадение имён означало бы: пользователь качал 400 МБ, интернет пропал, он
+    // принёс флешку — и неудачный импорт (отмена, битый файл на носителе, ошибка
+    // чтения) молча стирал бы всю загрузку вместе со своим мусором. Два разных
+    // процесса — два разных черновика.
     let mut part = to.as_os_str().to_os_string();
-    part.push(".part");
+    part.push(".copy-part");
     let part = PathBuf::from(part);
     let _ = std::fs::remove_file(&part); // остаток прежней оборванной попытки
 
@@ -981,6 +987,39 @@ mod tests {
     }
 
     // Обратная сторона той же проверки: сумма сошлась — файл на месте и целый.
+    /// Импорт с флешки не имеет права трогать незавершённую ЗАГРУЗКУ из интернета:
+    /// у неё тот же целевой файл, и раньше её черновик назывался так же. Сценарий:
+    /// скачали 400 МБ, интернет пропал, принесли флешку — а на ней битый файл.
+    /// Импорт честно отказывает, но 400 МБ загрузки при этом пропадать не должны.
+    #[test]
+    fn failed_import_keeps_download_progress() {
+        let dir = tmp("import-vs-download");
+        let dest = dir.join("ggml-small.bin");
+        // Незавершённая загрузка из интернета — ровно там, где её держит download.rs.
+        let download_part = dir.join("ggml-small.bin.part");
+        std::fs::write(&download_part, vec![7u8; 4096]).unwrap();
+
+        // Источник с неверной контрольной суммой — импорт обязан отказать.
+        let src = dir.join("source.bin");
+        std::fs::write(&src, "не та модель".as_bytes()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut noop = |_: u64, _: u64, _: &str, _: bool| {};
+        let err = copy_model_file(&src, &dest, &"0".repeat(64), &cancel, &mut noop).unwrap_err();
+        assert!(!err.is_empty(), "импорт битого файла должен отказать");
+
+        assert!(
+            download_part.is_file(),
+            "неудачный импорт стёр незавершённую загрузку — 400 МБ пропали бы"
+        );
+        assert_eq!(
+            std::fs::read(&download_part).unwrap().len(),
+            4096,
+            "загрузка повреждена импортом"
+        );
+        assert!(!dest.exists(), "битый файл не должен оказаться установленной моделью");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn voice_model_copies_when_checksum_matches() {
         let src = tmp("sttok");

@@ -207,3 +207,55 @@ describe("кнопка диктовки", () => {
     expect(document.querySelector(".err")?.textContent).toBe("Микрофон не найден.");
   });
 });
+
+describe("отмена диктовки и повторная инициализация", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  // Раньше начатую диктовку нельзя было прекратить: единственным выходом было
+  // договорить её до конца и стирать распознанное руками.
+  it("Escape закрывает микрофон и НЕ вписывает сказанное", async () => {
+    const { voiceBtn, voiceStateEl, inputEl } = await setup();
+    inputEl.value = "уже набрано";
+    press(voiceBtn);
+    await flush();
+    expect(voiceBtn.classList.contains("is-recording")).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    await flush();
+
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "voice_cancel")).toBe(true);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "voice_stop")).toBe(false);
+    expect(inputEl.value, "отменённая диктовка не должна ничего дописывать").toBe("уже набрано");
+    expect(voiceBtn.classList.contains("is-recording")).toBe(false);
+    expect(voiceStateEl.hidden).toBe(true);
+  });
+
+  it("Escape вне записи ничего не отменяет", async () => {
+    await setup();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+    await flush();
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === "voice_cancel")).toBe(false);
+  });
+
+  // initVoice зовут второй раз после установки модели — чтобы кнопка появилась без
+  // перезапуска приложения. Обработчики висят на ОКНЕ, и снять их некому.
+  //
+  // Считаем именно РЕГИСТРАЦИИ, а не вызовы команд: через команды это не видно.
+  // Первая версия теста нажимала кнопку и проверяла, что voice_start ушёл один раз,
+  // — и была зелёной даже с выключенной защитой, потому что повторный запуск и так
+  // отсекается этапом диктовки. Тест, не воспроизводящий отказ, — не доказательство.
+  it("повторная инициализация не навешивает обработчики окна заново", async () => {
+    await setup();
+    const voice = await import("./voice");
+
+    const spy = vi.spyOn(window, "addEventListener");
+    await voice.initVoice(); // как после установки модели из настроек
+    await voice.initVoice();
+    const again = spy.mock.calls.map(([type]) => type);
+    spy.mockRestore();
+
+    expect(again, `обработчики окна навешаны повторно: ${again.join(", ")}`).toEqual([]);
+  });
+});

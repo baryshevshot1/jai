@@ -25,6 +25,10 @@ let phase: Phase = "idle";
 // «остановить» до «начать» и ответит отказом на пустом месте.
 let starting: Promise<boolean> | null = null;
 
+// Обработчики уже навешаны. Нужен потому, что initVoice зовут повторно — после
+// установки модели, чтобы кнопка появилась без перезапуска приложения.
+let wired = false;
+
 const IDLE_TITLE = "Продиктовать вопрос: нажмите и удерживайте, говорите, отпустите";
 const REC_TITLE = "Идёт запись — отпустите, чтобы распознать";
 
@@ -42,6 +46,13 @@ export async function initVoice(): Promise<void> {
   if (!ready) return; // кнопки нет — и обработчики ни к чему
 
   render();
+  // Второй раз сюда заходят после установки модели из настроек — чтобы кнопка
+  // появилась без перезапуска приложения. Обработчики при этом навешивать заново
+  // нельзя: они на окне, снять их некому, и каждая установка удваивала бы реакцию
+  // на одно нажатие.
+  if (wired) return;
+  wired = true;
+
   followComposerState();
 
   voiceBtn.addEventListener("pointerdown", (e) => {
@@ -67,8 +78,22 @@ export async function initVoice(): Promise<void> {
   window.addEventListener("keyup", (e) => {
     if (e.key === " " || e.key === "Enter") void stopDictation();
   });
+  // Escape — «передумал»: микрофон закрываем, сказанное выбрасываем. Без этого
+  // единственным способом прекратить начатую диктовку было договорить её до конца
+  // и потом стирать распознанное руками.
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && phase === "recording") {
+      e.preventDefault();
+      void cancelDictation();
+    }
+  });
   // Переключение на другое окно (Alt+Tab) не доставит ни pointerup, ни keyup —
   // закрываем запись сами: открытый в фоне микрофон недопустим.
+  //
+  // Именно «стоп», а не отмена: уход из окна — намерение неявное (мог мигнуть
+  // системный уведомитель), и выбрасывать за него уже сказанное значит молча терять
+  // работу. Текст попадёт в поле, стереть его — одно движение. Выбрасывает только
+  // Escape, потому что это явное «передумал».
   window.addEventListener("blur", () => void stopDictation());
 }
 
@@ -123,6 +148,23 @@ async function stopDictation(): Promise<void> {
   } finally {
     phase = "idle";
     render();
+  }
+}
+
+// Отмена: закрыть микрофон и выбросить записанное. Дожидаемся обещания запуска —
+// иначе отмена может прийти раньше, чем движок успел открыть микрофон, и запись
+// осталась бы включённой уже после того, как её отменили.
+async function cancelDictation(): Promise<void> {
+  if (phase !== "recording") return;
+  phase = "idle";
+  render();
+  const pending = starting;
+  starting = null;
+  try {
+    if (pending) await pending;
+    await invoke("voice_cancel");
+  } catch {
+    /* нечего отменять либо сборка без голоса — состояние уже сброшено */
   }
 }
 

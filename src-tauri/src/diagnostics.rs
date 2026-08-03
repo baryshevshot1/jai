@@ -11,6 +11,159 @@ use crate::docstore;
 use crate::models::model_states;
 use crate::HTTP;
 
+// ── Штамп сборки: что именно сейчас запущено ─────────────────────────────────
+//
+// Появился после сессии, где симптомы двух разных бандлов сравнивались как симптомы
+// одного. Пока «какая это сборка» — вопрос к памяти разработчика, любой отчёт об
+// отказе стоит ровно столько же, сколько эта память.
+
+/// Что известно про запущенный бинарник. Собирается из штампа build.rs и из
+/// фактического состояния машины — не из предположений.
+#[derive(Serialize)]
+pub(crate) struct BuildInfo {
+    version: String,
+    git_sha: String,
+    git_dirty: String,
+    profile: String,
+    target: String,
+    /// Собранные cargo-фичи: голосовой ввод можно выключить, и «кнопки нет» тогда
+    /// не поломка, а свойство сборки. Без этой строки одно принимают за другое.
+    features: Vec<String>,
+    /// Команды, реально зарегистрированные в этом бинарнике.
+    commands: Vec<String>,
+    os: String,
+    arch: String,
+    /// Модель распознавания: где ждём, что там лежит, и какой файл считаем верным.
+    voice_model_path: String,
+    voice_model_present: bool,
+    voice_model_partial_bytes: u64,
+    voice_model_expected_bytes: u64,
+    voice_model_sha256: String,
+    log_path: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) fn build_info(app: tauri::AppHandle) -> BuildInfo {
+    // cfg!(), а не #[cfg] с push: значение вычисляется на этапе компиляции так же,
+    // но список остаётся одним выражением — добавить фичу и забыть про строку нельзя.
+    let features: Vec<String> = [
+        cfg!(feature = "voice").then_some("voice"),
+        cfg!(feature = "devtools").then_some("devtools"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_string)
+    .collect();
+
+    let model = crate::voice::model_path(&app).ok();
+    let present = model.as_ref().map(|p| p.is_file()).unwrap_or(false);
+    let partial = model
+        .as_ref()
+        .map(|p| {
+            let mut part = p.as_os_str().to_os_string();
+            part.push(".part");
+            std::fs::metadata(std::path::PathBuf::from(part)).map(|m| m.len()).unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: env!("JAI_GIT_SHA").to_string(),
+        git_dirty: env!("JAI_GIT_DIRTY").to_string(),
+        profile: env!("JAI_BUILD_PROFILE").to_string(),
+        target: env!("JAI_BUILD_TARGET").to_string(),
+        features,
+        commands: crate::COMMAND_NAMES.iter().map(|s| s.to_string()).collect(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        voice_model_path: model
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        voice_model_present: present,
+        voice_model_partial_bytes: if present { 0 } else { partial },
+        voice_model_expected_bytes: crate::voice::MODEL_BYTES,
+        voice_model_sha256: crate::voice::MODEL_SHA256.to_string(),
+        log_path: crate::journal::journal_path(),
+    }
+}
+
+/// Самопроверка собранного приложения: `jai --self-check`.
+///
+/// Отвечает на вопрос, который иначе задаётся человеку и человеком же угадывается:
+/// «что это за сборка и жива ли она». Печатает JSON и завершает процесс — ненулевым
+/// кодом, если что-то из необходимого недоступно. Этим пользуется гейт (smoke-тест
+/// бандла: собрали → запустили → прочитали код возврата) и этим же можно проверить
+/// установку у клиента, не открывая окна.
+///
+/// Чего она НЕ проверяет и не может: что окно нарисовалось и что интерфейс жив. Это
+/// закрывается только глазами — см. чек-лист ручной проверки в docs/RELEASE.md.
+pub(crate) fn self_check(app: &tauri::AppHandle) -> i32 {
+    let info = build_info(app.clone());
+    let mut problems: Vec<String> = Vec::new();
+
+    // Каталоги, без которых приложение не сможет ни хранить, ни жаловаться.
+    let mut dirs = serde_json::Map::new();
+    for (name, dir) in [
+        ("data", app.path().app_data_dir()),
+        ("config", app.path().app_config_dir()),
+        ("log", app.path().app_log_dir()),
+    ] {
+        match dir {
+            Ok(d) => {
+                let writable = std::fs::create_dir_all(&d).is_ok();
+                if !writable {
+                    problems.push(format!("каталог «{name}» недоступен для записи: {}", d.display()));
+                }
+                dirs.insert(name.to_string(), serde_json::json!(d.to_string_lossy()));
+            }
+            Err(e) => {
+                problems.push(format!("каталог «{name}» не определён: {e}"));
+            }
+        }
+    }
+
+    if info.commands.is_empty() {
+        problems.push("в сборке не зарегистрировано ни одной команды".into());
+    }
+    // Голос — фича, и его отсутствие НЕ ошибка: сборка без него честна и работоспособна.
+    // Но знать об этом надо явно, а не выяснять по отсутствующей кнопке.
+    let voice_built = info.features.iter().any(|f| f == "voice");
+
+    let report = serde_json::json!({
+        "ok": problems.is_empty(),
+        "build": {
+            "version": info.version,
+            "git_sha": info.git_sha,
+            "git_dirty": info.git_dirty,
+            "profile": info.profile,
+            "target": info.target,
+        },
+        "features": info.features,
+        "voice_built": voice_built,
+        "commands": info.commands.len(),
+        "command_names": info.commands,
+        "os": info.os,
+        "arch": info.arch,
+        "dirs": dirs,
+        "voice_model": {
+            "path": info.voice_model_path,
+            "installed": info.voice_model_present,
+            "partial_bytes": info.voice_model_partial_bytes,
+            "expected_bytes": info.voice_model_expected_bytes,
+            "sha256": info.voice_model_sha256,
+        },
+        "log_path": info.log_path,
+        "problems": problems,
+    });
+    println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+    if problems.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
 /// Версия Ollama: GET 127.0.0.1:11434/api/version — мягкая проверка «движок жив».
 /// Таймаут 3 с, чтобы не зависнуть, если порт открыт, но ответа нет. Только localhost.
 #[tauri::command]

@@ -8,11 +8,13 @@ mod chat; // Чат: стриминг ответа Ollama, «щадящий ре
 mod chunk; // Чанкинг (Фаза B): резка текста на фрагменты по границам
 mod diagnostics; // Железо и «проверка системы»: детект ресурсов, самопроверка
 mod docstore; // База документов (Фаза B): векторное хранилище SQLite + sqlite-vec
+mod download; // Докачиваемая загрузка большого файла (проверена на локальном сервере)
 mod documents; // Документы: извлечение текста, индексация в базу, поиск
 mod embed; // Эмбеддинги (Фаза B): bge-m3 через Ollama, батчем
 mod engine; // Операционный слой: управление процессом движка Ollama
 mod error; // Ошибки с кодом причины: интерфейс не разбирает текст сообщений
 mod history; // История диалогов: файлы appDataDir/conversations/<id>.json
+mod journal; // Журнал приложения: файл + stdout + хвост для экрана «Диагностика»
 mod memory; // Память: оценка «поместится ли» и лестница смягчения (S1/S2)
 mod models; // Модели: установка, набор приложения, состояние, обновления
 mod projects; // Проекты: группировка чатов + своя база знаний
@@ -130,6 +132,10 @@ pub(crate) fn validate_id(id: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Флаг читаем ДО поднятия приложения: аргументы командной строки не зависят ни
+    // от окна, ни от плагинов, а сама проверка выполнится в setup, когда уже известны
+    // пути к данным (их считает Tauri, и дублировать этот расчёт нельзя).
+    let self_check = std::env::args().any(|a| a == "--self-check");
     docstore::register_vec(); // зарегистрировать sqlite-vec до открытия любых соединений
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -156,7 +162,18 @@ pub fn run() {
         .manage(settings::SettingsLock(std::sync::Mutex::new(())))
         .manage(projects::ProjectsLock(std::sync::Mutex::new(())))
         .manage(engine::EngineState::new())
-        .setup(|_app| {
+        .setup(move |app| {
+            // Журнал — первым делом: всё, что случится дальше при старте, должно
+            // попасть в файл. Иначе диагностика отказа снова сведётся к просьбе
+            // «пришлите текст из консоли разработчика», которой у клиента нет.
+            journal::init(app.handle());
+            journal::info("старт", format!("jai {} — запуск", env!("CARGO_PKG_VERSION")));
+            // Режим самопроверки: напечатать, что это за сборка и всё ли на месте,
+            // и выйти. Нужен гейту (smoke-тест собранного бандла) и установщику у
+            // клиента — вопрос «а тот ли бинарник запущен» иначе решается памятью.
+            if self_check {
+                std::process::exit(diagnostics::self_check(app.handle()));
+            }
             // Присмотр за памятью распознавателя речи: выгружает модель по простою.
             voice::spawn_idle_watch();
             Ok(())
@@ -206,9 +223,15 @@ pub fn run() {
             voice::voice_available,
             voice::voice_start,
             voice::voice_stop,
+            voice::voice_cancel,
+            voice::voice_model_state,
             voice::voice_model_download,
             provision::import_voice_model,
             provision::find_voice_model_source,
+            journal::journal_log,
+            journal::journal_tail,
+            journal::journal_path,
+            diagnostics::build_info,
             update::install_update_from_disk
         ])
         .build(tauri::generate_context!())
@@ -221,4 +244,95 @@ pub fn run() {
                 engine::stop_if_ours(&state);
             }
         });
+}
+
+// ── Контракт команд: один список, видимый и во время работы ───────────────────
+//
+// Проверка «интерфейс зовёт только то, что зарегистрировано» была, но опиралась на
+// разбор ИСХОДНИКА (tools/check-dom.py). Это отвечало на вопрос «что написано», а
+// вопрос стоял другой: «что попало в бинарник». Здесь список команд существует как
+// данные — его показывает экран «Диагностика» и сверяет `--self-check`, а тест ниже
+// не даёт ему разойтись с generate_handler!.
+pub(crate) const COMMAND_NAMES: &[&str] = &[
+    "chat_stream",
+    "agentic_chat",
+    "get_outbound_log",
+    "clear_outbound_log",
+    "cancel_stream",
+    "pull_model",
+    "cancel_pull",
+    "ensure_engine",
+    "extract_document",
+    "read_image_base64",
+    "index_document",
+    "list_documents",
+    "delete_document",
+    "documents_empty",
+    "search_documents",
+    "document_fragments",
+    "list_models",
+    "model_states",
+    "check_model_updates",
+    "import_models_from_dir",
+    "assess_models",
+    "find_model_sources",
+    "plan_inference",
+    "run_diagnostics",
+    "ollama_version",
+    "embedding_status",
+    "detect_hardware",
+    "list_conversations",
+    "load_conversation",
+    "save_conversation",
+    "delete_conversation",
+    "clear_conversations",
+    "list_projects",
+    "save_project",
+    "delete_project",
+    "get_setting",
+    "set_setting",
+    "set_engine_path",
+    "set_models_dir",
+    "clear_engine_overrides",
+    "reload_engine",
+    "voice_available",
+    "voice_start",
+    "voice_stop",
+    "voice_cancel",
+    "voice_model_state",
+    "voice_model_download",
+    "import_voice_model",
+    "find_voice_model_source",
+    "journal_log",
+    "journal_tail",
+    "journal_path",
+    "build_info",
+    "install_update_from_disk",
+];
+
+#[cfg(test)]
+mod command_contract {
+    /// Список COMMAND_NAMES обязан совпадать с generate_handler! — иначе «Диагностика»
+    /// и `--self-check` рапортовали бы о командах, которых в бинарнике нет (или молчали
+    /// бы о тех, что есть). Сверяем с СОБСТВЕННЫМ исходником: второй список, который
+    /// правят руками, рано или поздно разъезжается с первым — здесь это уронит тест.
+    #[test]
+    fn declared_names_match_generate_handler() {
+        let src = include_str!("lib.rs");
+        let start = src.find("generate_handler![").expect("generate_handler! не найден");
+        let rest = &src[start + "generate_handler![".len()..];
+        let end = rest.find(']').expect("не найдена закрывающая скобка списка команд");
+        let registered: Vec<String> = rest[..end]
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.rsplit("::").next().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            registered,
+            super::COMMAND_NAMES,
+            "COMMAND_NAMES разошёлся с generate_handler!"
+        );
+    }
 }

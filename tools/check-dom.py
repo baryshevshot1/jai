@@ -24,6 +24,7 @@ DYNAMIC = {
     "ui-scale-toggle",
     "voice-model-state",
     "voice-model-install",
+    "voice-model-restart",
     "voice-model-import",
     "voice-model-progress",
     "voice-model-progress-fill",

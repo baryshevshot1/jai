@@ -20,12 +20,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-// Mutex нужен только реализации с распознаванием: без фичи voice модуль сводится
-// к честным отказам, и лишнее не должно висеть мёртвым кодом. Instant же нужен и
-// скачиванию модели, которое работает независимо от фичи.
+// Mutex и Instant нужны только реализации с распознаванием: без фичи voice модуль
+// сводится к честным отказам, и лишнее не должно висеть мёртвым кодом. Duration же
+// нужен и фоновому присмотру за памятью, который есть в обеих сборках.
 #[cfg(feature = "voice")]
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "voice")]
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
@@ -84,7 +86,8 @@ pub(crate) async fn voice_available(app: tauri::AppHandle) -> bool {
 /// Официальный источник модели — репозиторий whisper.cpp на Hugging Face. Ссылка
 /// resolve/main отдаёт перенаправление на CDN раздачи; переходы разрешает и
 /// проверяет изолированный клиент онлайн-слоя, и только по https.
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+pub(crate) const MODEL_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 
 /// sha256 файла ggml-small.bin (он же oid LFS в Hugging Face). Одно значение на оба
 /// пути установки — и для скачанного файла, и для копии с носителя.
@@ -96,12 +99,9 @@ pub(crate) const MODEL_SHA256: &str =
 /// подсунутый по ошибке чужой файл ещё до копирования с флешки.
 pub(crate) const MODEL_BYTES: u64 = 487_601_967;
 
-/// Прогресс шлём не чаще, чем раз в столько байт: каждое событие — сообщение в
-/// окно, мельчить незачем (то же правило, что при импорте с носителя).
-const PROGRESS_STEP: u64 = 8 * 1024 * 1024;
-
-/// Столько подряд без единого байта — честная ошибка вместо вечного «прогресса».
-const DOWNLOAD_STALL: Duration = Duration::from_secs(120);
+/// Запас свободного места сверх самого файла: файловой системе нужно куда-то
+/// положить и `.part`, и переименованный результат, и собственные метаданные.
+const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
 /// Временное имя загрузки: оборванная закачка не должна выглядеть готовой моделью.
 fn part_path(target: &Path) -> PathBuf {
@@ -110,15 +110,58 @@ fn part_path(target: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Свободное место на том диске, куда ляжет файл. None — определить не удалось;
+/// это не повод отказывать в установке, только повод не проверять.
+fn free_space_for(path: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    // Точек монтирования, являющихся префиксом пути, может быть несколько
+    // (`/` и `/Users` на macOS) — нужна самая длинная, она и есть наш диск.
+    disks
+        .list()
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
+/// Что видно интерфейсу про поставку модели: установлена ли, и если нет — сколько
+/// уже скачано. Без второго числа карточка не может честно предложить «Продолжить»
+/// вместо «Установить» и выглядела бы так, будто прогресс потерян.
+#[derive(serde::Serialize)]
+pub(crate) struct VoiceModelState {
+    installed: bool,
+    partial_bytes: u64,
+    total_bytes: u64,
+}
+
+#[tauri::command]
+pub(crate) async fn voice_model_state(app: tauri::AppHandle) -> VoiceModelState {
+    let (installed, partial_bytes) = match model_path(&app) {
+        Ok(target) => (target.is_file(), crate::download::part_len(&part_path(&target))),
+        Err(_) => (false, 0),
+    };
+    VoiceModelState {
+        installed,
+        // Установленная модель не «частично скачана»: остаток .part рядом с готовым
+        // файлом — мусор прошлой попытки, и предлагать его докачать бессмысленно.
+        partial_bytes: if installed { 0 } else { partial_bytes.min(MODEL_BYTES) },
+        total_bytes: MODEL_BYTES,
+    }
+}
+
 /// Опубликовать файл под финальным именем — ТОЛЬКО если контрольная сумма сошлась.
 /// Не сошлась: файл удаляем и говорим человеку, что делать. Модель, не прошедшая
 /// сверку, до распознавания не доходит вовсе.
 fn publish_verified(part: &Path, target: &Path, got: &str) -> AppResult<()> {
     if got != MODEL_SHA256 {
         let _ = std::fs::remove_file(part);
+        // Битую загрузку убираем сразу — значит, и кнопки «Продолжить» после неё не
+        // будет. Поэтому в тексте зовём «Установить», а не «Начать заново»: указывать
+        // человеку на кнопку, которой в этот момент нет, — верный способ его запутать.
         return Err(AppError::unknown(
             "Файл модели распознавания речи получен с ошибкой (контрольная сумма не \
-             сходится). Модель не установлена — повторите установку.",
+             сходится) — скачанное удалено. Нажмите «Установить», чтобы попробовать \
+             ещё раз, или поставьте модель с флешки.",
         ));
     }
     let _ = std::fs::remove_file(target); // Windows: rename поверх существующего не работает
@@ -127,14 +170,50 @@ fn publish_verified(part: &Path, target: &Path, got: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Скачать модель распознавания речи (около 470 МБ) с прогрессом и отменой.
-/// Регистрируется в общем PullState: установка моделей движка и модели
-/// распознавания взаимоисключаемы и отменяются одной командой cancel_pull.
-/// Наружу идём ИЗОЛИРОВАННЫМ клиентом онлайн-слоя (tools::web_client, https), а не
-/// localhost-клиентом Ollama — сетевые пути в проекте не смешиваются.
+/// Посчитать sha256 готового файла потоковым чтением.
+///
+/// Почему не «на лету» при скачивании, как было раньше: хэшер нельзя продолжить
+/// после перезапуска приложения, а докачка обязана переживать и перезапуск тоже.
+/// Чтение 465 МБ с диска — секунды, и это честная цена за то, что прогресс не
+/// теряется. None — отменено пользователем.
+fn digest_file(
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| format!("Не удалось прочитать загруженный файл: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut done: u64 = 0;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let n = f.read(&mut buf).map_err(|e| format!("Сбой чтения при проверке: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        done += n as u64;
+        progress(done);
+    }
+    Ok(Some(crate::provision::hex_digest(hasher)))
+}
+
+/// Скачать модель распознавания речи (около 470 МБ) с докачкой, повторами,
+/// прогрессом и отменой. `restart = true` — начать с нуля, выбросив недокачанное.
+///
+/// Регистрируется в общем PullState: установка моделей движка и модели распознавания
+/// взаимоисключаемы и отменяются одной командой cancel_pull. Наружу идём отдельным
+/// клиентом БОЛЬШИХ загрузок (tools::download_client) — у него нет общего таймаута на
+/// запрос, который прежде убивал эту загрузку на двадцатой секунде всегда и у всех.
+/// Сам ход загрузки — в crate::download, где он покрыт тестами на локальном сервере.
 #[tauri::command]
 pub(crate) async fn voice_model_download(
     app: tauri::AppHandle,
+    restart: bool,
     on_event: Channel<PullEvent>,
     state: tauri::State<'_, PullState>,
 ) -> AppResult<PullOutcome> {
@@ -164,106 +243,88 @@ pub(crate) async fn voice_model_download(
         })?;
     }
     let part = part_path(&target);
-    let _ = std::fs::remove_file(&part); // остаток прежней оборванной попытки
+    if restart {
+        let _ = std::fs::remove_file(&part);
+    }
 
-    let client = crate::tools::web_client()?;
-    // Подключение — с отменой и потолком ожидания: сервер может принять соединение
-    // и замолчать, а занятая регистрация блокировала бы любые установки.
-    let send = tokio::time::timeout(Duration::from_secs(60), client.get(MODEL_URL).send());
-    let mut resp = match crate::with_cancel(send, &my_cancel).await {
-        None => return Ok(PullOutcome::Cancelled), // «Отмена» ещё до ответа сервера
-        Some(Err(_elapsed)) => {
-            return Err(AppError::timeout(
-                "Сервер моделей не ответил — проверьте интернет и повторите \
-                 (либо поставьте модель с флешки).",
-            ))
+    // Место проверяем ДО загрузки: узнать о нехватке после получаса ожидания —
+    // худший момент из возможных.
+    let have = crate::download::part_len(&part);
+    let need = MODEL_BYTES.saturating_sub(have) + SPACE_MARGIN;
+    if let Some(free) = free_space_for(&target) {
+        if free < need {
+            return Err(AppError::unknown(format!(
+                "Не хватает места на диске: нужно ещё {}, свободно {}. Освободите место \
+                 и повторите.",
+                crate::download::mb(need),
+                crate::download::mb(free)
+            )));
         }
-        Some(Ok(r)) => r.map_err(|e| {
-            AppError::unknown(format!(
-                "Не удалось скачать модель распознавания речи (нужен интернет): {e}"
-            ))
-        })?,
+    }
+
+    crate::journal::info(
+        "голос",
+        format!("загрузка модели: уже есть {have} из {MODEL_BYTES} байт, restart={restart}"),
+    );
+
+    let events = on_event.clone();
+    let plan = crate::download::Plan {
+        url: MODEL_URL,
+        part: &part,
+        total: MODEL_BYTES,
+        label: "Скачивание модели распознавания речи",
+        retry_pauses: &crate::download::RETRY_PAUSES,
     };
-    if !resp.status().is_success() {
-        return Err(AppError::unknown(format!(
-            "Сервер моделей вернул ошибку {} — попробуйте позже либо поставьте модель \
-             с флешки.",
-            resp.status()
-        )));
+    let client = crate::tools::download_client()?;
+    let fetched = crate::download::resumable(&client, &plan, &my_cancel, &move |status, done, total| {
+        let _ = events.send(PullEvent::Progress {
+            status: status.to_string(),
+            completed: done,
+            total,
+        });
+    })
+    .await?;
+    if let crate::download::Outcome::Cancelled = fetched {
+        return Ok(PullOutcome::Cancelled);
     }
 
-    let total = resp.content_length().unwrap_or(MODEL_BYTES);
-    let status = "Скачивание модели распознавания речи";
+    // ── Проверка целостности ────────────────────────────────────────────────
+    // Только после неё файл получает имя модели. Неполная или битая загрузка не
+    // должна выглядеть установленной: у клиента без интернета перекачать её нечем,
+    // а сбой всплыл бы при первой диктовке и выглядел бы как поломка приложения.
     let _ = on_event.send(PullEvent::Progress {
-        status: status.to_string(),
+        status: "Проверка целостности".to_string(),
         completed: 0,
-        total,
+        total: MODEL_BYTES,
     });
+    let part_for_hash = part.clone();
+    let cancel_for_hash = my_cancel.clone();
+    let events = on_event.clone();
+    let digest = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = 0u64;
+        digest_file(&part_for_hash, &cancel_for_hash, &mut |done| {
+            if done - last >= crate::download::PROGRESS_STEP {
+                last = done;
+                let _ = events.send(PullEvent::Progress {
+                    status: "Проверка целостности".to_string(),
+                    completed: done,
+                    total: MODEL_BYTES,
+                });
+            }
+        })
+    })
+    .await
+    .map_err(|e| AppError::unknown(format!("Проверка прервана: {e}")))??;
 
-    use std::io::Write;
-    let mut file = std::fs::File::create(&part)
-        .map_err(|e| AppError::unknown(format!("Не удалось записать «{}»: {e}", part.display())))?;
-    let mut hasher = Sha256::new();
-    let mut done: u64 = 0;
-    let mut last_sent: u64 = 0;
-    let mut last_data = Instant::now();
-    // Чанки ждём короткими окнами: отмена срабатывает, ДАЖЕ когда сеть молчит;
-    // затянувшееся молчание — честная ошибка вместо вечной «загрузки».
-    loop {
-        if my_cancel.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            return Ok(PullOutcome::Cancelled);
-        }
-        match tokio::time::timeout(Duration::from_millis(400), resp.chunk()).await {
-            Err(_elapsed) => {
-                if last_data.elapsed() > DOWNLOAD_STALL {
-                    drop(file);
-                    let _ = std::fs::remove_file(&part);
-                    return Err(AppError::timeout(
-                        "Сеть не отвечает — загрузка прервана. Проверьте интернет и \
-                         повторите.",
-                    ));
-                }
-                continue; // окно без данных — перепроверяем отмену
-            }
-            Ok(Ok(Some(chunk))) => {
-                last_data = Instant::now();
-                file.write_all(&chunk).map_err(|e| {
-                    AppError::unknown(format!("Сбой записи на диск (хватает ли места?): {e}"))
-                })?;
-                hasher.update(&chunk);
-                done += chunk.len() as u64;
-                if done - last_sent >= PROGRESS_STEP {
-                    last_sent = done;
-                    let _ = on_event.send(PullEvent::Progress {
-                        status: status.to_string(),
-                        completed: done,
-                        // Сервер мог сообщить длину меньше фактической — прогресс
-                        // не должен «переползать» за 100 %.
-                        total: total.max(done),
-                    });
-                }
-            }
-            Ok(Ok(None)) => break, // поток корректно завершился
-            Ok(Err(e)) => {
-                drop(file);
-                let _ = std::fs::remove_file(&part);
-                return Err(AppError::unknown(format!("Загрузка прервалась: {e}")));
-            }
-        }
-    }
-
-    // fsync до переименования: после сбоя питания под финальным именем не должен
-    // оказаться недописанный файл — он молча сошёл бы за установленную модель.
-    file.sync_all()
-        .map_err(|e| AppError::unknown(format!("Не удалось сохранить модель на диск: {e}")))?;
-    drop(file);
-    publish_verified(&part, &target, &crate::provision::hex_digest(hasher))?;
+    let Some(digest) = digest else {
+        return Ok(PullOutcome::Cancelled);
+    };
+    publish_verified(&part, &target, &digest)?;
+    crate::journal::info("голос", "модель распознавания установлена, сумма сошлась");
     let _ = on_event.send(PullEvent::Progress {
         status: "Готово".to_string(),
-        completed: done,
-        total: done,
+        completed: MODEL_BYTES,
+        total: MODEL_BYTES,
     });
     Ok(PullOutcome::Done)
 }
@@ -282,6 +343,9 @@ mod imp {
     pub(super) fn stop(_app: &tauri::AppHandle) -> AppResult<String> {
         Err(AppError::unknown("Голосовой ввод не собран в этой версии приложения."))
     }
+    /// Отмена без записи ничего не делает и НЕ считается ошибкой: интерфейс зовёт её
+    /// «на всякий случай» (ушли из окна, нажали Esc), и получать за это отказ незачем.
+    pub(super) fn cancel() {}
     pub(super) fn release_idle() {}
 }
 
@@ -544,6 +608,23 @@ mod imp {
         Ok(text.trim().to_string())
     }
 
+    /// Закрыть микрофон и ВЫБРОСИТЬ записанное. Отдельно от stop(), потому что
+    /// «передумал» и «сказал» — разные намерения: распознавать выброшенное значит
+    /// вписать в поле ввода то, чего человек говорить не собирался.
+    ///
+    /// Молчит, если записи не было: отмену интерфейс шлёт и вслепую (уход из окна,
+    /// Esc), и отказ на это был бы шумом на ровном месте.
+    pub(super) fn cancel() {
+        let Some(rec) = RECORDING.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        let _ = rec.stop_tx.send(());
+        // Дожидаемся ответа потока-владельца: он закрывает микрофон и отдаёт буфер.
+        // Ждать обязательно — иначе следующая запись начнётся, пока устройство ещё
+        // открыто предыдущей, и получит отказ на пустом месте.
+        let _ = rec.done_rx.recv();
+    }
+
     /// Выгрузить распознаватель, если им давно не пользовались. Зовётся из фонового
     /// присмотра: держать сотни мегабайт «на всякий случай» — ровно та беспечность,
     /// из-за которой у пользователей и переполнялась память.
@@ -571,6 +652,13 @@ pub(crate) async fn voice_stop(app: tauri::AppHandle) -> AppResult<String> {
     tauri::async_runtime::spawn_blocking(move || imp::stop(&app))
         .await
         .map_err(|e| AppError::unknown(format!("Сбой распознавания: {e}")))?
+}
+
+/// Отменить запись: закрыть микрофон и выбросить записанное, ничего не распознавая.
+/// Ошибок не возвращает — отмена без записи это не ошибка, а обычное дело.
+#[tauri::command]
+pub(crate) async fn voice_cancel() {
+    let _ = tauri::async_runtime::spawn_blocking(imp::cancel).await;
 }
 
 /// Фоновый присмотр за памятью распознавателя. Запускается один раз при старте
@@ -631,6 +719,39 @@ mod tests {
         assert!(target.is_file(), "проверенный файл переименован в модель");
         assert!(!part.exists(), "временного файла не остаётся");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Те же ссылка, размер и сумма заданы ВТОРОЙ раз — в сборщике флешки
+    /// (tools/make-usb.sh), который кладёт модель на носитель. Разъедутся — флешка
+    /// соберётся с файлом, который приложение отвергнет по контрольной сумме уже у
+    /// клиента, где перекачать нечем. Держать два списка нельзя, а поскольку один из
+    /// них shell, а другой Rust, — сверяем их тестом.
+    #[test]
+    fn usb_builder_and_app_agree_on_the_model() {
+        let sh = include_str!("../../tools/make-usb.sh");
+        let value = |key: &str| -> String {
+            sh.lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("{key}=")))
+                .unwrap_or_else(|| panic!("в make-usb.sh нет {key}"))
+                .trim()
+                .trim_matches('"')
+                .to_string()
+        };
+        assert_eq!(value("VOICE_URL"), MODEL_URL, "ссылка на модель разошлась с флешкой");
+        assert_eq!(
+            value("VOICE_SHA"),
+            MODEL_SHA256,
+            "контрольная сумма модели разошлась с флешкой"
+        );
+        assert_eq!(
+            value("VOICE_SIZE").parse::<u64>().expect("VOICE_SIZE — число"),
+            MODEL_BYTES,
+            "размер модели разошёлся с флешкой"
+        );
+        assert!(
+            sh.contains(MODEL_FILE),
+            "make-usb.sh кладёт файл под другим именем, чем ищет приложение"
+        );
     }
 
     /// Ссылка и контрольная сумма описывают ОДИН файл, и правят их вручную:

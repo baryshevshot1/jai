@@ -385,6 +385,22 @@
 
               <div class="model-list" id="diag-list"></div>
               <div class="diag-summary" id="diag-summary" hidden></div>
+
+              <!-- Штамп сборки и журнал. Появились после сессии, где симптомы двух
+                   разных бандлов сравнивались как симптомы одного, а причина отказа
+                   сети («operation timed out») пряталась под зонтичным текстом и не
+                   попадала никуда. Теперь на оба вопроса — «что запущено» и «что
+                   именно сломалось» — отвечает экран, а не память разработчика. -->
+              <details class="diag-tech">
+                <summary class="diag-tech__summary">Технические сведения</summary>
+                <dl class="diag-tech__grid" id="build-info"></dl>
+                <div class="diag-tech__head">
+                  <h3 class="diag-tech__title">Журнал приложения</h3>
+                  <button type="button" class="ep-btn ep-btn--icon" id="journal-refresh">Обновить</button>
+                </div>
+                <div class="diag-tech__path" id="journal-path"></div>
+                <div class="online-log" id="journal-log"></div>
+              </details>
             </section>
 
             <section class="settings-card">

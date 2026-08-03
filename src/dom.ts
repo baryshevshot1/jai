@@ -91,6 +91,13 @@ export let modelPullCancelBtn: HTMLButtonElement;
 export let diagRunBtn: HTMLButtonElement;
 export let diagListEl: HTMLElement;
 export let diagSummaryEl: HTMLElement;
+// Технические сведения на экране «Проверка системы»: штамп сборки и журнал.
+// Нужны, чтобы вопросы «что за сборка запущена» и «что именно сломалось»
+// закрывались экраном, а не памятью разработчика.
+export let buildInfoEl: HTMLElement;
+export let journalLogEl: HTMLElement;
+export let journalPathEl: HTMLElement;
+export let journalRefreshBtn: HTMLButtonElement;
 export let appUpdateCheckBtn: HTMLButtonElement;
 export let appUpdateDiskBtn: HTMLButtonElement;
 export let appUpdateInfoEl: HTMLElement;
@@ -209,6 +216,10 @@ export function initDom(): void {
   diagRunBtn = document.querySelector("#diag-run-btn")!;
   diagListEl = document.querySelector("#diag-list")!;
   diagSummaryEl = document.querySelector("#diag-summary")!;
+  buildInfoEl = document.querySelector("#build-info")!;
+  journalLogEl = document.querySelector("#journal-log")!;
+  journalPathEl = document.querySelector("#journal-path")!;
+  journalRefreshBtn = document.querySelector("#journal-refresh")!;
   appUpdateCheckBtn = document.querySelector("#app-update-check")!;
   appUpdateDiskBtn = document.querySelector("#app-update-disk")!;
   appUpdateInfoEl = document.querySelector("#app-update-info")!;

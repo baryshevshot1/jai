@@ -23,6 +23,11 @@ tauri-build = { version = "2", features = [] }
 # логики это лишние минуты. Релиз собирается со включённым.
 default = ["voice"]
 voice = ["dep:whisper-rs", "dep:cpal", "dep:rubato"]
+# Инструменты разработчика в окне СОБРАННОГО приложения. Отдельной фичей, а не
+# правкой файла «на время отладки»: правку обещают вернуть перед коммитом, и однажды
+# она уезжает в репозиторий. Собирать так:
+#   npx tauri build --bundles app --features devtools
+devtools = ["tauri/devtools"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
