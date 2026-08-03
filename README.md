@@ -99,7 +99,7 @@ tools/make-usb.sh --out /Volumes/JAI --installers
 tools/make-usb.sh --out /Volumes/JAI --models "qwen3.5:9b qwen3.5:4b bge-m3"
 
 # всё сразу, конкретная версия
-tools/make-usb.sh --out /Volumes/JAI --installers --models "qwen3.5:9b bge-m3" --version app-v0.3.0
+tools/make-usb.sh --out /Volumes/JAI --installers --models "qwen3.5:9b bge-m3" --version app-v0.4.0
 ```
 
 > Флешку форматировать в **exFAT**: блоб модели 9B — это один файл ~6 ГБ, а FAT32 не
