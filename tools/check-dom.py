@@ -56,6 +56,39 @@ def check_ipc_contract() -> list[str]:
     return sorted(set(problems))
 
 
+def check_no_shift_on_toggle() -> list[str]:
+    """Индикатор состояния не должен ПОЯВЛЯТЬСЯ — он должен менять видимость.
+
+    Кнопка, которая от собственного нажатия двигает соседей, читается как сбой.
+    Ровно так и было: точка «онлайн-режим включён» рисовалась правилом
+    `.online-toggle.on::after` с шириной и высотой, то есть возникала только во
+    включённом состоянии — нажатие расширяло кнопку на 6 пикселей плюс отступ, и
+    весь ряд композера дёргался вправо.
+
+    Правильный приём: место занято всегда, меняется прозрачность. Проверяем именно
+    это — что геометрия задана у базового селектора, а состояние `.on` её не трогает.
+    """
+    css = (ROOT / "src" / "styles.css").read_text(encoding="utf-8")
+    problems = []
+
+    if ".online-toggle::after" not in css:
+        problems.append(
+            "у .online-toggle нет базового ::after — индикатор появляется только "
+            "во включённом состоянии и сдвигает ряд при нажатии"
+        )
+
+    m = re.search(r"\.online-toggle\.on::after\s*\{(.*?)\}", css, re.S)
+    if m:
+        body = m.group(1)
+        for prop in ("width", "height", "margin", "padding", "content"):
+            if re.search(rf"(^|[;{{\s]){prop}\s*:", body):
+                problems.append(
+                    f"состояние .online-toggle.on::after меняет «{prop}» — "
+                    "это меняет размер кнопки при нажатии и двигает соседние"
+                )
+    return problems
+
+
 def main() -> int:
     html = (ROOT / "index.html").read_text(encoding="utf-8")
     html_ids = set(re.findall(r'\bid="([^"]+)"', html))
@@ -83,6 +116,13 @@ def main() -> int:
     if ipc:
         print("Команды, которые зовёт интерфейс, но которых нет в бэкенде:")
         for p in ipc:
+            print(f"  {p}")
+        return 1
+
+    shifts = check_no_shift_on_toggle()
+    if shifts:
+        print("Состояния, которые двигают вёрстку при нажатии:")
+        for p in shifts:
             print(f"  {p}")
         return 1
 

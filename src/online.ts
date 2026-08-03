@@ -4,6 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { OutboundLogEntry } from "./types";
 import { state } from "./state";
+import { setToggleState } from "./ui";
 import {
   onlineMasterToggleEl,
   onlineStateTextEl,
@@ -23,7 +24,7 @@ import {
 // `persist` — записать выбор в settings.json (по умолчанию да).
 function setOnlineMode(on: boolean, persist = true) {
   state.onlineMode = on;
-  onlineToggleEl.classList.toggle("on", on);
+  setToggleState(onlineToggleEl, on);
   onlineToggleEl.title = on
     ? "Онлайн-режим включён: при поиске текст запроса уходит на внешний поисковый сервер, " +
       "при чтении страницы открывается указанный сайт. Нажмите, чтобы вернуться в офлайн."

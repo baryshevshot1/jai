@@ -59,6 +59,7 @@ import {
   updateGentleUi,
   type StatusKind,
   showScreen,
+  setToggleState,
 } from "./ui";
 import {
   flashIndexLabel,
@@ -640,9 +641,18 @@ async function installAppUpdateFromDisk() {
   if (typeof sel !== "string") return;
   try {
     await invoke("install_update_from_disk", { path: sel });
-    appUpdateStatus("Установщик запущен — приложение сейчас закроется.", "success");
+    // На Linux пакет ставит системный менеджер, и приложение НЕ закрывается: обещать
+    // закрытие там значило бы врать. На Windows и macOS установщику нужно заменить
+    // файлы, поэтому окно гасится через секунду — об этом и говорим.
+    const closes = !sel.toLowerCase().endsWith(".deb") && !sel.toLowerCase().endsWith(".rpm");
+    appUpdateStatus(
+      closes
+        ? "Установщик запущен — приложение сейчас закроется."
+        : "Установщик пакета открыт. Завершите установку в нём и перезапустите приложение.",
+      "success",
+    );
   } catch (e) {
-    appUpdateStatus(`${e}`, "error");
+    appUpdateStatus(humanError(e), "error");
   }
 }
 
@@ -1070,10 +1080,10 @@ export async function initThinking() {
     }
   }
   state.thinkEnabled = saved === "true"; // null/"false" → ВЫКЛ
-  thinkToggleEl.classList.toggle("on", state.thinkEnabled);
+  setToggleState(thinkToggleEl, state.thinkEnabled);
   thinkToggleEl.addEventListener("click", () => {
     state.thinkEnabled = !state.thinkEnabled;
-    thinkToggleEl.classList.toggle("on", state.thinkEnabled);
+    setToggleState(thinkToggleEl, state.thinkEnabled);
     invoke("set_setting", { key: "thinking_enabled", value: String(state.thinkEnabled) }).catch((e) =>
       console.error("set_setting thinking_enabled:", e),
     );

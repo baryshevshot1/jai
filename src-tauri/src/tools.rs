@@ -16,7 +16,7 @@
 // в `execute_tool()`. Агентный цикл (lib.rs) дёргает инструменты обобщённо по имени
 // и не переписывается при добавлении нового.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// User-Agent исходящих запросов: честно представляемся провайдеру (некоторые API
@@ -266,7 +266,10 @@ async fn guard_url(url: &reqwest::Url) -> Result<(), String> {
 
 /// Источник из веб-поиска (заголовок + ссылка) — показываем пользователю в чате,
 /// как RAG показывает источники из документов. Уходит на фронт через ChatEvent.
-#[derive(Clone, Serialize)]
+/// Deserialize нужен потому, что источники СОХРАНЯЮТСЯ в историю диалога и
+/// читаются обратно при открытии: без этого метка «ответ построен на данных из
+/// интернета» жила бы ровно до закрытия окна.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebSource {
     pub title: String,
     pub url: String,

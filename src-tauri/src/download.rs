@@ -596,16 +596,29 @@ mod tests {
         let body = payload(300_000);
         let srv = serve(
             body.clone(),
-            vec![Behave::Trickle(50_000, Duration::from_millis(150))],
+            vec![Behave::Trickle(25_000, Duration::from_millis(120))],
         );
         let dir = tmp("cancel");
         let part = dir.join("f.part");
         let url = format!("http://127.0.0.1:{}/f", srv.port);
         let cancel = Arc::new(AtomicBool::new(false));
 
+        // Отмену взводим по ФАКТУ, а не по часам: ждём, пока на диск лягут первые
+        // байты, и только тогда нажимаем «Отмена».
+        //
+        // Первая версия спала фиксированные 250 мс — и мигала: под нагрузкой (а гейт
+        // как раз и запускает тесты после сборки) первый кусок не успевал прийти,
+        // отмена срабатывала на пустом файле, и проверка «скачано больше нуля»
+        // падала. Тест, который иногда красный без причины, приучает перезапускать
+        // прогон вместо того, чтобы читать его, — и однажды так пропустят настоящий
+        // отказ. Здесь ждать нечего: условие проверяемо напрямую.
         let flag = cancel.clone();
+        let watched = part.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(250));
+            let until = Instant::now() + Duration::from_secs(5); // предохранитель
+            while Instant::now() < until && part_len(&watched) == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             flag.store(true, Ordering::Relaxed);
         });
         // read_timeout здесь не должен срабатывать раньше отмены — берём щедрый.

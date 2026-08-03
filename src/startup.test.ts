@@ -213,3 +213,102 @@ describe("изоляция инициализации", () => {
     expect(document.querySelector(".boot-error")).toBeNull();
   });
 });
+
+// ── Строка композера ─────────────────────────────────────────────────────────
+// Регрессия вёрстки: пока переключатели режимов стояли в одном ряду с действиями,
+// длинная подпись диктовки раздвигала ряд и уводила кнопку отправки вправо.
+// Лечится разделением на две строки — и это надо удержать: вернуть кнопки обратно
+// «чтобы компактнее» легко, а сломается при этом не они, а отправка.
+describe("строка композера", () => {
+  beforeEach(() => {
+    loadMarkup();
+    vi.resetModules();
+  });
+
+  it("все кнопки — в одном ряду, режимы сразу за микрофоном", () => {
+    const bar = document.querySelector(".composer-bar")!;
+    expect(bar, "нет ряда действий").toBeTruthy();
+
+    const ids = [...bar.querySelectorAll("button")].map((b) => b.id).filter(Boolean);
+    expect(ids, "порядок кнопок в ряду изменился").toEqual([
+      "attach-btn",
+      "image-btn",
+      "voice-btn",
+      "think-toggle",
+      "online-toggle",
+      "send-btn",
+      "stop-btn",
+    ]);
+  });
+
+  // Ровно это и ломало ряд: подпись диктовки стояла среди кнопок и распирала его,
+  // уводя кнопку отправки. Вернуть её сюда — значит вернуть тот же дефект.
+  it("подпись диктовки вынесена из ряда и обрезается внутри себя", () => {
+    const state = document.querySelector("#voice-state")!;
+    expect(
+      state.closest(".composer-bar"),
+      "подпись вернулась в ряд кнопок — она снова будет его распирать",
+    ).toBeNull();
+    expect(
+      state.closest(".composer"),
+      "подпись должна жить внутри карточки композера — она её точка отсчёта",
+    ).toBeTruthy();
+    expect(
+      state.querySelector(".voice-state__text"),
+      "текст подписи должен жить во вложенном span — только он умеет многоточие",
+    ).toBeTruthy();
+  });
+});
+
+describe("состояние, которое видно не только глазами", () => {
+  beforeEach(() => {
+    loadMarkup();
+    vi.resetModules();
+    rejecting = false;
+  });
+
+  // Незрячий пользователь слышал «Онлайн-режим, кнопка» и при включённом, и при
+  // выключенном режиме — то есть не мог установить, уходят ли данные его запроса
+  // наружу. Для продукта, обещающего 152-ФЗ, это не мелочь доступности.
+  it("тумблеры сообщают своё состояние, а не только красятся", async () => {
+    const think = document.querySelector("#think-toggle")!;
+    const online = document.querySelector("#online-toggle")!;
+    expect(think.getAttribute("aria-pressed"), "у «Размышлений» нет aria-pressed").toBe("false");
+    expect(online.getAttribute("aria-pressed"), "у «Онлайн» нет aria-pressed").toBe("false");
+
+    const { setToggleState } = await import("./ui");
+    setToggleState(online as HTMLElement, true);
+    expect(online.classList.contains("on")).toBe(true);
+    expect(online.getAttribute("aria-pressed"), "класс сменился, а состояние — нет").toBe("true");
+
+    setToggleState(online as HTMLElement, false);
+    expect(online.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  // Композер включался безусловно по завершении ответа. Если движок умирал во
+  // время стрима, список моделей становился пуст, но поле ввода оживало: человек
+  // печатал вопрос, жал Enter — и не происходило НИЧЕГО, ни ответа, ни ошибки.
+  it("после ответа композер не включается, когда отвечать нечем", async () => {
+    const dom = await import("./dom");
+    dom.initDom();
+    const { setStreaming } = await import("./ui");
+    const { state } = await import("./state");
+
+    state.selectedModel = "qwen3.5:4b";
+    setStreaming(true);
+    expect(dom.inputEl.disabled).toBe(true);
+
+    // Модель пропала прямо во время ответа (движок перезапустился).
+    state.selectedModel = "";
+    setStreaming(false);
+    expect(dom.inputEl.disabled, "поле ввода ожило без модели").toBe(true);
+    expect(dom.sendBtn.disabled, "кнопка отправки ожила без модели").toBe(true);
+
+    // А когда модель есть — всё как обычно.
+    state.selectedModel = "qwen3.5:4b";
+    setStreaming(true);
+    setStreaming(false);
+    expect(dom.inputEl.disabled).toBe(false);
+    expect(dom.sendBtn.disabled).toBe(false);
+  });
+});

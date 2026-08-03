@@ -97,6 +97,20 @@ pub(crate) struct ChatMessage {
     doc: Option<DocAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sources: Option<Vec<SourceRef>>,
+    // ── Прозрачность онлайн-режима (152-ФЗ) ──────────────────────────────
+    // Эти два поля кладёт интерфейс при сохранении ответа, построенного с
+    // выходом в интернет: список сайтов и саму метку «интернет использовался».
+    //
+    // Их здесь НЕ БЫЛО, а история сохраняется через эту же структуру — значит,
+    // serde молча выбрасывал их при записи. Пользователь видел источники ровно до
+    // закрытия окна: назавтра тот же ответ выглядел как обычный офлайновый, и
+    // проверить, откуда взята норма и что уходило наружу, было уже нечем.
+    // Для продукта, у которого прозрачность выхода в интернет — заявленное
+    // обещание, это потеря не украшения, а доказательства.
+    #[serde(rename = "webSources", default, skip_serializing_if = "Option::is_none")]
+    web_sources: Option<Vec<crate::tools::WebSource>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    online: Option<bool>,
     // Зрение (qwen3-vl): сырой base64 изображений. Ollama ждёт поле `images`
     // прямо в сообщении. Пустой массив не сериализуется (в текстовых не появляется).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -205,8 +219,25 @@ pub(crate) async fn stream_chat_response(
             // отвечает рывками. Свободная память на нуле — до OOM-killer секунды,
             // и свопа может не быть вовсе. Ловим то, что случится раньше.
             let growth = sys.used_swap().saturating_sub(base_swap);
-            let available = sys.available_memory();
-            if growth > SWAP_TRIP_BYTES || available < LOW_MEMORY_BYTES {
+            // available_bytes даёт None, когда ОС не отвечает осмысленно (на macOS
+            // это штатно при разросшемся компрессоре — см. memory::available_bytes).
+            // «Не знаю» — НЕ повод рубить генерацию: раньше именно так обрывался
+            // каждый ответ на здоровой машине. Тогда защиту несёт рост свопа.
+            let available = crate::memory::available_bytes(&sys);
+            let low_mem = available.is_some_and(|a| a < LOW_MEMORY_BYTES);
+            if growth > SWAP_TRIP_BYTES || low_mem {
+                let mb = |b: u64| b / 1024 / 1024;
+                crate::journal::warn(
+                    "чат",
+                    format!(
+                        "генерация прервана сторожем: рост свопа {} МБ (порог {}), \
+                         доступно {} (порог {} МБ)",
+                        mb(growth),
+                        mb(SWAP_TRIP_BYTES),
+                        available.map(|a| format!("{} МБ", mb(a))).unwrap_or("неизвестно".into()),
+                        mb(LOW_MEMORY_BYTES),
+                    ),
+                );
                 *wd_reason_task.lock().unwrap_or_else(|e| e.into_inner()) = Some((
                     ErrorCode::OutOfMemory,
                     "недостаточно оперативной памяти — попробуйте модель полегче или \
@@ -551,5 +582,49 @@ mod gentle_tests {
         // И потоки процессора в щадящем режиме ограничены — это его прежний смысл.
         assert!(gentle["options"]["num_thread"].is_number());
         assert!(normal["options"]["num_thread"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod online_history_tests {
+    use super::*;
+
+    /// Следы обращения в интернет обязаны пережить сохранение диалога.
+    ///
+    /// История пишется через эту самую структуру. Полей `webSources` и `online` в
+    /// ней не было — serde молча выбрасывал их при записи, и пользователь видел
+    /// источники ровно до закрытия окна. Назавтра тот же ответ выглядел как
+    /// обычный офлайновый: проверить, откуда взята норма и что уходило наружу,
+    /// было уже нечем. Для продукта, обещающего прозрачность выхода в интернет,
+    /// это потеря доказательства, а не оформления.
+    #[test]
+    fn web_sources_survive_saving_a_conversation() {
+        let saved = serde_json::json!({
+            "role": "assistant",
+            "content": "Согласно статье 5…",
+            "webSources": [{ "title": "КонсультантПлюс", "url": "https://example.org/a" }],
+            "online": true
+        });
+
+        let msg: ChatMessage = serde_json::from_value(saved).expect("история не разобралась");
+        let back = serde_json::to_value(&msg).expect("история не сериализовалась");
+
+        assert_eq!(back["online"], serde_json::json!(true), "метка «интернет» потеряна");
+        let sources = back["webSources"].as_array().expect("список источников потерян");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["url"], "https://example.org/a");
+        assert_eq!(sources[0]["title"], "КонсультантПлюс");
+    }
+
+    /// А у обычного офлайнового ответа этих полей быть не должно — иначе они
+    /// уезжали бы в запрос к Ollama пустыми на каждом сообщении.
+    #[test]
+    fn offline_answer_carries_no_online_fields() {
+        let msg: ChatMessage =
+            serde_json::from_value(serde_json::json!({ "role": "user", "content": "привет" }))
+                .unwrap();
+        let back = serde_json::to_value(&msg).unwrap();
+        assert!(back.get("webSources").is_none(), "пустые источники не должны сериализоваться");
+        assert!(back.get("online").is_none(), "пустая метка не должна сериализоваться");
     }
 }

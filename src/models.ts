@@ -45,7 +45,14 @@ import {
   ICON_REFRESH_CW,
   plural,
 } from "./util";
-import { addError, setComposerEnabled, showStatus, updateGentleUi, type StatusKind } from "./ui";
+import {
+  addError,
+  setComposerEnabled,
+  setToggleState,
+  showStatus,
+  updateGentleUi,
+  type StatusKind,
+} from "./ui";
 import { cancelActivePull, runPull } from "./pull";
 import { refreshDocuments, sidebarDocCtx } from "./documents";
 
@@ -315,7 +322,7 @@ export function updateThinkAvailability() {
   thinkToggleEl.title = supports
     ? "Режим рассуждений модели (медленнее, но точнее)"
     : "Эта модель не поддерживает режим рассуждений";
-  thinkToggleEl.classList.toggle("on", supports && state.thinkEnabled);
+  setToggleState(thinkToggleEl, supports && state.thinkEnabled);
 }
 
 // ── Каталог набора моделей (страница настроек, M4) ───────────────────────────
@@ -616,9 +623,17 @@ export async function ensureEngine(): Promise<boolean> {
     return false;
   }
   if (res.status === "ready") return true; // checkOllama ниже покажет версию
-  // not_installed / error — показываем понятный статус, дальнейшие шаги пропустим
+  // not_installed / error — показываем понятный статус, дальнейшие шаги пропустим.
+  //
+  // res.message выбрасывался: в шапке оставались два слова, а единственное
+  // объяснение, что именно не так и куда идти, приходило из Rust и терялось.
+  // Пользователь видел «Движок не установлен» и не знал, что делать дальше.
   statusEl.textContent =
     res.status === "not_installed" ? "Движок не установлен" : "Движок не запущен";
+  if (res.message) {
+    statusEl.title = res.message;
+    addError(res.message);
+  }
   engineEl.classList.add("engine--down");
   return false;
 }
