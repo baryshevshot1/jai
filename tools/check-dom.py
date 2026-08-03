@@ -15,9 +15,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# id, которых нет и не должно быть в index.html: элементы создаются кодом
-# (карточка «Оформление» в настройках строится в settings.ts).
-DYNAMIC = {"ui-scale-state", "ui-scale-toggle"}
+# id, которых нет и не должно быть в index.html: элементы создаются кодом и ищутся
+# в СОБСТВЕННОМ поддереве (card.querySelector), а не в документе — уронить старт они
+# не могут. Карточки «Оформление» и «Голосовой ввод» в настройках строятся в
+# settings.ts. Добавляя сюда id, убедись, что поиск идёт именно по своему узлу.
+DYNAMIC = {
+    "ui-scale-state",
+    "ui-scale-toggle",
+    "voice-model-state",
+    "voice-model-install",
+    "voice-model-restart",
+    "voice-model-import",
+    "voice-model-progress",
+    "voice-model-progress-fill",
+    "voice-model-progress-label",
+    "voice-model-cancel",
+}
+
+
+def check_ipc_contract() -> list[str]:
+    """Каждая команда, которую зовёт интерфейс, должна быть зарегистрирована в Rust.
+
+    Иначе Tauri отвечает отказом уже в работающем приложении: кнопка молча ничего не
+    делает, а причина видна только в консоли разработчика, куда пользователь не ходит.
+    """
+    lib = (ROOT / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    m = re.search(r"generate_handler!\[(.*?)\]", lib, re.S)
+    if not m:
+        return ["не найден список команд generate_handler! в lib.rs"]
+    registered = {x.strip().split("::")[-1] for x in m.group(1).split(",") if x.strip()}
+
+    problems = []
+    for path in sorted((ROOT / "src").glob("*.ts")):
+        if path.name.endswith(".test.ts"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for mm in re.finditer(r'invoke(?:<[^>]*>)?\(\s*"([a-z_]+)"', text):
+            if mm.group(1) not in registered:
+                problems.append(f"{path.name}: invoke(\"{mm.group(1)}\") — команда не зарегистрирована")
+    return sorted(set(problems))
 
 
 def main() -> int:
@@ -43,7 +79,15 @@ def main() -> int:
         print("элемент создаётся кодом, добавьте его id в DYNAMIC в этом файле.")
         return 1
 
+    ipc = check_ipc_contract()
+    if ipc:
+        print("Команды, которые зовёт интерфейс, но которых нет в бэкенде:")
+        for p in ipc:
+            print(f"  {p}")
+        return 1
+
     print(f"проверено id: {len(html_ids)} в разметке, все ссылки из кода разрешаются")
+    print("контракт команд: все вызовы invoke разрешаются в lib.rs")
     return 0
 
 

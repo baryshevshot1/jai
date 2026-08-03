@@ -49,6 +49,9 @@
       "webviewInstallMode": {
         "type": "offlineInstaller"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   }
 }

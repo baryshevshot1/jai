@@ -2,12 +2,12 @@
 // и каталога моделей), диагностика «Проверка системы», обновления приложения,
 // а также пользовательские предпочтения — тема, «Размышления», боковая панель.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import type { DiagCheck } from "./types";
+import type { DiagCheck, PullEvent, PullOutcome } from "./types";
 import { state } from "./state";
 import {
   appEl,
@@ -20,6 +20,7 @@ import {
   appUpdateStatusEl,
   appVersionEl,
   brandHomeBtn,
+  buildInfoEl,
   diagListEl,
   diagRunBtn,
   diagSummaryEl,
@@ -32,6 +33,9 @@ import {
   inputEl,
   installFromDiskBtn,
   installLocalBtn,
+  journalLogEl,
+  journalPathEl,
+  journalRefreshBtn,
   modelProgressEl,
   modelProgressFill,
   modelProgressLabel,
@@ -46,7 +50,7 @@ import {
   themeIconEl,
   thinkToggleEl,
 } from "./dom";
-import { humanError, ICON_REFRESH_CW, plural } from "./util";
+import { humanError, ICON_REFRESH_CW, plural, ruPullStatus, size } from "./util";
 import {
   confirmModal,
   hideStatus,
@@ -71,6 +75,7 @@ import {
 } from "./models";
 import { refreshOutboundLog } from "./online";
 import { runImport } from "./pull";
+import { initVoice } from "./voice";
 
 // ── Страница настроек (на месте ленты диалогов) ──────────────────────────────
 
@@ -78,11 +83,14 @@ import { runImport } from "./pull";
 function openSettings() {
   showScreen("settings"); // экран проекта и мастер гаснут сами — они взаимоисключаемы
   refreshEnginePaths(); // подтянуть актуальные пути при открытии
+  refreshVoiceCard(); // модель распознавания могли поставить и с другого экрана
   refreshDocuments(sidebarDocCtx); // свежий список общей базы (карточка «Документы»)
   applyModelChoice(); // поле «Модель для ответов» — всегда в актуальном состоянии
   loadModelStates(); // локальные состояния моделей набора (статус — в бейджах строк)
   resetCheckButton(); // кнопка проверки — всегда в исходном виде на открытии
   refreshOutboundLog(); // актуальный журнал обращений в интернет
+  refreshBuildInfo(); // штамп сборки — «что именно сейчас запущено»
+  refreshJournal(); // хвост журнала приложения
   runDiagnostics(); // самопроверка при каждом открытии (локально, дёшево)
 }
 
@@ -354,6 +362,125 @@ async function runDiagnostics(byClick = false) {
     diagRunBtn.disabled = false;
     diagRunBtn.classList.remove("checking");
     diagRunBtn.innerHTML = `${ICON_REFRESH_CW}Проверить`;
+  }
+}
+
+// ── Технические сведения: штамп сборки и журнал ──────────────────────────────
+//
+// Ровно два вопроса, на которые раньше отвечала память разработчика, а память
+// ошибалась: «какая это сборка» (симптомы двух бандлов однажды сравнили как симптомы
+// одного) и «что именно сломалось» (истинная причина сетевого отказа пряталась под
+// зонтичным текстом и никуда не попадала).
+
+interface BuildInfo {
+  version: string;
+  git_sha: string;
+  git_dirty: string;
+  profile: string;
+  target: string;
+  features: string[];
+  commands: string[];
+  os: string;
+  arch: string;
+  voice_model_path: string;
+  voice_model_present: boolean;
+  voice_model_partial_bytes: number;
+  voice_model_expected_bytes: number;
+  voice_model_sha256: string;
+  log_path: string | null;
+}
+
+interface JournalEntry {
+  at_ms: number;
+  level: "info" | "warn" | "error";
+  source: string;
+  message: string;
+}
+
+function techRow(dl: HTMLElement, key: string, value: string) {
+  const dt = document.createElement("dt");
+  dt.textContent = key;
+  const dd = document.createElement("dd");
+  dd.textContent = value;
+  dl.appendChild(dt);
+  dl.appendChild(dd);
+}
+
+async function refreshBuildInfo() {
+  buildInfoEl.innerHTML = "";
+  let info: BuildInfo;
+  try {
+    info = await invoke<BuildInfo>("build_info");
+  } catch (e) {
+    techRow(buildInfoEl, "Сведения о сборке", humanError(e));
+    return;
+  }
+  const dirty = info.git_dirty === "да";
+  techRow(buildInfoEl, "Версия", info.version);
+  // Грязное дерево в собранном приложении означает, что бинарник не соответствует
+  // ни одному коммиту: воспроизвести его потом будет нечем. Говорим об этом прямо.
+  techRow(buildInfoEl, "Сборка", `${info.git_sha}${dirty ? " (с несохранёнными правками)" : ""}`);
+  techRow(buildInfoEl, "Профиль", `${info.profile} · ${info.target}`);
+  techRow(buildInfoEl, "Система", `${info.os} · ${info.arch}`);
+  techRow(
+    buildInfoEl,
+    "Возможности",
+    info.features.length ? info.features.join(", ") : "базовая сборка",
+  );
+  techRow(buildInfoEl, "Команд в сборке", String(info.commands.length));
+  // Голос — единственная фича, чьё отсутствие пользователь замечает глазами
+  // (нет кнопки микрофона). Проговариваем, чтобы это не выглядело поломкой.
+  if (!info.features.includes("voice")) {
+    techRow(buildInfoEl, "Голосовой ввод", "не собран в этой версии");
+  } else if (info.voice_model_present) {
+    techRow(buildInfoEl, "Модель распознавания", `установлена · ${info.voice_model_path}`);
+  } else if (info.voice_model_partial_bytes > 0) {
+    techRow(
+      buildInfoEl,
+      "Модель распознавания",
+      `скачано ${size(info.voice_model_partial_bytes)} из ${size(info.voice_model_expected_bytes)}`,
+    );
+  } else {
+    techRow(buildInfoEl, "Модель распознавания", "не установлена");
+  }
+}
+
+async function refreshJournal() {
+  try {
+    const path = await invoke<string | null>("journal_path");
+    journalPathEl.textContent = path ? `Файл журнала: ${path}` : "Журнал ведётся только в памяти";
+  } catch {
+    journalPathEl.textContent = "";
+  }
+  journalLogEl.innerHTML = "";
+  let entries: JournalEntry[] = [];
+  try {
+    entries = await invoke<JournalEntry[]>("journal_tail");
+  } catch {
+    /* журнал недоступен — покажем пустоту, это не повод для ошибки */
+  }
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "online-log-empty";
+    empty.textContent = "Записей пока нет.";
+    journalLogEl.appendChild(empty);
+    return;
+  }
+  // Свежие сверху: читают журнал всегда с конца.
+  for (const e of [...entries].reverse()) {
+    const row = document.createElement("div");
+    row.className = `journal-row journal-row--${e.level}`;
+    const time = document.createElement("span");
+    time.className = "journal-row__time";
+    time.textContent = new Date(e.at_ms).toLocaleTimeString("ru-RU");
+    const src = document.createElement("span");
+    src.className = "journal-row__src";
+    src.textContent = e.source;
+    const msg = document.createElement("span");
+    msg.className = "journal-row__msg";
+    msg.textContent = e.message;
+    row.append(time, src, msg);
+    journalLogEl.appendChild(row);
   }
 }
 
@@ -636,6 +763,289 @@ function buildAppearanceCard() {
   applyUiScale(uiScale); // подписи — под уже применённый размер
 }
 
+// ── Голосовой ввод: установка модели распознавания речи ──────────────────────
+// Сценарий тот же, что у модели документов (bge-m3) в карточке «Документы»: статус,
+// установка из интернета и импорт с носителя. Разница одна — модель распознавания
+// живёт не в каталоге Ollama, а в данных приложения, поэтому у неё свои команды.
+// Разметку собираем кодом (как карточку «Оформление»).
+
+// Честный объём загрузки: на медленном интернете полгигабайта — это решение, которое
+// принимают заранее, а не обнаруживают в процессе.
+const VOICE_SIZE_HINT = "около 470 МБ";
+
+const VOICE_CARD = `
+  <div class="settings-card__head">
+    <h2 class="settings-card__title">Голосовой ввод</h2>
+    <p class="settings-card__desc">
+      Диктовка вместо набора: нажали кнопку микрофона в строке ввода, сказали — текст
+      появился в поле. Речь распознаётся прямо на этом компьютере, запись никуда не
+      уходит. Для этого нужна отдельная модель распознавания — её ставят один раз:
+      с флешки, а если есть интернет — из интернета.
+    </p>
+  </div>
+  <div class="doc-status">
+    <div class="doc-status__text" id="voice-model-state"></div>
+    <div class="doc-status__actions">
+      <button type="button" class="ep-btn ep-btn--primary" id="voice-model-install" hidden>Установить (${VOICE_SIZE_HINT})</button>
+      <button type="button" class="ep-btn ep-btn--ghost" id="voice-model-restart" hidden>Начать заново</button>
+      <button type="button" class="ep-btn ep-btn--ghost" id="voice-model-import" hidden>С флешки/диска…</button>
+    </div>
+  </div>
+  <div class="index-progress" id="voice-model-progress" hidden>
+    <div class="index-progress__bar"><i id="voice-model-progress-fill"></i></div>
+    <div class="index-progress__label" id="voice-model-progress-label"></div>
+    <button type="button" class="pull-cancel-btn" id="voice-model-cancel" hidden>Отмена</button>
+  </div>`;
+
+interface VoiceCard {
+  state: HTMLElement;
+  install: HTMLButtonElement;
+  restart: HTMLButtonElement;
+  import: HTMLButtonElement;
+  progress: HTMLElement;
+  fill: HTMLElement;
+  label: HTMLElement;
+  cancel: HTMLButtonElement;
+}
+let voiceCard: VoiceCard | null = null;
+
+// Состояние поставки модели, как его видит бэкенд.
+interface VoiceModelState {
+  installed: boolean;
+  partial_bytes: number;
+  total_bytes: number;
+}
+
+// Карточка встаёт сразу за «Документами»: обе про то, чем ассистента кормят —
+// документами и голосом.
+function buildVoiceCard() {
+  const after = installLocalBtn.closest(".settings-card");
+  if (!after) return;
+  const card = document.createElement("section");
+  card.className = "settings-card";
+  card.innerHTML = VOICE_CARD;
+  after.insertAdjacentElement("afterend", card);
+  voiceCard = {
+    state: card.querySelector("#voice-model-state")!,
+    install: card.querySelector("#voice-model-install")!,
+    restart: card.querySelector("#voice-model-restart")!,
+    import: card.querySelector("#voice-model-import")!,
+    progress: card.querySelector("#voice-model-progress")!,
+    fill: card.querySelector("#voice-model-progress-fill")!,
+    label: card.querySelector("#voice-model-progress-label")!,
+    cancel: card.querySelector("#voice-model-cancel")!,
+  };
+  voiceCard.install.addEventListener("click", () => downloadVoiceModel(false));
+  voiceCard.restart.addEventListener("click", () => downloadVoiceModel(true));
+  voiceCard.import.addEventListener("click", importVoiceModel);
+  voiceCard.cancel.addEventListener("click", () => {
+    voiceCard!.cancel.disabled = true;
+    invoke("cancel_pull").catch(() => {}); // итог придёт результатом самой команды
+  });
+  refreshVoiceCard();
+}
+
+// Состояние модели распознавания. Три положения, а не два: «не начинали»,
+// «начинали, но не доехало» и «стоит». Среднее раньше было неотличимо от первого,
+// и после обрыва на четырёхстах мегабайтах карточка предлагала начать сначала —
+// хотя качать оставалось всего ничего.
+async function refreshVoiceCard() {
+  const card = voiceCard;
+  if (!card) return;
+  // Пока установка ИДЁТ, статусом карточки распоряжается она. Иначе возврат в
+  // настройки посреди загрузки (единственный способ следить за прогрессом — уйти
+  // работать и вернуться) перетирал бы бегущий прогресс надписью «Загрузка не
+  // завершилась… нажмите «Продолжить»»: человек читает это над живым индикатором,
+  // решает, что всё сорвалось, и отменяет полчаса работы.
+  if (state.pullingTag) return;
+  let st: VoiceModelState = { installed: false, partial_bytes: 0, total_bytes: 0 };
+  try {
+    st = await invoke<VoiceModelState>("voice_model_state");
+  } catch {
+    /* не смогли спросить — считаем, что ставить ещё нужно */
+  }
+  const partial = !st.installed && st.partial_bytes > 0;
+
+  if (st.installed) {
+    card.state.textContent = "Модель распознавания речи установлена — можно диктовать.";
+  } else if (partial) {
+    card.state.textContent =
+      `Загрузка не завершилась: скачано ${size(st.partial_bytes)} из ${size(st.total_bytes)}. ` +
+      "Скачанное сохранено — нажмите «Продолжить», и загрузка пойдёт дальше с этого места.";
+  } else {
+    card.state.textContent =
+      "Модель распознавания речи не установлена, голосовой ввод пока не работает. " +
+      `Поставьте её с флешки или скачайте (${VOICE_SIZE_HINT}).`;
+  }
+
+  card.install.hidden = st.installed;
+  card.install.textContent = partial
+    ? `Продолжить (осталось ${size(Math.max(0, st.total_bytes - st.partial_bytes))})`
+    : `Установить (${VOICE_SIZE_HINT})`;
+  // «Начать заново» показываем только когда есть что выбрасывать: кнопка, которая
+  // ничего не меняет, — лишний повод для сомнений у человека, который и так не
+  // уверен, что делает правильно.
+  card.restart.hidden = !partial;
+  card.import.hidden = st.installed;
+}
+
+// Общий ход обеих установок: гейт от параллельных операций, прогресс в карточке и
+// честный итог по результату команды — после отмены «установлено» не пишем.
+async function runVoiceInstall(
+  what: string,
+  exec: (onEvent: Channel<PullEvent>) => Promise<PullOutcome>,
+) {
+  const card = voiceCard;
+  if (!card) return;
+  // Установки в приложении идут по одной (в Rust они делят общую регистрацию);
+  // здесь — мгновенный местный гейт, чтобы не идти в отказ.
+  if (state.pullingTag) {
+    card.state.textContent = `Сейчас идёт установка «${state.pullingTag}» — дождитесь её завершения.`;
+    return;
+  }
+  state.pullingTag = "модель распознавания речи";
+  card.install.disabled = true;
+  card.restart.disabled = true;
+  card.import.disabled = true;
+  card.progress.hidden = false;
+  card.cancel.hidden = false;
+  card.cancel.disabled = false;
+  card.fill.style.width = "2%";
+  card.label.textContent = `${what}…`;
+
+  // Скорость и остаток считаем здесь, а не в Rust: там пришлось бы тащить сглаживание
+  // и склонение слов через границу IPC ради двух чисел. Полгигабайта на медленном
+  // канале — это десятки минут, и «сколько ещё ждать» здесь не украшение: без ответа
+  // на него человек решает, что всё зависло, и жмёт «Отмена».
+  let samples: Array<{ t: number; bytes: number }> = [];
+  let phase = "";
+
+  // Канал и результат команды — разные пути доставки: после итога гасим запоздавшие
+  // сообщения прогресса, чтобы они не затирали финальную надпись.
+  let settled = false;
+  const onEvent = new Channel<PullEvent>();
+  onEvent.onmessage = (e) => {
+    if (settled) return;
+    const frac = e.total > 0 ? e.completed / e.total : 0;
+    const tail =
+      e.total > 0 ? ` ${Math.round(frac * 100)}% (${size(e.completed)} из ${size(e.total)})` : "";
+    card.fill.style.width = `${Math.max(2, Math.round(frac * 100))}%`;
+    // Смена стадии (скачивание → проверка целостности, пауза перед повтором)
+    // обнуляет замеры: усреднять скорость через границу стадий бессмысленно.
+    if (e.status !== phase) {
+      phase = e.status;
+      samples = [];
+    }
+    samples.push({ t: Date.now(), bytes: e.completed });
+    // Окно замеров — по КОЛИЧЕСТВУ, а не только по времени. Жёсткое окно в 20 секунд
+    // выбрасывало предыдущий замер раньше, чем приходил следующий, и на медленном
+    // канале скорость не показывалась никогда — ровно там, где она нужнее всего.
+    const fresh = samples.filter((s) => s.t > Date.now() - 120_000);
+    samples = fresh.length >= 2 ? fresh : samples.slice(-2);
+    if (samples.length > 12) samples = samples.slice(-12);
+    card.label.textContent = `${ruPullStatus(e.status)}${tail}${speedAndEta(samples, e.total)}`;
+  };
+
+  let outcomeText = "";
+  try {
+    const outcome = await exec(onEvent);
+    settled = true;
+    if (outcome === "cancelled") {
+      outcomeText = "Установка отменена — модель распознавания речи не установлена.";
+    } else {
+      outcomeText = "Готово: модель распознавания речи установлена.";
+      // Кнопка микрофона появляется только при наличии модели, а решение об этом
+      // принимается один раз при запуске. Пересобираем диктовку здесь, иначе
+      // пользователю пришлось бы перезапускать приложение после установки.
+      try {
+        await initVoice();
+      } catch {
+        /* сборка без голосового ввода — карточка всё равно отработала честно */
+      }
+    }
+  } catch (e) {
+    settled = true;
+    outcomeText = humanError(e);
+  } finally {
+    state.pullingTag = null;
+    card.progress.hidden = true;
+    card.cancel.hidden = true;
+    card.install.disabled = false;
+    card.restart.disabled = false;
+    card.import.disabled = false;
+    await refreshVoiceCard(); // кнопки — по новому состоянию…
+    card.state.textContent = outcomeText; // …а надпись рассказывает, чем всё кончилось
+  }
+}
+
+// Скорость и оставшееся время по замерам прогресса. Пусто, пока замеров мало:
+// показать «осталось 3 часа» на первых мегабайтах — значит соврать и напугать.
+export function speedAndEta(
+  samples: Array<{ t: number; bytes: number }>,
+  total: number,
+): string {
+  if (samples.length < 2) return "";
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const secs = (last.t - first.t) / 1000;
+  const bytes = last.bytes - first.bytes;
+  if (secs < 1 || bytes <= 0) return "";
+  const rate = bytes / secs;
+  let out = ` · ${(rate / 1024 / 1024).toFixed(1).replace(".", ",")} МБ/с`;
+  const left = total - last.bytes;
+  if (left > 0) out += ` · осталось ${humanLeft(left / rate)}`;
+  return out;
+}
+
+// «Осталось» округляем крупно и вверх: точность до секунды здесь никому не нужна,
+// а обещание, которое сбывается раньше, лучше обещания, которое опаздывает.
+function humanLeft(seconds: number): string {
+  if (seconds < 60) return "меньше минуты";
+  const mins = Math.ceil(seconds / 60);
+  if (mins < 60) return `~${mins} ${plural(mins, "минута", "минуты", "минут")}`;
+  const hours = Math.ceil(mins / 60);
+  return `~${hours} ${plural(hours, "час", "часа", "часов")}`;
+}
+
+// Скачивание из интернета (изолированный https-клиент в Rust; офлайн-ядра не касается).
+// restart = true — выбросить недокачанное и начать с нуля.
+async function downloadVoiceModel(restart: boolean) {
+  await runVoiceInstall(
+    restart ? "Скачивание модели распознавания речи" : "Загрузка модели распознавания речи",
+    (onEvent) => invoke<PullOutcome>("voice_model_download", { restart, onEvent }),
+  );
+}
+
+// Установка с носителя: сначала ищем флешку сами (основной сценарий поставки
+// «под ключ»), не нашли или пользователь отказался — обычный выбор файла.
+async function importVoiceModel() {
+  let path: string | null = null;
+  try {
+    const found = await invoke<string | null>("find_voice_model_source");
+    if (found) {
+      const ok = await confirmModal(
+        `Найдена модель распознавания речи: ${found}. Установить с этого носителя?`,
+        "Установить",
+      );
+      if (ok) path = found;
+    }
+  } catch {
+    /* поиск носителей не критичен — выберем файл вручную */
+  }
+  if (!path) {
+    const sel = await open({
+      multiple: false,
+      title: "Файл модели распознавания речи (ggml-small.bin)",
+      filters: [{ name: "Модель распознавания", extensions: ["bin"] }],
+    }).catch(() => null);
+    path = typeof sel === "string" ? sel : null;
+  }
+  if (!path) return;
+  await runVoiceInstall("Копирование модели с носителя", (onEvent) =>
+    invoke<PullOutcome>("import_voice_model", { path, onEvent }),
+  );
+}
+
 // ── Тумблер «Размышления» ────────────────────────────────────────────────────
 
 // Восстановление тумблера «Размышления» из settings.json (единый источник истины).
@@ -750,6 +1160,7 @@ export async function initSidebar() {
 // Обработчики страницы настроек, темы, панели, диагностики и обновлений.
 export function wireSettings() {
   buildAppearanceCard(); // карточка «Оформление» — до первого открытия настроек
+  buildVoiceCard(); // карточка «Голосовой ввод» — там же ставится модель распознавания
   settingsBtn.addEventListener("click", openSettings);
   settingsBackBtn.addEventListener("click", goHome);
   brandHomeBtn.addEventListener("click", goHome); // бренд в шапке = «на главную»
@@ -764,6 +1175,10 @@ export function wireSettings() {
   // Именно () => runDiagnostics(true): передать функцию напрямую нельзя — в byClick
   // прилетел бы объект события (истинный, но не по смыслу).
   diagRunBtn.addEventListener("click", () => runDiagnostics(true));
+  journalRefreshBtn.addEventListener("click", () => {
+    refreshBuildInfo();
+    refreshJournal();
+  });
   appUpdateCheckBtn.addEventListener("click", checkAppUpdate);
   appUpdateDiskBtn.addEventListener("click", installAppUpdateFromDisk);
   getVersion()

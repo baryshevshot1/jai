@@ -77,6 +77,17 @@ export function gb(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} ГБ`;
 }
 
+// Размер в той единице, в которой он читается. Нужен там, где числа меньше гигабайта:
+// модель распознавания весит 465 МБ, и gb() показывал «0.5 ГБ», остаток в 40 МБ —
+// «0.0 ГБ», то есть «осталось ноль». Человек на это либо решает, что всё уже
+// скачано, либо жмёт «Начать заново» и выбрасывает полчаса загрузки.
+export function size(bytes: number): string {
+  const mb = bytes / 1024 / 1024;
+  if (mb < 1) return `${Math.max(0, Math.round(bytes / 1024))} КБ`;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} МБ`;
+  return gb(bytes);
+}
+
 // Частые статусы Ollama /api/pull → понятный русский.
 export function ruPullStatus(status: string): string {
   if (status.startsWith("pulling manifest")) return "Получение манифеста";

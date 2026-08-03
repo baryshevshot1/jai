@@ -465,7 +465,7 @@ fn hash_file(
     Ok(Some(hex_digest(hasher)))
 }
 
-fn hex_digest(hasher: Sha256) -> String {
+pub(crate) fn hex_digest(hasher: Sha256) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -486,8 +486,14 @@ fn copy_file_chunked(
     progress: &mut dyn FnMut(u64, u64, &str, bool),
 ) -> Result<bool, String> {
     use std::io::{Read, Write};
+    // Суффикс НЕ «.part» — он занят незавершённой ЗАГРУЗКОЙ из интернета
+    // (download.rs), которая после обрыва хранит там уже скачанные сотни мегабайт.
+    // Совпадение имён означало бы: пользователь качал 400 МБ, интернет пропал, он
+    // принёс флешку — и неудачный импорт (отмена, битый файл на носителе, ошибка
+    // чтения) молча стирал бы всю загрузку вместе со своим мусором. Два разных
+    // процесса — два разных черновика.
     let mut part = to.as_os_str().to_os_string();
-    part.push(".part");
+    part.push(".copy-part");
     let part = PathBuf::from(part);
     let _ = std::fs::remove_file(&part); // остаток прежней оборванной попытки
 
@@ -560,6 +566,176 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<usize, String> {
         }
     }
     Ok(copied)
+}
+
+// ── Модель распознавания речи с носителя ──────────────────────────────────────
+//
+// Та же поставка «под ключ», но модель не из каталога Ollama: у whisper другой
+// формат хранения (один файл), и живёт он в данных приложения (voice::model_path).
+// Поэтому на флешке для него отдельный каталог models-stt/ — рядом с models/, а не
+// внутри: положенный в каталог Ollama посторонний файл движок бы не понял.
+
+/// Где на носителе ищем модель распознавания (соглашение о структуре флешки —
+/// см. tools/make-usb.sh). Порядок значим: сначала ожидаемое место, потом запасные.
+const VOICE_SUBDIRS: [&str; 4] = ["models-stt", "jai/models-stt", "JAI-USB/models-stt", "stt"];
+
+/// Найти файл модели по тому, что указал пользователь: сам файл, каталог с ним или
+/// корень флешки. Ошибка объясняет, где искали, — «файл не найден» без подробностей
+/// человеку у чужого компьютера не помогает.
+fn resolve_voice_model(path: &Path) -> Result<PathBuf, String> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if path.is_dir() {
+        let direct = path.join(crate::voice::MODEL_FILE);
+        if direct.is_file() {
+            return Ok(direct);
+        }
+        for sub in VOICE_SUBDIRS {
+            let candidate = path.join(sub).join(crate::voice::MODEL_FILE);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(format!(
+        "В «{}» нет файла модели распознавания речи ({}). Выберите на флешке папку \
+         «models-stt» или сам файл модели.",
+        path.display(),
+        crate::voice::MODEL_FILE
+    ))
+}
+
+/// Найти модель распознавания на смонтированных дисках (флешка «под ключ»).
+/// Съёмные носители — первыми: это ожидаемый случай. None — не нашли, тогда
+/// интерфейс просто предложит выбрать файл вручную. Только локальные вызовы.
+#[tauri::command]
+pub(crate) fn find_voice_model_source() -> Option<String> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut found: Vec<(bool, PathBuf)> = Vec::new();
+    for disk in disks.list() {
+        for sub in VOICE_SUBDIRS {
+            let candidate = disk.mount_point().join(sub).join(crate::voice::MODEL_FILE);
+            if candidate.is_file() && !found.iter().any(|(_, p)| *p == candidate) {
+                found.push((disk.is_removable(), candidate));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    found
+        .into_iter()
+        .next()
+        .map(|(_, p)| p.to_string_lossy().into_owned())
+}
+
+/// Импорт модели распознавания речи с флешки/диска в данные приложения, с
+/// прогрессом и отменой. Как и импорт моделей движка, регистрируется в общем
+/// PullState — параллельные установки запрещены, отмена одна на всех.
+#[tauri::command]
+pub(crate) async fn import_voice_model(
+    app: tauri::AppHandle,
+    path: String,
+    on_event: Channel<PullEvent>,
+    state: tauri::State<'_, PullState>,
+) -> Result<PullOutcome, String> {
+    let my_cancel = {
+        let mut job = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(active) = job.as_ref() {
+            return Err(format!(
+                "Уже идёт установка «{}» — дождитесь её завершения или отмените.",
+                active.name
+            ));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *job = Some(PullJob {
+            name: "модель распознавания речи".into(),
+            cancel: cancel.clone(),
+        });
+        cancel
+    };
+    let _guard = PullJobGuard(&state);
+
+    let src = resolve_voice_model(&PathBuf::from(path))?;
+    // Размер — быстрая отсечка «не тот файл» (например, соседняя модель whisper):
+    // сказать об этом сразу честнее, чем после копирования сотен мегабайт.
+    let size = std::fs::metadata(&src)
+        .map_err(|e| format!("Не удалось прочитать файл модели: {e}"))?
+        .len();
+    if size != crate::voice::MODEL_BYTES {
+        return Err(format!(
+            "Файл «{}» не похож на модель распознавания речи: его размер {:.0} МБ вместо \
+             {:.0} МБ. Возьмите файл {} из папки «models-stt» на флешке.",
+            src.display(),
+            size as f64 / 1024.0 / 1024.0,
+            crate::voice::MODEL_BYTES as f64 / 1024.0 / 1024.0,
+            crate::voice::MODEL_FILE
+        ));
+    }
+    let dest = crate::voice::model_path(&app).map_err(|e| e.message)?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Не удалось создать каталог для модели: {e}"))?;
+    }
+
+    // Копирование — блокирующий ввод-вывод на десятки секунд: уводим в отдельный
+    // поток, чтобы не занимать асинхронные воркеры (чат продолжает работать).
+    let events = on_event.clone();
+    let cancel = my_cancel.clone();
+    let copied = tauri::async_runtime::spawn_blocking(move || {
+        let mut last_sent: u64 = 0;
+        let mut progress = |done: u64, total: u64, phase: &str, force: bool| {
+            if force || done.saturating_sub(last_sent) >= PROGRESS_STEP {
+                last_sent = done;
+                let _ = events.send(PullEvent::Progress {
+                    status: phase.to_string(),
+                    completed: done,
+                    total,
+                });
+            }
+        };
+        copy_model_file(&src, &dest, crate::voice::MODEL_SHA256, &cancel, &mut progress)
+    })
+    .await
+    .map_err(|e| format!("Импорт прерван: {e}"))??;
+
+    match copied {
+        None => Ok(PullOutcome::Cancelled),
+        Some(bytes) => {
+            let _ = on_event.send(PullEvent::Progress {
+                status: "Модель распознавания речи установлена".to_string(),
+                completed: bytes,
+                total: bytes,
+            });
+            Ok(PullOutcome::Done)
+        }
+    }
+}
+
+/// Копия одиночного файла модели со сверкой sha256 — тем же путём, что и блобы
+/// Ollama: временный `.part`, хэш на лету, переименование только после совпадения.
+/// Some(байты) — скопировано, None — отменено пользователем.
+pub(crate) fn copy_model_file(
+    from: &Path,
+    to: &Path,
+    expected: &str,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64, &str, bool),
+) -> Result<Option<u64>, String> {
+    let total = std::fs::metadata(from)
+        .map_err(|e| format!("Не удалось прочитать «{}»: {e}", from.display()))?
+        .len();
+    // Стадию переименовываем: общий код копирования говорит «Копирование моделей»,
+    // а здесь модель ровно одна и она не про движок.
+    let mut relabel = |done: u64, total: u64, _phase: &str, force: bool| {
+        progress(done, total, "Копирование модели распознавания речи", force)
+    };
+    relabel(0, total, "", true);
+    let mut done = 0u64;
+    let mut copied = 0u64;
+    if !copy_file_chunked(from, to, Some(expected), cancel, &mut done, total, &mut copied, &mut relabel)? {
+        return Ok(None); // отменено посреди файла — частичный .part уже убран
+    }
+    Ok(Some(copied))
 }
 
 // ── Оценка посильности набора моделей (ДО установки) ──────────────────────────
@@ -788,6 +964,98 @@ mod tests {
         assert!(import_core(&src, &dest, &cancel, &mut |_, _, _, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    // Модель распознавания на носителе испортилась (флешка деградировала, запись
+    // оборвалась): импорт обязан отвергнуть её ВНЯТНО и не оставить файл под именем
+    // модели — иначе поломка всплыла бы при первой диктовке у клиента без интернета.
+    #[test]
+    fn voice_model_rejects_wrong_checksum() {
+        let src = tmp("sttsrc");
+        let dest = tmp("sttdest");
+        let from = src.join("ggml-small.bin");
+        std::fs::write(&from, "это не модель распознавания".as_bytes()).unwrap();
+        let to = dest.join("ggml-small.bin");
+
+        let cancel = AtomicBool::new(false);
+        let err = copy_model_file(&from, &to, &"0".repeat(64), &cancel, &mut |_, _, _, _| {})
+            .unwrap_err();
+        assert!(err.contains("повреждён"), "ошибка объясняет причину: {err}");
+        assert!(!to.exists(), "битая модель не опубликована под финальным именем");
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    // Обратная сторона той же проверки: сумма сошлась — файл на месте и целый.
+    /// Импорт с флешки не имеет права трогать незавершённую ЗАГРУЗКУ из интернета:
+    /// у неё тот же целевой файл, и раньше её черновик назывался так же. Сценарий:
+    /// скачали 400 МБ, интернет пропал, принесли флешку — а на ней битый файл.
+    /// Импорт честно отказывает, но 400 МБ загрузки при этом пропадать не должны.
+    #[test]
+    fn failed_import_keeps_download_progress() {
+        let dir = tmp("import-vs-download");
+        let dest = dir.join("ggml-small.bin");
+        // Незавершённая загрузка из интернета — ровно там, где её держит download.rs.
+        let download_part = dir.join("ggml-small.bin.part");
+        std::fs::write(&download_part, vec![7u8; 4096]).unwrap();
+
+        // Источник с неверной контрольной суммой — импорт обязан отказать.
+        let src = dir.join("source.bin");
+        std::fs::write(&src, "не та модель".as_bytes()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut noop = |_: u64, _: u64, _: &str, _: bool| {};
+        let err = copy_model_file(&src, &dest, &"0".repeat(64), &cancel, &mut noop).unwrap_err();
+        assert!(!err.is_empty(), "импорт битого файла должен отказать");
+
+        assert!(
+            download_part.is_file(),
+            "неудачный импорт стёр незавершённую загрузку — 400 МБ пропали бы"
+        );
+        assert_eq!(
+            std::fs::read(&download_part).unwrap().len(),
+            4096,
+            "загрузка повреждена импортом"
+        );
+        assert!(!dest.exists(), "битый файл не должен оказаться установленной моделью");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn voice_model_copies_when_checksum_matches() {
+        let src = tmp("sttok");
+        let dest = tmp("sttokdest");
+        let from = src.join("ggml-small.bin");
+        std::fs::write(&from, BLOB_A).unwrap();
+        let to = dest.join("ggml-small.bin");
+        let want = blob_name(BLOB_A);
+        let want = want.strip_prefix("sha256-").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let copied = copy_model_file(&from, &to, want, &cancel, &mut |_, _, _, _| {})
+            .unwrap()
+            .expect("не отменялся");
+        assert_eq!(copied, BLOB_A.len() as u64);
+        assert_eq!(std::fs::read(&to).unwrap(), BLOB_A);
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    // Пользователь указывает корень флешки, папку models-stt или сам файл — все три
+    // пути обязаны приводить к одному файлу, иначе установщик у клиента заблудится.
+    #[test]
+    fn voice_model_found_by_file_dir_or_root() {
+        let root = tmp("sttroot");
+        let dir = root.join("models-stt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ggml-small.bin");
+        std::fs::write(&file, b"x").unwrap();
+
+        for start in [root.clone(), dir.clone(), file.clone()] {
+            assert_eq!(resolve_voice_model(&start).unwrap(), file, "не нашли от «{}»", start.display());
+        }
+        let err = resolve_voice_model(&tmp("sttempty")).unwrap_err();
+        assert!(err.contains("models-stt"), "подсказка называет нужную папку: {err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

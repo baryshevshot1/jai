@@ -20,7 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       file \
       pkg-config \
       libssl-dev \
+      cmake \
+      libasound2-dev \
+      libclang-dev \
     && rm -rf /var/lib/apt/lists/*
+# cmake — распознавание речи (whisper.cpp собирается из исходников и линкуется
+# статически). libasound2-dev — ALSA, через неё cpal пишет с микрофона на Linux.
+# libclang-dev — bindgen генерирует привязки к C-заголовкам whisper. На macOS он
+# приезжает с Xcode, на чистом Linux его нет: без него сборка падает уже у нас,
+# а не на релизе.
 
 RUN rustup component add clippy rustfmt
 

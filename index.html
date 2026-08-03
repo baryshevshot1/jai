@@ -155,6 +155,12 @@
               <button type="button" class="tool" id="image-btn" title="Прикрепить изображение (PNG, JPG, WEBP)" aria-label="Прикрепить изображение">
                 <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" /></svg>
               </button>
+              <!-- Диктовка. Кнопка скрыта, пока не установлена модель распознавания:
+                   нерабочая кнопка хуже отсутствующей (см. voice.ts → initVoice). -->
+              <button type="button" class="tool voice-btn" id="voice-btn" hidden title="Продиктовать вопрос: нажмите и удерживайте, говорите, отпустите" aria-label="Продиктовать вопрос">
+                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0" /><path d="M12 18v3" /><path d="M9 21h6" /></svg>
+              </button>
+              <span class="voice-state" id="voice-state" hidden aria-live="polite"></span>
               <button type="button" class="think-toggle" id="think-toggle" title="Режим рассуждений модели (медленнее, но точнее)" aria-label="Режим рассуждений">
                 <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.3A7 7 0 0 0 12 2z" /><path d="M9 21h6" /></svg>
                 <span class="pill-label">Размышления</span>
@@ -379,6 +385,22 @@
 
               <div class="model-list" id="diag-list"></div>
               <div class="diag-summary" id="diag-summary" hidden></div>
+
+              <!-- Штамп сборки и журнал. Появились после сессии, где симптомы двух
+                   разных бандлов сравнивались как симптомы одного, а причина отказа
+                   сети («operation timed out») пряталась под зонтичным текстом и не
+                   попадала никуда. Теперь на оба вопроса — «что запущено» и «что
+                   именно сломалось» — отвечает экран, а не память разработчика. -->
+              <details class="diag-tech">
+                <summary class="diag-tech__summary">Технические сведения</summary>
+                <dl class="diag-tech__grid" id="build-info"></dl>
+                <div class="diag-tech__head">
+                  <h3 class="diag-tech__title">Журнал приложения</h3>
+                  <button type="button" class="ep-btn ep-btn--icon" id="journal-refresh">Обновить</button>
+                </div>
+                <div class="diag-tech__path" id="journal-path"></div>
+                <div class="online-log" id="journal-log"></div>
+              </details>
             </section>
 
             <section class="settings-card">

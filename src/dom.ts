@@ -24,6 +24,10 @@ export let hwModelNameEl: HTMLElement;
 export let convListEl: HTMLElement;
 export let newChatBtn: HTMLButtonElement;
 export let thinkToggleEl: HTMLButtonElement;
+// Диктовка: кнопка микрофона в композере и подпись состояния рядом с ней.
+// Кнопки не видно, пока не установлена модель распознавания речи.
+export let voiceBtn: HTMLButtonElement;
+export let voiceStateEl: HTMLElement;
 // Онлайн-режим (агентный): тумблер в композере, поля и журнал в настройках.
 // Отдельного индикатора в шапке нет — состояние видно по самому тумблеру,
 // по источникам под ответом и по журналу обращений в настройках.
@@ -87,6 +91,13 @@ export let modelPullCancelBtn: HTMLButtonElement;
 export let diagRunBtn: HTMLButtonElement;
 export let diagListEl: HTMLElement;
 export let diagSummaryEl: HTMLElement;
+// Технические сведения на экране «Проверка системы»: штамп сборки и журнал.
+// Нужны, чтобы вопросы «что за сборка запущена» и «что именно сломалось»
+// закрывались экраном, а не памятью разработчика.
+export let buildInfoEl: HTMLElement;
+export let journalLogEl: HTMLElement;
+export let journalPathEl: HTMLElement;
+export let journalRefreshBtn: HTMLButtonElement;
 export let appUpdateCheckBtn: HTMLButtonElement;
 export let appUpdateDiskBtn: HTMLButtonElement;
 export let appUpdateInfoEl: HTMLElement;
@@ -144,6 +155,8 @@ export function initDom(): void {
   convListEl = document.querySelector("#conv-list")!;
   newChatBtn = document.querySelector("#new-chat-btn")!;
   thinkToggleEl = document.querySelector("#think-toggle")!;
+  voiceBtn = document.querySelector("#voice-btn")!;
+  voiceStateEl = document.querySelector("#voice-state")!;
   onlineToggleEl = document.querySelector("#online-toggle")!;
   onlineStateTextEl = document.querySelector("#online-state-text")!;
   onlineMasterToggleEl = document.querySelector("#online-master-toggle")!;
@@ -203,6 +216,10 @@ export function initDom(): void {
   diagRunBtn = document.querySelector("#diag-run-btn")!;
   diagListEl = document.querySelector("#diag-list")!;
   diagSummaryEl = document.querySelector("#diag-summary")!;
+  buildInfoEl = document.querySelector("#build-info")!;
+  journalLogEl = document.querySelector("#journal-log")!;
+  journalPathEl = document.querySelector("#journal-path")!;
+  journalRefreshBtn = document.querySelector("#journal-refresh")!;
   appUpdateCheckBtn = document.querySelector("#app-update-check")!;
   appUpdateDiskBtn = document.querySelector("#app-update-disk")!;
   appUpdateInfoEl = document.querySelector("#app-update-info")!;
