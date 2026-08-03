@@ -171,6 +171,7 @@ pub fn run() {
             documents::delete_document,
             documents::documents_empty,
             documents::search_documents,
+            documents::document_fragments,
             models::list_models,
             models::model_states,
             models::check_model_updates,

@@ -3,6 +3,8 @@
 // жив ли движок, всё ли на месте для установки под ключ.
 
 use serde::Serialize;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 use crate::docstore;
@@ -81,10 +83,121 @@ pub(crate) fn detect_hardware() -> Result<HardwareInfo, String> {
     })
 }
 
+// ── Кэш детекта видеопамяти ────────────────────────────────────────────────
+// plan_inference зовёт detect_vram() перед КАЖДЫМ сообщением чата (src/chat.ts), а
+// сам детект на Linux/Windows — это запуск внешней утилиты (nvidia-smi/rocm-smi) или
+// перечисление адаптеров DXGI: сотни мс, а без установленных драйверов — секунды.
+// Объём видеопамяти — паспортная характеристика железа (кэшируем минутами);
+// свободная часть скачет постоянно (кэшируем единицы секунд — то же правило, что и
+// для живых данных о памяти в memory.rs: дольше нельзя, иначе защита от переполнения
+// «отстанет» от реальности).
+
+/// Свободная видеопамять — единицы секунд: покрывает быстрый обмен сообщениями в
+/// одном диалоге, не даёт плану переполнения проглядеть память, занятую только что.
+const VRAM_LIVE_TTL: Duration = Duration::from_secs(5);
+/// Объём видеопамяти в рамках одного запуска приложения не меняется — можно держать
+/// минутами (целевое железо — не горячая замена GPU, см. CLAUDE.md).
+const VRAM_STATIC_TTL: Duration = Duration::from_secs(5 * 60);
+/// Утилита детекта не должна вешать ответ: если процесс завис (битый /proc, залипший
+/// драйвер), таймаут превращает зависание в честное «источник неизвестен», а не в
+/// подвисший ответ модели. Используется только веткой Linux (nvidia-smi/rocm-smi) —
+/// на других ОС детект не запускает внешний процесс.
+#[cfg(target_os = "linux")]
+const VRAM_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct VramCache {
+    total: Option<f64>,
+    free: Option<f64>,
+    source: String,
+    fetched_at: Instant,
+}
+
+static VRAM_CACHE: Mutex<Option<VramCache>> = Mutex::new(None);
+
+/// Решение «отдать закэшированное или переизмерить» — чистая функция от возраста
+/// записи и природы источника (вынесена отдельно ради теста без реального Instant/сна).
+fn vram_cache_fresh(elapsed: Duration, source: &str, free: Option<f64>) -> bool {
+    if elapsed < VRAM_LIVE_TTL {
+        return true;
+    }
+    // Источники, которые «свободно» в принципе не отдают (rocm-smi не умеет,
+    // unified/unknown — там его просто нет): второе число не может измениться само по
+    // себе, значит нет смысла перезапускать утилиту чаще, чем раз в VRAM_STATIC_TTL —
+    // объём всё равно тот же самый.
+    let never_reports_free = free.is_none() && matches!(source, "rocm-smi" | "unified" | "unknown");
+    never_reports_free && elapsed < VRAM_STATIC_TTL
+}
+
+/// Видеопамять машины: объём + свободно сейчас + источник детекта. Обёртка над
+/// detect_vram_uncached() с кэшем (см. vram_cache_fresh) — сам детект платформенный,
+/// ниже по файлу.
+pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+    {
+        let guard = VRAM_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = guard.as_ref() {
+            if vram_cache_fresh(c.fetched_at.elapsed(), &c.source, c.free) {
+                return (c.total, c.free, c.source.clone());
+            }
+        }
+    }
+    let (total, free, source) = detect_vram_uncached();
+    let mut guard = VRAM_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(VramCache { total, free, source: source.clone(), fetched_at: Instant::now() });
+    (total, free, source)
+}
+
+/// Запускает команду с ограничением по времени: не полагаемся на то, что nvidia-smi/
+/// rocm-smi всегда быстрые — если процесс не уложился, убиваем его и честно отдаём
+/// None, а не блокируем поток на неопределённое время. Доступна и под `cfg(test)` —
+/// таймаут проверяется на обычной команде (`sh -c sleep`), без реального nvidia-smi.
+#[cfg(any(target_os = "linux", test))]
+fn output_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Стдаут читаем в фоновом потоке: поллинг try_wait() иначе мог бы дедлокнуться,
+    // допиши утилита в pipe больше системного буфера и заблокируйся сама на записи.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait(); // не оставляем зомби-процесс
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let stdout = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    Some(std::process::Output { status, stdout, stderr: Vec::new() })
+}
+
 // macOS: общая (unified) память — отдельной VRAM нет, уровень считаем по RAM.
 // Возвращаемая тройка везде: (всего, свободно, источник).
 #[cfg(target_os = "macos")]
-pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+fn detect_vram_uncached() -> (Option<f64>, Option<f64>, String) {
     (None, None, "unified".to_string())
 }
 
@@ -93,7 +206,7 @@ pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 // дополнительно спрашиваем СВОБОДНУЮ видеопамять через IDXGIAdapter3 (budget минус
 // уже занятое) — честная доступность, а не паспортный объём.
 #[cfg(target_os = "windows")]
-pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+fn detect_vram_uncached() -> (Option<f64>, Option<f64>, String) {
     use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
@@ -142,18 +255,17 @@ pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
     }
 }
 
-// Linux: nvidia-smi → rocm-smi → неизвестно. Утилиты могут отсутствовать —
-// ошибки гасим (не паникуем), сети нет.
+// Linux: nvidia-smi → rocm-smi → неизвестно. Утилиты могут отсутствовать (ошибки
+// гасим, не паникуем) или зависнуть (VRAM_PROBE_TIMEOUT) — сети нет.
 #[cfg(target_os = "linux")]
-pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+fn detect_vram_uncached() -> (Option<f64>, Option<f64>, String) {
     use std::process::Command;
 
     // NVIDIA: одним вызовом total и free (МиБ), строка на GPU: "8192, 6144".
     // Берём GPU с наибольшим объёмом; free — с той же строки (тот же GPU).
-    if let Ok(out) = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"])
-        .output()
-    {
+    let mut nvidia = Command::new("nvidia-smi");
+    nvidia.args(["--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"]);
+    if let Some(out) = output_with_timeout(nvidia, VRAM_PROBE_TIMEOUT) {
         if out.status.success() {
             let mut best: Option<(f64, f64)> = None; // (total, free) МиБ лучшего GPU
             for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -176,10 +288,9 @@ pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 
     // AMD: rocm-smi --showmeminfo vram --csv. Эвристика: наибольшее число байт
     // в выводе = суммарная VRAM. Свободную честно не знаем → None.
-    if let Ok(out) = Command::new("rocm-smi")
-        .args(["--showmeminfo", "vram", "--csv"])
-        .output()
-    {
+    let mut rocm = Command::new("rocm-smi");
+    rocm.args(["--showmeminfo", "vram", "--csv"]);
+    if let Some(out) = output_with_timeout(rocm, VRAM_PROBE_TIMEOUT) {
         if out.status.success() {
             let max_bytes = String::from_utf8_lossy(&out.stdout)
                 .split(|c: char| !c.is_ascii_digit())
@@ -201,7 +312,7 @@ pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
 
 // Прочие ОС: видеопамять неизвестна, ориентируемся на RAM.
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-pub(crate) fn detect_vram() -> (Option<f64>, Option<f64>, String) {
+fn detect_vram_uncached() -> (Option<f64>, Option<f64>, String) {
     (None, None, "unknown".to_string())
 }
 
@@ -245,7 +356,10 @@ fn parse_version(v: &str) -> [u64; 3] {
 /// Полная самопроверка системы: движок, модели набора, база документов, место на
 /// диске, железо, хранилище данных. Порядок фиксированный — фронт рисует как есть.
 #[tauri::command]
-pub(crate) async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
+pub(crate) async fn run_diagnostics(
+    app: tauri::AppHandle,
+    engine_state: tauri::State<'_, crate::engine::EngineState>,
+) -> crate::error::AppResult<Vec<DiagCheck>> {
     let mut out = Vec::new();
 
     // 1. Движок: отвечает ли, и не старше ли минимально поддерживаемой версии.
@@ -265,6 +379,32 @@ pub(crate) async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
             false
         }
     };
+
+    // 1б. ЧЕЙ движок. Экономные настройки памяти (сколько моделей держать, каким
+    // держать KV-кэш) приложение задаёт переменными окружения при ЗАПУСКЕ движка.
+    // Системный экземпляр мы не трогаем — значит он работает с заводскими
+    // умолчаниями, где моделей в памяти больше, а KV-кэш вдвое толще. На машине с
+    // ограниченной памятью это и есть разница между «работает» и «всё в свопе».
+    // Пользователь и поддержка должны это видеть, а не гадать.
+    if engine_alive && !crate::engine::was_started_by_us(&engine_state) {
+        out.push(diag(
+            "engine-owner",
+            "Режим экономии памяти",
+            "warn",
+            "Движок запущен системой, а не приложением — экономный профиль памяти к \
+             нему не применён. Если приложение подтормаживает или переполняется \
+             память, остановите системную службу Ollama: приложение поднимет свой \
+             экземпляр с бережными настройками."
+                .to_string(),
+        ));
+    } else if engine_alive {
+        out.push(diag(
+            "engine-owner",
+            "Режим экономии памяти",
+            "ok",
+            "Движок запущен приложением — бережные настройки памяти применены".to_string(),
+        ));
+    }
 
     // 2. Модели набора: обязательные должны стоять (список — без движка не получить).
     if engine_alive {
@@ -396,12 +536,12 @@ pub(crate) async fn run_diagnostics(app: tauri::AppHandle) -> Vec<DiagCheck> {
             format!("Не удалось получить каталог данных: {e}"))),
     }
 
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::*;
 
     #[test]
     fn version_parsing_and_ordering() {
@@ -413,5 +553,44 @@ mod tests {
         assert!(parse_version("0.16.9") < [0, 17, 1]);
         assert!(parse_version("0.17.1") >= [0, 17, 1]);
         assert!(parse_version("0.30.0") >= [0, 17, 1]);
+    }
+
+    // Кэш VRAM: живой TTL действует одинаково для всех источников; источники без
+    // «свободно» (rocm-smi/unified/unknown) после этого живут ещё до VRAM_STATIC_TTL —
+    // второе число там в принципе не меняется, перезапускать утилиту незачем.
+    #[test]
+    fn vram_cache_freshness_ttls() {
+        assert!(vram_cache_fresh(Duration::from_secs(1), "nvidia-smi", Some(2.0)));
+        assert!(vram_cache_fresh(Duration::from_secs(1), "dxgi", None));
+        // источник умеет отдавать «свободно» → после LIVE_TTL обязателен переопрос
+        assert!(!vram_cache_fresh(Duration::from_secs(6), "nvidia-smi", Some(2.0)));
+        assert!(!vram_cache_fresh(Duration::from_secs(6), "dxgi", None));
+        // источник «свободно» не отдаёт в принципе → живём дольше, но не вечно
+        assert!(vram_cache_fresh(Duration::from_secs(60), "rocm-smi", None));
+        assert!(vram_cache_fresh(Duration::from_secs(60), "unified", None));
+        assert!(vram_cache_fresh(Duration::from_secs(60), "unknown", None));
+        assert!(!vram_cache_fresh(Duration::from_secs(301), "rocm-smi", None));
+    }
+
+    // Таймаут на внешнюю утилиту: зависший процесс не вешает вызывающего — убиваем и
+    // честно отдаём None вместо ожидания до конца.
+    #[test]
+    fn output_with_timeout_kills_hung_process() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let start = Instant::now();
+        let out = output_with_timeout(cmd, Duration::from_millis(150));
+        assert!(out.is_none());
+        assert!(start.elapsed() < Duration::from_secs(2)); // не ждём зависший процесс до конца
+    }
+
+    // Быстрая команда укладывается в таймаут и отдаёт честный вывод.
+    #[test]
+    fn output_with_timeout_returns_fast_output() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo hello"]);
+        let out = output_with_timeout(cmd, Duration::from_secs(2)).expect("команда должна успеть");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
     }
 }

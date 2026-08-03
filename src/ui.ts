@@ -22,7 +22,7 @@ import {
   stopBtn,
   wizardView,
 } from "./dom";
-import { docSubline, fileFormat, imageDataUrl } from "./util";
+import { docSubline, fileFormat, humanError, imageDataUrl } from "./util";
 
 // ── Ленивый Markdown-рендер ───────────────────────────────────────────────────
 // Тяжёлый рендер (markdown-it + KaTeX + highlight.js + их CSS) — отдельный чанк:
@@ -76,8 +76,79 @@ export function retireRetryButtons() {
     .forEach((b) => (b.hidden = true));
 }
 
-// Панель действий под ответом: «Копировать» — весь ответ как текст (Markdown-исходник,
-// вставляется куда угодно), «Повторить» — перегенерировать ответ на тот же вопрос.
+// HTML отрендеренного ответа → читаемый текст для полей без rich-текста (блокнот,
+// строка поиска и т. п.): innerText сохраняет переносы строк по блочным тегам
+// (иначе таблица и абзацы слиплись бы в одну строку), но снимает звёздочки,
+// решётки и вертикальные палки Markdown — ровно то, что мешало этой аудитории при
+// вставке ответа в письмо. Не привязываемся к DOM.body: временный узел достаточно
+// «отрендерить» вне видимой области — innerText требует раскладки, а не показа.
+function htmlToPlainText(html: string): string {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  tmp.style.position = "fixed";
+  tmp.style.top = "-9999px";
+  tmp.style.left = "-9999px";
+  document.body.appendChild(tmp);
+  const text = typeof tmp.innerText === "string" ? tmp.innerText : (tmp.textContent ?? "");
+  tmp.remove();
+  return text;
+}
+
+// Копирует ответ ассистента ДВУМЯ представлениями одного элемента буфера сразу:
+// text/html (та же разметка, что видна на экране — заголовки, списки, настоящая
+// таблица) и text/plain (тот же текст, но без Markdown-мусора). Аудитория продукта
+// переносит ответ в Word/Outlook/Google Docs — они берут html и вставляют
+// форматирование; поля без rich-текста берут plain. ClipboardItem с text/html
+// поддерживается не везде одинаково (в частности, в webkit2gtk на Linux) — при
+// сбое НЕ теряем результат молча, а откатываемся на обычный writeText(); если и
+// рендер не успел подгрузиться (renderMd ещё null) — копируем как раньше, сырым
+// текстом: содержание важнее формата.
+async function copyAnswer(markdown: string, btn: HTMLButtonElement) {
+  const restore = () => setTimeout(() => (btn.textContent = "Копировать"), 1500);
+
+  await mdReady; // чанк рендера обычно уже подтянулся (грузится в фоне сразу после старта)
+  let html: string | null = null;
+  let plain = markdown;
+  if (renderMd) {
+    try {
+      html = renderMd(markdown);
+      plain = htmlToPlainText(html);
+    } catch {
+      html = null; // рендер упал — копируем как обычный текст, ответ важнее формата
+    }
+  }
+
+  const canRichCopy =
+    !!html && typeof ClipboardItem !== "undefined" && typeof navigator.clipboard?.write === "function";
+  if (canRichCopy) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html as string], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]);
+      btn.textContent = "✓ Скопировано";
+      restore();
+      return;
+    } catch {
+      // Редактор/ОС не поддержали text/html через ClipboardItem — честный откат
+      // ниже, без молчаливой потери: в буфере всё равно окажется читаемый текст.
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(plain);
+    btn.textContent = "✓ Скопировано";
+  } catch {
+    btn.textContent = "Не удалось";
+  }
+  restore();
+}
+
+// Панель действий под ответом: «Копировать» — форматированный ответ (в Word/Outlook/
+// Google Docs вставится с заголовками, списками и таблицей, а не Markdown-исходником),
+// «Повторить» — перегенерировать ответ на тот же вопрос.
 export function addTurnActions(turn: HTMLElement, text: string) {
   const row = document.createElement("div");
   row.className = "msg-actions";
@@ -87,17 +158,7 @@ export function addTurnActions(turn: HTMLElement, text: string) {
   copy.className = "msg-act";
   copy.textContent = "Копировать";
   copy.addEventListener("click", () => {
-    const restore = () => setTimeout(() => (copy.textContent = "Копировать"), 1500);
-    navigator.clipboard.writeText(text).then(
-      () => {
-        copy.textContent = "✓ Скопировано";
-        restore();
-      },
-      () => {
-        copy.textContent = "Не удалось";
-        restore();
-      },
-    );
+    void copyAnswer(text, copy);
   });
   row.appendChild(copy);
 
@@ -452,30 +513,130 @@ export function showChatView() {
 
 // ── Источники под ответом ────────────────────────────────────────────────────
 
+
+
+// Достаёт текст фрагментов ТЕМ ЖЕ локальным поиском (search_documents — целиком на
+// ПК, без сети), которым бэкенд собирал их для ответа. Готового текста фрагмента
+// на фронте не остаётся: SourceRef в истории несёт только имя файла и номер
+// фрагмента (types.ts) — расширять формат сохранённых диалогов ради превью не
+// стали (риск для уже сохранённых файлов), поэтому раскрытие работает, пока в
+// ленте виден вопрос, который его породил, и документ не изменился с тех пор.
+async function fetchFragmentTexts(
+  filename: string,
+  chunkIndexes: number[],
+): Promise<Map<number, string>> {
+  // Читаем фрагменты ПО НОМЕРАМ, а не ищем заново. Повторный семантический поиск
+  // означал бы вычисление эмбеддинга вопроса и загрузку модели поиска — секунды
+  // ожидания и лишняя память ради текста, который уже лежит в базе. Вдобавок поиск
+  // не гарантирует, что вернёт именно те фрагменты, на которых был построен ответ.
+  const rows = await invoke<{ chunk_index: number; text: string }[]>("document_fragments", {
+    filename,
+    chunkIndexes,
+    projectId: state.currentProjectId,
+  });
+  return new Map(rows.map((r) => [r.chunk_index, r.text]));
+}
+
+// Один источник — раскрывающийся чип: свёрнут показывает файл и номера
+// фрагментов (как раньше), по клику вниз разворачивается сам текст фрагмента(ов).
+// Поиск идёт один раз за чип и кэшируется в замыкании — повторные клики только
+// показывают/прячут уже готовую панель.
+function buildSourceChip(filename: string, chunkIndexes: number[]): HTMLElement {
+  const group = document.createElement("span");
+  group.className = "source-group";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "source-chip";
+  btn.setAttribute("aria-expanded", "false");
+  btn.title = "Показать текст фрагмента";
+  const chevron = document.createElement("span");
+  chevron.className = "source-chip__chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+  const name = document.createElement("span");
+  name.className = "source-chip__name";
+  name.textContent = filename;
+  const frag = document.createElement("span");
+  frag.className = "source-chip__frag";
+  frag.textContent = `фрагм. ${chunkIndexes.map((i) => i + 1).join(", ")}`;
+  btn.append(chevron, name, frag);
+
+  const panel = document.createElement("div");
+  panel.className = "source-panel";
+  panel.hidden = true;
+
+  let loaded = false;
+  btn.addEventListener("click", () => {
+    const wasExpanded = btn.getAttribute("aria-expanded") === "true";
+    btn.setAttribute("aria-expanded", String(!wasExpanded));
+    panel.hidden = wasExpanded;
+    if (wasExpanded || loaded) return; // уже сворачиваем либо уже когда-то загрузили
+    loaded = true;
+    void loadFragments();
+  });
+
+  async function loadFragments() {
+    panel.textContent = "Загрузка…";
+    try {
+      const texts = await fetchFragmentTexts(filename, chunkIndexes);
+      panel.textContent = "";
+      for (const idx of chunkIndexes) {
+        const block = document.createElement("div");
+        block.className = "source-frag";
+        const head = document.createElement("div");
+        head.className = "source-frag__head";
+        head.textContent = `Фрагмент ${idx + 1}`;
+        const body = document.createElement("div");
+        const fragText = texts.get(idx);
+        if (fragText) {
+          body.className = "source-frag__text";
+          body.textContent = fragText;
+        } else {
+          body.className = "source-frag__text source-frag__text--missing";
+          body.textContent = "Текст недоступен — документ мог измениться или быть удалён.";
+        }
+        block.append(head, body);
+        panel.appendChild(block);
+      }
+    } catch (e) {
+      panel.textContent = `Не удалось получить фрагмент: ${humanError(e)}`;
+    }
+  }
+
+  group.append(btn, panel);
+  return group;
+}
+
 // Рисует строку источников под ответом — но КАЖДЫЙ документ упоминаем один раз за
 // диалог. Если все источники этого ответа уже показывались ранее — заметку не рисуем
-// (не повторяем под каждым сообщением). Новый документ, попавший в дело, покажем один раз.
+// (не повторяем под каждым сообщением). Новый документ, попавший в дело, покажем один
+// раз — раскрывающимся чипом: клик показывает сам текст фрагмента (запрос не уходит
+// наружу, поиск — тот же локальный search_documents, что и при ответе).
 export function renderSources(turn: HTMLElement, sources: SourceRef[]) {
   if (!sources.length) return;
   const byDoc = new Map<string, number[]>();
   for (const s of sources) {
     if (shownSourceFiles.has(s.filename)) continue; // этот документ уже упоминали
     const arr = byDoc.get(s.filename) ?? [];
-    arr.push(s.chunk_index + 1);
+    if (!arr.includes(s.chunk_index)) arr.push(s.chunk_index);
     byDoc.set(s.filename, arr);
   }
   if (byDoc.size === 0) return; // все источники уже показаны ранее — не повторяемся
   for (const name of byDoc.keys()) shownSourceFiles.add(name);
-  const items = [...byDoc.entries()].map(
-    ([name, frags]) => `${name} (фрагм. ${frags.join(", ")})`,
-  );
+
   const row = document.createElement("div");
   row.className = "sources";
   const label = document.createElement("span");
   label.className = "sources__label";
   label.textContent = "Источники: ";
   row.appendChild(label);
-  row.appendChild(document.createTextNode(items.join("; ")));
+  const list = document.createElement("span");
+  list.className = "sources__list";
+  for (const [name, idxs] of byDoc) {
+    list.appendChild(buildSourceChip(name, idxs.sort((a, b) => a - b)));
+  }
+  row.appendChild(list);
   turn.appendChild(row);
 }
 

@@ -97,10 +97,28 @@ fn normalize_attached_image(bytes: Vec<u8>, ext: &str) -> Result<Vec<u8>, String
 
 /// Извлечение текста из файла. Переиспользуется индексацией базы (Фаза B3),
 /// поэтому вынесено из команды в обычную функцию.
+/// Потолок размера исходного файла. Разборщики читают файл В ПАМЯТЬ целиком, а текст
+/// потом ещё копируется при перекодировке и уезжает в окно через IPC — то есть
+/// гигабайтный файл стоит нескольких гигабайт оперативной памяти и убивает процесс
+/// раньше, чем пользователь увидит ошибку. 64 МБ с запасом покрывают деловые
+/// документы: договор на 500 страниц — это единицы мегабайт.
+const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
+
 fn read_document(path: &str) -> Result<DocumentText, String> {
     let p = std::path::Path::new(path);
     if !p.is_file() {
         return Err("Файл не найден или недоступен".to_string());
+    }
+    // Проверяем ДО чтения: смысл лимита в том, чтобы файл вообще не попал в память.
+    if let Ok(meta) = std::fs::metadata(p) {
+        if meta.len() > MAX_DOCUMENT_BYTES {
+            return Err(format!(
+                "Файл слишком большой ({} МБ). Максимум — {} МБ: документ целиком \
+                 загружается в память. Разделите его на части.",
+                meta.len() / 1024 / 1024,
+                MAX_DOCUMENT_BYTES / 1024 / 1024
+            ));
+        }
     }
     let name = p
         .file_name()
@@ -374,6 +392,36 @@ pub(crate) fn documents_empty(
 ) -> Result<bool, String> {
     let conn = docstore::open(&docstore::db_path(&app)?)?;
     docstore::is_empty(&conn, project_id.as_deref())
+}
+
+/// Текст фрагментов, на которые опирался ответ, — для показа под ним. Читает базу
+/// ПО НОМЕРАМ, не трогая движок: показать источник должно быть мгновенно и
+/// одинаково при каждом открытии. Через поиск это стоило бы вычисления эмбеддинга и
+/// загрузки модели поиска, а результат ещё и мог бы не совпасть с тем, что реально
+/// было в ответе.
+#[tauri::command]
+pub(crate) async fn document_fragments(
+    app: tauri::AppHandle,
+    filename: String,
+    chunk_indexes: Vec<i64>,
+    project_id: Option<String>,
+) -> AppResult<Vec<FragmentText>> {
+    let db = docstore::db_path(&app)?;
+    let rows = tauri::async_runtime::spawn_blocking(move || {
+        let conn = docstore::open(&db)?;
+        docstore::fragments_by_index(&conn, &filename, &chunk_indexes, project_id.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::unknown(format!("Сбой чтения фрагментов: {e}")))?
+    .map_err(AppError::from)?;
+    Ok(rows.into_iter().map(|(chunk_index, text)| FragmentText { chunk_index, text }).collect())
+}
+
+/// Фрагмент документа для показа под ответом.
+#[derive(serde::Serialize)]
+pub(crate) struct FragmentText {
+    chunk_index: i64,
+    text: String,
 }
 
 /// Семантический поиск по базе: эмбеддинг вопроса → KNN top-k фрагментов с
