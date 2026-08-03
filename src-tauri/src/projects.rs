@@ -18,7 +18,7 @@ pub(crate) struct ProjectsLock(pub(crate) std::sync::Mutex<()>);
 // своя база документов; быстрые чаты и общие документы живут вне проектов (None).
 
 /// Проект: имя + опциональные инструкции (системная подсказка для чатов проекта).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct Project {
     id: String,
     name: String,
@@ -37,13 +37,43 @@ fn projects_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("projects.json"))
 }
 
+/// Прочитать список проектов.
+///
+/// «Проектов нет» и «не смог прочитать» — РАЗНЫЕ вещи, и путать их нельзя. Раньше
+/// путались: любой отказ чтения и любой сбой разбора превращались в пустой список.
+/// А сохранение проекта устроено как «прочитать → добавить → записать целиком» —
+/// значит, первое же действие пользователя перезаписывало файл ОДНИМ новым
+/// проектом, и все прежние (с инструкциями и привязанными чатами) исчезали
+/// безвозвратно. У клиента нет ни резервной копии, ни поддержки.
+///
+/// Достаточно было антивируса, на долю секунды залочившего файл в перемещаемом
+/// профиле Windows, или одной ошибки диска.
 fn load_projects(app: &tauri::AppHandle) -> Result<Vec<Project>, String> {
     let path = projects_path(app)?;
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(_) => return Ok(Vec::new()), // файла нет — проектов ещё нет
+        // Файла нет — проектов ещё не заводили. Это единственный отказ чтения,
+        // который действительно означает «пусто».
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "Не удалось прочитать список проектов ({e}). Проекты НЕ потеряны — \
+                 файл на месте: {}. Закройте программы, которые могут его держать \
+                 (антивирус, синхронизация облака), и повторите.",
+                path.display()
+            ))
+        }
     };
-    Ok(serde_json::from_str::<Vec<Project>>(&text).unwrap_or_default())
+    if text.trim().is_empty() {
+        return Ok(Vec::new()); // пустой файл — то же, что и отсутствующий
+    }
+    serde_json::from_str::<Vec<Project>>(&text).map_err(|e| {
+        format!(
+            "Список проектов повреждён и не читается ({e}). Чтобы не потерять его \
+             остатки, программа ничего не перезаписывает. Файл: {}",
+            path.display()
+        )
+    })
 }
 
 fn save_projects(app: &tauri::AppHandle, projects: &[Project]) -> Result<(), String> {
@@ -136,4 +166,63 @@ pub(crate) fn delete_project(
         .filter(|p| p.id != id)
         .collect();
     save_projects(&app, &projects)
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("jai-proj-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Та же логика, что в load_projects, но без AppHandle — проверяем разбор,
+    /// а не путь к каталогу данных.
+    fn load_from(path: &std::path::Path) -> Result<Vec<Project>, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("не прочитать: {e}")),
+        };
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str::<Vec<Project>>(&text).map_err(|e| format!("повреждён: {e}"))
+    }
+
+    /// Повреждённый файл обязан быть ОШИБКОЙ, а не «проектов нет».
+    ///
+    /// Сохранение проекта устроено как «прочитать → добавить → записать целиком».
+    /// Пока повреждение читалось как пустой список, первое же действие
+    /// пользователя перезаписывало файл одним новым проектом — все прежние,
+    /// с инструкциями и привязанными чатами, исчезали навсегда.
+    #[test]
+    fn corrupt_file_is_an_error_not_an_empty_list() {
+        let dir = tmp("corrupt");
+        let f = dir.join("projects.json");
+        std::fs::write(&f, "{ это не тот json").unwrap();
+
+        let err = load_from(&f).unwrap_err();
+        assert!(err.contains("повреждён"), "невнятная причина: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// А отсутствие файла и пустой файл — честно «проектов ещё нет»: это первый
+    /// запуск, и отказывать здесь было бы неверно.
+    #[test]
+    fn missing_or_empty_file_means_no_projects_yet() {
+        let dir = tmp("empty");
+        let missing = dir.join("projects.json");
+        assert_eq!(load_from(&missing).unwrap().len(), 0);
+
+        std::fs::write(&missing, "   \n").unwrap();
+        assert_eq!(load_from(&missing).unwrap().len(), 0);
+
+        std::fs::write(&missing, "[]").unwrap();
+        assert_eq!(load_from(&missing).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

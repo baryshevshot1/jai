@@ -156,7 +156,39 @@ pub(crate) fn self_check(app: &tauri::AppHandle) -> i32 {
         "log_path": info.log_path,
         "problems": problems,
     });
-    println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+    let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+
+    // Отчёт кладём В ФАЙЛ, а не только печатаем.
+    //
+    // На Windows приложение собрано как GUI (windows_subsystem = "windows"): у такого
+    // процесса нет консоли, cmd.exe не передаёт ему свои дескрипторы вывода, и
+    // println! уходит в никуда — молча, без ошибки. То есть единственный инструмент
+    // приёмки не работал ровно на той платформе, которую и надо принимать: владелец
+    // видел пустой экран и не мог отличить «проверка прошла» от «ничего не
+    // выполнилось». Файл читается одинаково на всех системах, и путь к нему мы
+    // печатаем тоже — если печать всё-таки видна.
+    let saved = app.path().app_log_dir().ok().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("self-check.json");
+        std::fs::write(&path, &text).ok()?;
+        Some(path)
+    });
+
+    println!("{text}");
+    if let Some(path) = &saved {
+        println!("\nОтчёт сохранён: {}", path.display());
+    }
+    // Дублируем в журнал: он пишет и в stderr, и в файл, и виден на экране
+    // «Проверка системы» — три независимых пути на случай, если консоли нет.
+    crate::journal::info(
+        "самопроверка",
+        match (&saved, problems.is_empty()) {
+            (Some(p), true) => format!("проблем не найдено, отчёт: {}", p.display()),
+            (Some(p), false) => format!("найдено проблем: {}, отчёт: {}", problems.len(), p.display()),
+            (None, ok) => format!("отчёт не сохранён; проблем: {}", if ok { 0 } else { problems.len() }),
+        },
+    );
+
     if problems.is_empty() {
         0
     } else {

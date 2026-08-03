@@ -123,7 +123,28 @@ pub(crate) async fn ensure_engine(
     state: tauri::State<'_, engine::EngineState>,
 ) -> AppResult<engine::EngineStatus> {
     let exe_override = read_setting_path(&app, "ollama_path");
-    let models_override = read_setting_path(&app, "ollama_models_dir");
+    // Каталог моделей перепроверяем НА КАЖДОМ старте, а не доверяем записанному пути.
+    //
+    // Сценарий, ради которого это здесь: владелец указал каталог моделей прямо на
+    // флешке, флешку вынули — и движок поднимался с несуществующим OLLAMA_MODELS.
+    // Все модели «исчезали»: список пуст, чат отвечать не может, а причина нигде не
+    // названа. Пользователь при этом ничего не менял. Теперь негодный override
+    // игнорируется (уходим на каталог по умолчанию), и об этом сказано в журнале.
+    let models_override = read_setting_path(&app, "ollama_models_dir").filter(|dir| {
+        match engine::validate_models_dir(dir) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::journal::warn(
+                    "движок",
+                    format!(
+                        "каталог моделей «{}» недоступен ({e}) — работаем с каталогом                          по умолчанию. Если это была флешка, вставьте её и нажмите                          обновление в шапке.",
+                        dir.display()
+                    ),
+                );
+                false
+            }
+        }
+    });
     let resource_dir = app.path().resource_dir().ok();
     Ok(engine::ensure(&state, exe_override, models_override, resource_dir).await)
 }

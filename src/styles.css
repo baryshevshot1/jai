@@ -731,7 +731,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: background-color 0.12s ease;
 }
 .brand:hover { background: var(--hover); }
-.brand:active { transform: translateY(0.5px); }
+/* Нажатие НИЧЕГО не двигает: даже полпикселя смещения на иконке читаются как
+   дрожание интерфейса. Отклик даёт цвет фона, а не геометрия. */
+.brand:active { background: var(--hover); }
 .brand-mark {
   position: relative;
   width: 30px;
@@ -1234,6 +1236,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* точка отсчёта для парящей подписи диктовки (.voice-state) */
+  position: relative;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 /* Файл тащат в окно: композер подсвечивается как зона броска — видно, куда бросать
@@ -1246,6 +1250,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .composer:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow);
+}
+/* Идёт запись — это состояние ВСЕЙ карточки, а не мелкой кнопки в углу. Для
+   офлайнового продукта «микрофон открыт» обязано быть невозможно не заметить:
+   обещание о приватности держится на видимости, а не на памяти пользователя.
+   Перебивает и фокус-кольцо — пока пишем, важнее именно это. */
+.composer.is-recording,
+.composer.is-recording:focus-within {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent), var(--shadow);
 }
 .composer textarea {
   border: none;
@@ -1402,6 +1415,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 .doc-chip__remove:hover { color: var(--text); background: var(--hover); }
 
 .composer-bar { display: flex; align-items: center; gap: var(--s2); }
+
+/* Режимы в общем ряду: чуть компактнее инструментов по горизонтали, но той же
+   высоты — ряд обязан читаться одной линией, а не лесенкой.
+   Насыщенность шрифта во включённом состоянии НЕ меняем: смена веса меняет ширину
+   текста, то есть кнопка от собственного нажатия ездила бы. Состояние несут цвет,
+   заливка и точка-индикатор — они на ширину не влияют. */
+.think-toggle {
+  padding: 0 11px 0 9px;
+  font-size: var(--t-sm);
+}
 .tool {
   width: 34px;
   height: 34px;
@@ -1427,14 +1450,40 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   color: var(--danger);
 }
+/* Состояние диктовки — плашка НАД карточкой композера, вынесенная из потока.
+   Пока подпись стояла в ряду кнопок, она отнимала у них место: длинный текст
+   раздвигал ряд и уводил кнопку отправки вправо. Здесь она не занимает места
+   вовсе — ни при какой длине текста, ни при какой ширине окна, — и при этом
+   заметнее, чем была: висит прямо над полем ввода, куда пользователь и смотрит. */
 .voice-state {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  padding: 5px 12px 5px 10px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
   font-size: var(--t-sm);
   color: var(--muted);
-  white-space: nowrap;
   user-select: none;
+  animation: voice-state-in 0.16s ease;
+}
+@keyframes voice-state-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.voice-state__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Моноширинные цифры: иначе на каждой секунде счётчик менял бы ширину и плашка
+     мелко дёргалась. */
+  font-variant-numeric: tabular-nums;
 }
 .voice-state::before {
   content: "";
@@ -1498,13 +1547,22 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* Пока онлайн активен, у тумблера горит живая точка: отдельного бейджа в шапке нет,
    индикатор — сам тумблер. Что именно ушло наружу, видно по источникам под ответом
    и в журнале обращений (Настройки → «Онлайн-режим»). */
-.online-toggle.on::after {
+.online-toggle::after {
   content: "";
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--amber);
   flex-shrink: 0;
+  /* Место под точку зарезервировано ВСЕГДА, видимость меняется прозрачностью.
+     Пока точка появлялась только во включённом состоянии, нажатие «Онлайн»
+     расширяло кнопку на 6 пикселей плюс отступ — и весь ряд дёргался вправо.
+     Кнопка, которая двигает соседей от собственного нажатия, читается как сбой. */
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.online-toggle.on::after {
+  opacity: 1;
   animation: online-pulse 2s ease-out infinite;
 }
 @keyframes online-pulse {
@@ -1846,6 +1904,11 @@ input:focus-visible,
   .conv-list, .doc-list, .project-list { padding-left: var(--s2); padding-right: var(--s2); }
   /* на очень узком окне чип проекта прячем — топбару и так тесно */
   .chat-project-chip { display: none; }
+  /* Режимы сжимаются до значков: подпись «Размышления» на узком экране стоит
+     дороже, чем место под неё. Смысл не теряется — состояние несут цвет, точка
+     и всплывающая подсказка. */
+  .composer-bar .pill-label { display: none; }
+  .composer-bar .think-toggle { padding: 0 9px; }
   .settings-head { padding: var(--s3); }
   .project-name-input { font-size: var(--t-base); }
 }
@@ -1914,3 +1977,34 @@ input:focus-visible,
 .journal-row__msg { user-select: text; overflow-wrap: anywhere; }
 .journal-row--warn .journal-row__msg { color: var(--amber-text); }
 .journal-row--error .journal-row__msg { color: var(--danger); }
+
+/* Защёлкнутая запись — микрофон открыт, а палец кнопку уже не держит.
+   Пока держат, человек про микрофон помнит сам; как только перестали — напоминать
+   обязан экран. Поэтому у защёлки СВОЙ вид: не просто «активна», а заметно живая. */
+.voice-btn.is-latched {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: voice-latched 1.6s ease-in-out infinite;
+}
+@keyframes voice-latched {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+/* Кому анимация мешает (системная настройка «уменьшить движение») — оставляем
+   цвет: он и несёт смысл, мигание лишь усиливает. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-btn.is-latched { animation: none; }
+}
+
+/* Только для экранного диктора: не видно глазами, но читается вслух. В проекте
+   такого хелпера не было — состояние сообщалось исключительно цветом, а цвет
+   не читается ни диктором, ни человеком с нарушением цветовосприятия. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}

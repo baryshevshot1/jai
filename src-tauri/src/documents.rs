@@ -29,14 +29,21 @@ pub(crate) struct DocumentText {
 
 /// Извлекает текст из файла по пути. Тип — по расширению. Чтение только в Rust.
 /// Синхронная команда: тяжёлый разбор (крупный PDF) идёт в пуле потоков Tauri.
-#[tauri::command]
+// ВНИМАНИЕ: `command(async)`, а не просто `command`.
+//
+// У синхронной Tauri-команды тело выполняется в ПОТОКЕ ИНТЕРФЕЙСА, и окно на это
+// время замирает: разбор PDF на десятки страниц или чтение картинки в base64 — это
+// сотни миллисекунд и больше. Атрибут `async` на синхронной функции ничего не
+// делает асинхронным, он лишь уводит вызов в пул потоков — ровно то, что здесь и
+// нужно.
+#[tauri::command(async)]
 pub(crate) fn extract_document(path: String) -> Result<DocumentText, String> {
     read_document(&path)
 }
 
 /// Читает изображение и возвращает СЫРОЙ base64 (без префикса `data:`) для вложения
 /// в сообщение (поле `images` у vision-моделей). Проверяет тип и размер; чтение — в Rust.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn read_image_base64(path: String) -> Result<String, String> {
     use base64::Engine;
     let p = std::path::Path::new(&path);
@@ -95,6 +102,48 @@ fn normalize_attached_image(bytes: Vec<u8>, ext: &str) -> Result<Vec<u8>, String
     Ok(out.into_inner())
 }
 
+/// sha256 файла потоковым чтением — по мегабайту, а не файлом целиком в память.
+/// Ровно тот же приём, что при проверке скачанной модели (download.rs): держать в
+/// памяти сразу весь документ незачем, а на большом файле это разница между
+/// «работает» и «машина в свопе».
+fn sha256_file(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("Сбой чтения файла: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Отказать, если файл больше лимита. Отдельной функцией, а не строчкой внутри
+/// чтения: тот же лимит обязан действовать на КАЖДОМ пути, ведущем к файлу.
+///
+/// Он и не действовал: индексация сначала читала файл целиком (ради sha256) и лишь
+/// потом звала чтение документа с проверкой. Для гигабайтного файла это означало
+/// гигабайтную аллокацию рядом с уже загруженной моделью — своп, зависание на
+/// минуты, а на слабой машине смерть от OOM-киллера. Сообщение «файл слишком
+/// большой» пользователь при этом не видел никогда.
+pub(crate) fn check_size(p: &std::path::Path) -> Result<(), String> {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return Ok(()); // размер неизвестен — не повод отказывать заранее
+    };
+    if meta.len() > MAX_DOCUMENT_BYTES {
+        return Err(format!(
+            "Файл слишком большой ({} МБ). Максимум — {} МБ: документ целиком \
+             загружается в память. Разделите его на части.",
+            meta.len() / 1024 / 1024,
+            MAX_DOCUMENT_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(())
+}
+
 /// Извлечение текста из файла. Переиспользуется индексацией базы (Фаза B3),
 /// поэтому вынесено из команды в обычную функцию.
 /// Потолок размера исходного файла. Разборщики читают файл В ПАМЯТЬ целиком, а текст
@@ -110,16 +159,7 @@ fn read_document(path: &str) -> Result<DocumentText, String> {
         return Err("Файл не найден или недоступен".to_string());
     }
     // Проверяем ДО чтения: смысл лимита в том, чтобы файл вообще не попал в память.
-    if let Ok(meta) = std::fs::metadata(p) {
-        if meta.len() > MAX_DOCUMENT_BYTES {
-            return Err(format!(
-                "Файл слишком большой ({} МБ). Максимум — {} МБ: документ целиком \
-                 загружается в память. Разделите его на части.",
-                meta.len() / 1024 / 1024,
-                MAX_DOCUMENT_BYTES / 1024 / 1024
-            ));
-        }
-    }
+    check_size(p)?;
     let name = p
         .file_name()
         .and_then(|n| n.to_str())
@@ -163,9 +203,18 @@ fn extract_pdf(p: &std::path::Path) -> Result<String, String> {
         .map_err(|_| "Не удалось разобрать PDF: файл в неподдерживаемом формате".to_string())?
         .map_err(|e| format!("Не удалось разобрать PDF: {e}"))?;
     if text.chars().filter(|c| !c.is_whitespace()).count() < 20 {
+        // Текст говорит, ЧТО ДЕЛАТЬ, а не называет этап дорожной карты.
+        //
+        // Прежняя формулировка («OCR появится в этапе по зрению») была неверна
+        // дважды: слова «этап по зрению» бухгалтеру не значат ничего, и главное —
+        // распознавание в продукте УЖЕ ЕСТЬ. Человек со сканом договора получал
+        // отказ, делал вывод, что программа со сканами не работает, и переставал
+        // ими пользоваться, хотя нужно было всего лишь приложить скан картинкой.
         return Err(
-            "Похоже, это PDF-скан (изображение без текстового слоя). \
-             Распознавание текста (OCR) появится в этапе по зрению."
+            "Это скан: в PDF нет текста, только изображение страниц. Такой файл \
+             в базу документов не добавить, но прочитать его можно — приложите \
+             страницу как изображение (кнопка с картинкой рядом с полем ввода), \
+             и текст будет распознан."
                 .to_string(),
         );
     }
@@ -257,12 +306,10 @@ pub(crate) async fn index_document(
     let (sha, doc, chunks) = {
         let path = path.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let bytes =
-                std::fs::read(&path).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let sha: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-            drop(bytes); // hash посчитан — не держим весь файл, пока идёт разбор
+            // Лимит — ПЕРВЫМ действием, до единого прочитанного байта. Иначе он не
+            // лимит: раньше файл сначала целиком уезжал в память ради хэша.
+            check_size(std::path::Path::new(&path))?;
+            let sha = sha256_file(&path)?;
             let doc = read_document(&path)?;
             let chunks = chunk::chunk_text(&doc.text);
             Ok::<_, String>((sha, doc, chunks))
@@ -368,7 +415,7 @@ pub(crate) async fn index_document(
 }
 
 /// Список документов проекта (project_id=None — вне проектов), для интерфейса.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn list_documents(
     app: tauri::AppHandle,
     project_id: Option<String>,
@@ -378,14 +425,14 @@ pub(crate) fn list_documents(
 }
 
 /// Удаление документа из базы (вместе с фрагментами и векторами).
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn delete_document(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     let conn = docstore::open(&docstore::db_path(&app)?)?;
     docstore::delete_document(&conn, id)
 }
 
 /// Пуста ли база документов проекта (фронт решает, включать ли поиск перед вопросом).
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn documents_empty(
     app: tauri::AppHandle,
     project_id: Option<String>,
@@ -501,5 +548,62 @@ mod tests {
     fn corrupt_webp_gives_friendly_error() {
         let err = normalize_attached_image(vec![0u8; 10], "webp").unwrap_err();
         assert!(err.contains("WEBP"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod size_limit_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("jai-doc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Лимит обязан отказывать ДО чтения файла в память.
+    ///
+    /// Индексация раньше сначала читала файл целиком (ради sha256) и лишь потом
+    /// звала чтение документа с проверкой. На файле в пару гигабайт это означало
+    /// такую же аллокацию рядом с загруженной моделью: своп, зависание на минуты,
+    /// а на офисной машине с 8 ГБ — смерть от OOM-киллера. При этом сообщения
+    /// «файл слишком большой» пользователь не видел никогда.
+    #[test]
+    fn oversized_file_is_refused_before_reading() {
+        let dir = tmp("too-big");
+        let big = dir.join("огромный.txt");
+        // Разреженный файл: на диске занимает байты, а по метаданным — больше лимита.
+        // Так проверка меряет ровно то, что меряла бы у пользователя, а тест не
+        // тратит гигабайт.
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_DOCUMENT_BYTES + 1).unwrap();
+        drop(f);
+
+        let err = check_size(&big).unwrap_err();
+        assert!(err.contains("слишком большой"), "невнятный отказ: {err}");
+        assert!(err.contains("Максимум"), "в отказе нет лимита: {err}");
+
+        // И тот же файл в пределах лимита проходит.
+        let ok = dir.join("обычный.txt");
+        std::fs::write(&ok, "договор").unwrap();
+        assert!(check_size(&ok).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Хэш считается потоково и совпадает с эталоном: если бы функция читала файл
+    /// целиком, лимит выше защищал бы уже после аллокации.
+    #[test]
+    fn sha256_matches_and_streams() {
+        let dir = tmp("sha");
+        let f = dir.join("d.txt");
+        std::fs::write(&f, "договор аренды").unwrap();
+
+        let got = sha256_file(f.to_str().unwrap()).unwrap();
+        let mut h = Sha256::new();
+        h.update("договор аренды".as_bytes());
+        let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(got, want);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

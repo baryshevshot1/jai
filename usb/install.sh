@@ -51,21 +51,59 @@ for pat in "Jarvis.AI_*_amd64.deb" "Jarvis.AI_*_amd64.AppImage"; do
 done
 DEB=$(ls "$DIR"/Jarvis.AI_*_amd64.deb 2>/dev/null | head -1 || true)
 APPIMAGE=$(ls "$DIR"/Jarvis.AI_*_amd64.AppImage 2>/dev/null | head -1 || true)
+# Установка AppImage — запасной путь. Вынесена в функцию, потому что нужна в ДВУХ
+# случаях: когда .deb нет вовсе и когда .deb не поставился.
+install_appimage() {
+  # exFAT не хранит бит исполнения — AppImage обязан переехать на диск.
+  local target="$HOME/Приложения"
+  echo " [2/2] Приложение (AppImage) → $target…"
+  mkdir -p "$target"
+  cp "$APPIMAGE" "$target/"
+  chmod +x "$target/$(basename "$APPIMAGE")"
+  echo "       Запуск: $target/$(basename "$APPIMAGE")"
+  echo "       (если не стартует — установите libfuse2: sudo apt install libfuse2)"
+}
+
+INSTALLED=""
 if [ -n "$DEB" ] && command -v apt-get >/dev/null 2>&1; then
   echo " [2/2] Приложение (.deb, нужен sudo)…"
-  sudo apt-get install -y "$DEB"
-  echo "       Готово: ищите «Jarvis AI» в меню приложений."
+  # ВАЖНО: не даём apt уронить весь скрипт.
+  #
+  # Раньше здесь стоял голый `sudo apt-get install -y "$DEB"`, а AppImage был в
+  # ветке `elif` — то есть рассматривался, только если .deb НЕ НАЙДЕН, а не если
+  # он не поставился. Вместе с `set -e` и ERR-trap это означало: у клиента без
+  # интернета, где apt не может дотянуть libwebkit2gtk, установка обрывалась
+  # насмерть — при том что рядом на флешке лежал самодостаточный AppImage,
+  # которому эти зависимости не нужны. Установка «под ключ» срывалась на ровном
+  # месте, и владелец узнавал об этом уже у клиента.
+  if sudo apt-get install -y "$DEB"; then
+    INSTALLED="deb"
+    echo "       Готово: ищите «Jarvis AI» в меню приложений."
+  else
+    echo
+    echo "       Пакет .deb не поставился — обычно это нехватка системных"
+    echo "       библиотек, которые без интернета не дотянуть."
+    if [ -n "$APPIMAGE" ]; then
+      echo "       Перехожу на запасной путь: AppImage, ему зависимости не нужны."
+      echo
+      install_appimage
+      INSTALLED="appimage"
+    fi
+  fi
 elif [ -n "$APPIMAGE" ]; then
-  # exFAT не хранит бит исполнения — AppImage обязан переехать на диск.
-  TARGET="$HOME/Приложения"
-  echo " [2/2] Приложение (AppImage) → $TARGET…"
-  mkdir -p "$TARGET"
-  cp "$APPIMAGE" "$TARGET/"
-  chmod +x "$TARGET/$(basename "$APPIMAGE")"
-  echo "       Запуск: $TARGET/$(basename "$APPIMAGE")"
-  echo "       (если не стартует — установите libfuse2: sudo apt install libfuse2)"
-else
-  echo " [2/2] Не найден ни .deb, ни .AppImage рядом со скриптом."
+  install_appimage
+  INSTALLED="appimage"
+fi
+
+if [ -z "$INSTALLED" ]; then
+  echo
+  if [ -n "$DEB" ]; then
+    echo " Приложение установить не удалось: .deb не поставился, а AppImage на"
+    echo " флешке нет. Пересоберите флешку с AppImage (tools/make-usb.sh) —"
+    echo " он ставится на любой дистрибутив и не требует интернета."
+  else
+    echo " [2/2] Не найден ни .deb, ни .AppImage рядом со скриптом."
+  fi
   exit 1
 fi
 

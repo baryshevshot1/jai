@@ -28,6 +28,9 @@ export let thinkToggleEl: HTMLButtonElement;
 // Кнопки не видно, пока не установлена модель распознавания речи.
 export let voiceBtn: HTMLButtonElement;
 export let voiceStateEl: HTMLElement;
+// Область для экранного диктора: сюда пишется смена ЭТАПА диктовки, а не
+// бегущий счётчик — иначе диктор перебивал бы сам себя всю запись.
+export let voiceAnnounceEl: HTMLElement;
 // Онлайн-режим (агентный): тумблер в композере, поля и журнал в настройках.
 // Отдельного индикатора в шапке нет — состояние видно по самому тумблеру,
 // по источникам под ответом и по журналу обращений в настройках.
@@ -157,6 +160,7 @@ export function initDom(): void {
   thinkToggleEl = document.querySelector("#think-toggle")!;
   voiceBtn = document.querySelector("#voice-btn")!;
   voiceStateEl = document.querySelector("#voice-state")!;
+  voiceAnnounceEl = document.querySelector("#voice-announce")!;
   onlineToggleEl = document.querySelector("#online-toggle")!;
   onlineStateTextEl = document.querySelector("#online-state-text")!;
   onlineMasterToggleEl = document.querySelector("#online-master-toggle")!;
