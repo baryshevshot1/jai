@@ -9,12 +9,12 @@
 | Команда | Rust | Аргументы (Rust → ключ JS) | Возврат (Ok / Err) | Вызовы с фронта | Обработка ошибки | Статус |
 |---|---|---|---|---|---|---|
 | `agentic_chat` | src-tauri/src/agent.rs:71 | `model:String`→`model`; `messages:Vec<serde_json::Value>`→`messages`; `think:bool`→`think`; `num_ctx:Option<u64>`→`numCtx`; `gentle:Option<bool>`→`gentle`; `on_event:Channel<ChatEvent>`→`onEvent` | AppResult<String>; online-mode-off refusal is Err(&str.into()) → AppError{code:'unknown', message} (error.rs:79-83) | src/chat.ts:718 | same try/catch as chat_stream | чисто |
-| `assess_models` | ? | — | Result<Vec<ModelAssessment>, String>; ModelAssessment (provision.rs:744-755, no serde attrs): tag/role/title: String, required/installed: bool, size_gb: f64, approx: bool, verdict: String ("ok"|"tight"|"no"), limiting… | ? | try | чисто |
+| `assess_models` | ? | — | Result<Vec<ModelAssessment>, String>; ModelAssessment (provision.rs:744-755, no serde attrs): tag/role/title: String, required/installed: bool, size_gb: f64, approx: bool, verdict: String ("ok"\|"tight"\|"no"), limiting… | ? | try | чисто |
 | `build_info` | ? | — | ? | ? | enclosing try/catch | чисто |
 | `cancel_pull` | src-tauri/src/models.rs:205 | — | () — infallible, no Result | src/pull.ts:104; src/settings.ts:853 | catch-swallowed intentionally | чисто |
 | `cancel_stream` | src-tauri/src/chat.rs:408 | — | () — infallible, no Result | src/ui.ts:477 | catch-swallowed intentionally | чисто |
 | `chat_stream` | src-tauri/src/chat.rs:139 | `model:String`→`model`; `messages:Vec<ChatMessage>`→`messages`; `think:bool`→`think`; `num_ctx:Option<u64>`→`numCtx`; `gentle:Option<bool>`→`gentle`; `on_event:Channel<ChatEvent>`→`onEvent` | AppResult<String> — T=String (full answer text); E=AppError {code: snake_case string, message: String} (error.rs:34-38, codes error.rs:17-30) | src/chat.ts:718 | enclosing try/catch | чисто |
-| `check_model_updates` | ? | — | AppResult<Vec<UpdateStatus>>; UpdateStatus (models.rs:380-386, no rename_all): tag: String, status: String ("not_installed"|"unsupported"|"current"|"update"|"error"), message: Option<String> with #[serde(skip_serializ… | ? | try | ⚠ type-drift |
+| `check_model_updates` | ? | — | AppResult<Vec<UpdateStatus>>; UpdateStatus (models.rs:380-386, no rename_all): tag: String, status: String ("not_installed"\|"unsupported"\|"current"\|"update"\|"error"), message: Option<String> with #[serde(skip_serializ… | ? | try | ⚠ type-drift |
 | `clear_conversations` | src-tauri/src/history.rs | — | ? | src/conversations.ts | try/catch | чисто |
 | `clear_engine_overrides` | src-tauri/src/settings.rs:109 | — | ? | ? | try/catch | чисто |
 | `clear_outbound_log` | src-tauri/src/agent.rs:363 | — | Result<(), String> — E is plain String | src/online.ts:85 | try/catch | чисто |
@@ -31,7 +31,7 @@
 | `find_voice_model_source` | ? | — | ? | ? | enclosing try/catch | чисто |
 | `get_outbound_log` | src-tauri/src/agent.rs:355 | — | Vec<OutboundLogEntry> (infallible); OutboundLogEntry (agent.rs:299-304): ts:i64, host:String, tool:String, query:String, plain Serialize no rename — matches TS OutboundLogEntry (src/types.ts:173-178) | src/online.ts:98 | try/catch | чисто |
 | `get_setting` | src-tauri/src/settings.rs | `key:String`→`key` | ? | src/models.ts; src/online.ts; src/online.ts; src/settings.ts; src/settings.ts; src/settings.ts; src/settings.ts; src/settings.ts; src/settings.ts; src/settings.ts; src/settings.ts | try/catch; общий try/catch; тот же catch | чисто |
-| `import_models_from_dir` | ? | `:`→`path`; `:`→`onEvent (camelCase → snake_case default mapping)` | Result<PullOutcome, String>; PullOutcome enum (models.rs:57-62) #[serde(rename_all = "lowercase")] → "done" | "cancelled". Channel payload PullEvent (models.rs:44-52) #[serde(tag="type", rename_all="lowercase")] → { t… | ? | try | чисто |
+| `import_models_from_dir` | ? | `:`→`path`; `:`→`onEvent (camelCase → snake_case default mapping)` | Result<PullOutcome, String>; PullOutcome enum (models.rs:57-62) #[serde(rename_all = "lowercase")] → "done" \| "cancelled". Channel payload PullEvent (models.rs:44-52) #[serde(tag="type", rename_all="lowercase")] → { t… | ? | try | чисто |
 | `import_voice_model` | ? | — | ? | ? | same runVoiceInstall try/catch: humanError | чисто |
 | `index_document` | ? | `path:String`→`path`; `project_id:Option<String>`→`projectId`; `on_progress:Channel<IndexProgress>`→`onProgress (Channel from @tauri-apps/api/core; events {phase: string, current: usize, total: usize})` | ? | ? | try/catch at documents.ts:225-255; flashIndexLabel | чисто |
 | `install_update_from_disk` | ? | — | ? | ? | enclosing try/catch | чисто |
@@ -46,7 +46,7 @@
 | `model_states` | ? | — | ? | ?; ?; ?; ? | try/catch at models.ts:338-347; modelsStatus; try/catch at models.ts:95-100; swallowed but titlesAsked res; try/catch at wizard.ts:346-369; catch pushes an honest info ; try/catch at wizard.ts:50-57; error swallowed with explanato | чисто |
 | `ollama_version` | ? | — | Result<String, String> — plain version string | ?; ? | try | чисто |
 | `plan_inference` | ? | `:`→`model` | AppResult<InferencePlan>; InferencePlan (memory.rs:420-428, no serde attrs): action: String, model: String, num_ctx: u64, reason: Option<String> (serialized as null when None — no skip attr), original_model: String, n… | ? | try | чисто |
-| `pull_model` | src-tauri/src/models.rs:70 | `name:String`→`name`; `on_event:Channel<PullEvent>`→`onEvent` | AppResult<PullOutcome>; PullOutcome (models.rs:57-62) rename_all=lowercase → 'done'|'cancelled', matches TS PullOutcome (src/types.ts:54); E=AppError | src/pull.ts:84 | try/catch | чисто |
+| `pull_model` | src-tauri/src/models.rs:70 | `name:String`→`name`; `on_event:Channel<PullEvent>`→`onEvent` | AppResult<PullOutcome>; PullOutcome (models.rs:57-62) rename_all=lowercase → 'done'\|'cancelled', matches TS PullOutcome (src/types.ts:54); E=AppError | src/pull.ts:84 | try/catch | чисто |
 | `read_image_base64` | ? | `path:String`→`path` | ? | ? | try/catch at attachments.ts:175-180; addError | чисто |
 | `reload_engine` | src-tauri/src/settings.rs:156 | — | ? | ?; ? | try/catch | ⚠ type-drift |
 | `run_diagnostics` | ? | — | AppResult<Vec<DiagCheck>>; DiagCheck (diagnostics.rs:519-524, no serde attrs): id/title/status: &'static str, detail: String. Body never constructs Err — every failure becomes a "fail" row; unconditional Ok(out) at di… | ? | try | ⚠ type-drift |
